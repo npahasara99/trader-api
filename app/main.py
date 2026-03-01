@@ -18,7 +18,13 @@ from .logic import (
 # Create tables
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Trader Backend (Stocks Only)")
+app = FastAPI(
+    title="Trader Backend (Stocks Only)",
+    version="0.1.0",
+    servers=[
+        {"url": "https://trader-api-production-7875.up.railway.app", "description": "Production"}
+    ],
+)
 
 # --- Requests/Responses ---
 class ScanRequest(BaseModel):
