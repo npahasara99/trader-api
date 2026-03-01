@@ -46,10 +46,10 @@ class PlanRowOut(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     ticker: str
-    last: float
-    entry: float
-    stop: float
-    take_profit: float
+    last: Optional[float] = None
+    entry: Optional[float] = None
+    stop: Optional[float] = None
+    take_profit: Optional[float] = None
     max_hold_date: Optional[datetime] = None
 
     strategy_action: Optional[str] = None
