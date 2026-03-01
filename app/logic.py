@@ -1,0 +1,64 @@
+from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
+import yfinance as yf
+
+@dataclass
+class PlanRow:
+    ticker: str
+    last: float
+    entry: float
+    stop: float
+    take_profit: float
+    strategy_action: str
+    strategy_reason: str
+    max_hold_date: datetime | None
+    llm_action: str | None = None
+    llm_rationale: str | None = None
+
+def get_last_price(ticker: str) -> float | None:
+    try:
+        ticker_obj = yf.Ticker(ticker)
+        hist = ticker_obj.history(period="5d", interval="1d")
+        if hist.empty:
+            return None
+        return float(hist["Close"].iloc[-1])
+    except Exception:
+        return None
+
+def scan_swing_candidates_largecaps(universe: list[str], top_n: int = 8) -> list[str]:
+    # TODO: replace with your existing scan logic
+    # keep it simple for now: return first N
+    return universe[:top_n]
+
+def build_swing_plan(tickers: list[str]) -> list[PlanRow]:
+    # TODO: replace with your full swing_planner_core + llm overlay flow
+    rows = []
+    for t in tickers:
+        last = get_last_price(t) or 0.0
+        entry = last
+        stop = last * 0.97
+        take_profit = last * 1.06
+        rows.append(
+            PlanRow(
+                ticker=t,
+                last=last,
+                entry=entry,
+                stop=stop,
+                take_profit=take_profit,
+                strategy_action="HOLD / WAIT",
+                strategy_reason="placeholder",
+                max_hold_date=datetime.now(timezone.utc) + timedelta(days=20),
+            )
+        )
+    return rows
+
+def evaluate_plan_row(entry: float, stop: float, take_profit: float, last_price: float, max_hold_date: datetime | None):
+    outcome = "Open / In range"
+    if last_price <= stop:
+        outcome = "SL hit"
+    elif last_price >= take_profit:
+        outcome = "TP hit"
+    if max_hold_date and datetime.now(timezone.utc) > max_hold_date:
+        outcome = "Expired"
+    ret = (last_price - entry) / max(entry, 1e-9)
+    return outcome, ret
