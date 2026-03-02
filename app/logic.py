@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 import yfinance as yf
-
+import os
+import requests
+from dateutil.parser import isoparse
 @dataclass
 class PlanRow:
     ticker: str
@@ -12,6 +14,7 @@ class PlanRow:
     strategy_action: str
     strategy_reason: str
     max_hold_date: datetime | None
+    news: list[dict] | None = None
     llm_action: str | None = None
     llm_rationale: str | None = None
 
@@ -44,8 +47,8 @@ def build_swing_plan(tickers: list[str]) -> list[PlanRow]:
 
     for t in tickers:
         last = get_last_price(t)
+        news = get_company_news_summary(t, days=7, limit=5)
 
-        # If price fetch fails, do NOT fabricate 0.0 values
         if last is None:
             rows.append(
                 PlanRow(
@@ -55,8 +58,9 @@ def build_swing_plan(tickers: list[str]) -> list[PlanRow]:
                     stop=None,
                     take_profit=None,
                     strategy_action="NO DATA",
-                    strategy_reason="Price unavailable (data provider error / rate limit)",
+                    strategy_reason="Price unavailable (Finnhub quote failed or key missing)",
                     max_hold_date=datetime.now(timezone.utc) + timedelta(days=20),
+                    news=news,
                 )
             )
             continue
@@ -75,6 +79,7 @@ def build_swing_plan(tickers: list[str]) -> list[PlanRow]:
                 strategy_action="HOLD / WAIT",
                 strategy_reason="placeholder",
                 max_hold_date=datetime.now(timezone.utc) + timedelta(days=20),
+                news=news,
             )
         )
 
@@ -90,3 +95,52 @@ def evaluate_plan_row(entry: float, stop: float, take_profit: float, last_price:
         outcome = "Expired"
     ret = (last_price - entry) / max(entry, 1e-9)
     return outcome, ret
+
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
+FINNHUB_BASE = "https://finnhub.io/api/v1"
+
+def finnhub_get(path: str, params: dict) -> dict | None:
+    if not FINNHUB_API_KEY:
+        return None
+    try:
+        r = requests.get(
+            f"{FINNHUB_BASE}{path}",
+            params={**params, "token": FINNHUB_API_KEY},
+            timeout=10,
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+def get_last_price(ticker: str) -> float | None:
+    data = finnhub_get("/quote", {"symbol": ticker})
+    # Finnhub quote fields: c=current price
+    if not data or data.get("c") in (None, 0):
+        return None
+    return float(data["c"])
+
+def get_company_news_summary(ticker: str, days: int = 7, limit: int = 5) -> list[dict]:
+    """
+    Returns list of: {headline, summary, source, datetime, url}
+    """
+    now = datetime.now(timezone.utc)
+    frm = (now - timedelta(days=days)).date().isoformat()
+    to = now.date().isoformat()
+
+    data = finnhub_get("/company-news", {"symbol": ticker, "from": frm, "to": to})
+    if not data or not isinstance(data, list):
+        return []
+
+    items = []
+    for x in data[: max(limit, 0)]:
+        items.append(
+            {
+                "headline": x.get("headline"),
+                "summary": x.get("summary"),
+                "source": x.get("source"),
+                "datetime": datetime.fromtimestamp(int(x.get("datetime", 0)), tz=timezone.utc).isoformat(),
+                "url": x.get("url"),
+            }
+        )
+    return items

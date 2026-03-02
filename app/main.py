@@ -54,6 +54,9 @@ class PlanRowOut(BaseModel):
 
     strategy_action: Optional[str] = None
     strategy_reason: Optional[str] = None
+
+    news: Optional[List[NewsItem]] = None
+
     llm_action: Optional[str] = None
     llm_rationale: Optional[str] = None
 
@@ -86,6 +89,7 @@ def plan_swing(req: PlanRequest):
                 strategy_reason=r.strategy_reason,  # ✅ correct
                 llm_action=r.llm_action,
                 llm_rationale=r.llm_rationale,
+                news=[NewsItem(**n) for n in (r.news or [])],
             )
         )
 
@@ -95,6 +99,13 @@ class LogRequest(BaseModel):
     mode: str = "manual"
     rows: List[PlanRowOut]
     meta: dict = Field(default_factory=dict)
+
+class NewsItem(BaseModel):
+    headline: Optional[str] = None
+    summary: Optional[str] = None
+    source: Optional[str] = None
+    datetime: Optional[str] = None
+    url: Optional[str] = None
 
 @app.post("/history/log")
 def log_history(req: LogRequest, db: Session = Depends(get_db)):
