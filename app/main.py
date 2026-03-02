@@ -146,46 +146,62 @@ class LogRequest(BaseModel):
     meta: dict = Field(default_factory=dict)
 
 
-@app.post("/history/log")
+from fastapi import HTTPException  # make sure this import exists
+
 @app.post("/history/log")
 def log_history(req: LogRequest, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
     rows_logged = 0
 
-    for r in req.rows:
-        # Skip rows that have no price data (DB columns are NOT NULL)
-        if r.entry is None or r.stop is None or r.take_profit is None:
-            continue
+    try:
+        for r in req.rows:
+            # Skip rows that have no price data (DB columns are NOT NULL)
+            if r.entry is None or r.stop is None or r.take_profit is None:
+                continue
 
-        # Safely convert numeric fields
-        entry_val = float(r.entry)
-        stop_val = float(r.stop)
-        tp_val = float(r.take_profit)
+            # Convert numeric fields (safe now because not None)
+            entry_val = float(r.entry)
+            stop_val = float(r.stop)
+            tp_val = float(r.take_profit)
 
-        db.add(
-            SwingDecision(
-                ticker=r.ticker,
-                planned_at=req.planned_at,
-                mode=req.mode,
-                entry=entry_val,
-                stop=stop_val,
-                take_profit=tp_val,
-                max_hold_date=r.max_hold_date,
-                strategy_action=r.strategy_action,
-                strategy_reason=r.strategy_reason,
-                llm_used=bool(req.meta.get("llm_used", False)),
-                llm_provider=req.meta.get("llm_provider"),
-                llm_model=req.meta.get("llm_model"),
-                llm_style=req.meta.get("llm_style"),
-                llm_action=r.llm_action,
-                llm_rationale=r.llm_rationale,
-                news_score=r.news_score,
-                news_json=json.dumps([n.model_dump() for n in (r.news or [])]),
+            # Convert news items safely (works whether items are dicts or Pydantic models)
+            news_items = []
+            for n in (r.news or []):
+                if isinstance(n, dict):
+                    news_items.append(n)
+                else:
+                    # pydantic BaseModel
+                    news_items.append(n.model_dump())
+
+            db.add(
+                SwingDecision(
+                    ticker=r.ticker,
+                    planned_at=req.planned_at,
+                    mode=req.mode,
+                    entry=entry_val,
+                    stop=stop_val,
+                    take_profit=tp_val,
+                    max_hold_date=r.max_hold_date,
+                    strategy_action=r.strategy_action,
+                    strategy_reason=r.strategy_reason,
+                    llm_used=bool(req.meta.get("llm_used", False)),
+                    llm_provider=req.meta.get("llm_provider"),
+                    llm_model=req.meta.get("llm_model"),
+                    llm_style=req.meta.get("llm_style"),
+                    llm_action=r.llm_action,
+                    llm_rationale=r.llm_rationale,
+                    news_score=int(r.news_score) if r.news_score is not None else None,
+                    news_json=json.dumps(news_items),
+                )
             )
-        )
-        rows_logged += 1
+            rows_logged += 1
 
-    db.commit()
-    return {"ok": True, "rows_logged": rows_logged}
+        db.commit()
+        return {"ok": True, "rows_logged": rows_logged}
+
+    except Exception as e:
+        db.rollback()
+        # Return the real error so you can see it in GPT / curl instead of a generic 500
+        raise HTTPException(status_code=500, detail=f"Logging failed: {e}")
 
 @app.get("/history/evaluate")
 def evaluate_history(limit: int = 200, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
