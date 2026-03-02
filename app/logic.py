@@ -17,6 +17,7 @@ class PlanRow:
     news: list[dict] | None = None
     llm_action: str | None = None
     llm_rationale: str | None = None
+    news_score: int = 0
 
 import yfinance as yf
 
@@ -42,12 +43,81 @@ def scan_swing_candidates_largecaps(universe: list[str], top_n: int = 8) -> list
     # keep it simple for now: return first N
     return universe[:top_n]
 
+from datetime import datetime, timezone
+import re
+
+POSITIVE_KWS = [
+    "beat", "beats", "upgrade", "raises", "raise", "record", "surge", "partnership",
+    "launch", "expands", "expansion", "buyback", "strong", "bullish", "wins", "milestone"
+]
+NEGATIVE_KWS = [
+    "miss", "misses", "downgrade", "cuts", "cut", "lawsuit", "probe", "investigation",
+    "layoff", "layoffs", "weak", "bearish", "recall", "fall", "plunge", "risk"
+]
+
+def _kw_score(text: str) -> int:
+    t = text.lower()
+    score = 0
+    for kw in POSITIVE_KWS:
+        if kw in t:
+            score += 2
+    for kw in NEGATIVE_KWS:
+        if kw in t:
+            score -= 2
+    return score
+
+def compute_news_score(news_items: list[dict]) -> int:
+    """
+    Returns an integer score roughly in [-20, +20] (not bounded strictly).
+    Uses headline+summary keywords and recency decay.
+    """
+    if not news_items:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    total = 0.0
+
+    for item in news_items:
+        headline = (item.get("headline") or "").strip()
+        summary = (item.get("summary") or "").strip()
+        text = f"{headline}. {summary}"
+
+        base = _kw_score(text)
+
+        # Recency decay: newer news weighs more
+        # We stored item["datetime"] as ISO string; handle safely
+        w = 1.0
+        dt_str = item.get("datetime")
+        try:
+            dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00")) if dt_str else None
+        except Exception:
+            dt = None
+
+        if dt:
+            age_hours = max(0.0, (now - dt).total_seconds() / 3600.0)
+            # 0-24h: 1.0, 24-72h: 0.6, 72h+: 0.3
+            if age_hours <= 24:
+                w = 1.0
+            elif age_hours <= 72:
+                w = 0.6
+            else:
+                w = 0.3
+
+        total += base * w
+
+    # Round to int for clean API output
+    return int(round(total))
+
+
 def build_swing_plan(tickers: list[str]) -> list[PlanRow]:
     rows: list[PlanRow] = []
 
     for t in tickers:
         last = get_last_price(t)
         news = get_company_news_summary(t, days=7, limit=5)
+
+        # 🔥 Compute score HERE
+        score = compute_news_score(news)
 
         if last is None:
             rows.append(
@@ -61,6 +131,7 @@ def build_swing_plan(tickers: list[str]) -> list[PlanRow]:
                     strategy_reason="Price unavailable (Finnhub quote failed or key missing)",
                     max_hold_date=datetime.now(timezone.utc) + timedelta(days=20),
                     news=news,
+                    news_score=score,   # ← use score here
                 )
             )
             continue
@@ -80,6 +151,7 @@ def build_swing_plan(tickers: list[str]) -> list[PlanRow]:
                 strategy_reason="placeholder",
                 max_hold_date=datetime.now(timezone.utc) + timedelta(days=20),
                 news=news,
+                news_score=score,   # ← and here
             )
         )
 
@@ -144,3 +216,4 @@ def get_company_news_summary(ticker: str, days: int = 7, limit: int = 5) -> list
             }
         )
     return items
+

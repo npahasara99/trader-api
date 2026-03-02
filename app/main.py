@@ -33,7 +33,7 @@ class NewsItem(BaseModel):
     source: Optional[str] = None
     datetime: Optional[str] = None
     url: Optional[str] = None
-    
+
 class ScanRequest(BaseModel):
     universe: List[str]
     top_n: int = 8
@@ -66,6 +66,8 @@ class PlanRowOut(BaseModel):
 
     llm_action: Optional[str] = None
     llm_rationale: Optional[str] = None
+    news: Optional[List[NewsItem]] = None
+    news_score: int = 0
 
 class PlanResponse(BaseModel):
     planned_at: datetime
@@ -96,6 +98,7 @@ def plan_swing(req: PlanRequest):
                 strategy_reason=r.strategy_reason,  # ✅ correct
                 llm_action=r.llm_action,
                 llm_rationale=r.llm_rationale,
+                news_score=getattr(r, "news_score", 0),
                 news=[NewsItem(**n) for n in (r.news or [])],
             )
         )
