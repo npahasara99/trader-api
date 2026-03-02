@@ -95,9 +95,30 @@ def scan_swing(req: ScanRequest, _=Depends(require_bearer_token)):
 def plan_swing(req: PlanRequest, _=Depends(require_bearer_token)):
     planned_at = datetime.now(timezone.utc)
 
-    rows = build_swing_plan(req.tickers)
-    out: list[PlanRowOut] = []
+    try:
+        rows = build_swing_plan(req.tickers)
+    except Exception as e:
+        # Never return 500 for planner bugs; return a NO DATA row per ticker
+        out = [
+            PlanRowOut(
+                ticker=t,
+                last=None,
+                entry=None,
+                stop=None,
+                take_profit=None,
+                max_hold_date=datetime.now(timezone.utc),
+                strategy_action="NO DATA",
+                strategy_reason=f"Planner crashed: {e}",
+                news=[],
+                news_score=0,
+                llm_action=None,
+                llm_rationale=None,
+            )
+            for t in req.tickers
+        ]
+        return {"planned_at": planned_at, "rows": out}
 
+    out: list[PlanRowOut] = []
     for r in rows:
         out.append(
             PlanRowOut(
@@ -112,7 +133,7 @@ def plan_swing(req: PlanRequest, _=Depends(require_bearer_token)):
                 llm_action=r.llm_action,
                 llm_rationale=r.llm_rationale,
                 news_score=getattr(r, "news_score", 0),
-                news=[NewsItem(**n) for n in (r.news or [])],
+                news=[NewsItem(**n) for n in (getattr(r, "news", None) or [])],
             )
         )
 
@@ -126,12 +147,19 @@ class LogRequest(BaseModel):
 
 
 @app.post("/history/log")
+@app.post("/history/log")
 def log_history(req: LogRequest, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
+    rows_logged = 0
+
     for r in req.rows:
-        # Safely convert numeric fields only when present
-        entry_val = float(r.entry) if (r.entry is not None) else None
-        stop_val = float(r.stop) if (r.stop is not None) else None
-        tp_val = float(r.take_profit) if (r.take_profit is not None) else None
+        # Skip rows that have no price data (DB columns are NOT NULL)
+        if r.entry is None or r.stop is None or r.take_profit is None:
+            continue
+
+        # Safely convert numeric fields
+        entry_val = float(r.entry)
+        stop_val = float(r.stop)
+        tp_val = float(r.take_profit)
 
         db.add(
             SwingDecision(
@@ -154,8 +182,10 @@ def log_history(req: LogRequest, db: Session = Depends(get_db), _=Depends(requir
                 news_json=json.dumps([n.model_dump() for n in (r.news or [])]),
             )
         )
+        rows_logged += 1
+
     db.commit()
-    return {"ok": True, "rows_logged": len(req.rows)}
+    return {"ok": True, "rows_logged": rows_logged}
 
 @app.get("/history/evaluate")
 def evaluate_history(limit: int = 200, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
