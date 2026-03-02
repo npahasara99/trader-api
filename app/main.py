@@ -190,7 +190,7 @@ def evaluate_history(limit: int = 200, db: Session = Depends(get_db), _=Depends(
                 "return_since_entry": ret,
                 "strategy_action": d.strategy_action,
                 "llm_action": d.llm_action,
-                "news_score": d.news_score,
+                "news_score": getattr(d, "news_score", None),
             }
         )
     db.commit()
