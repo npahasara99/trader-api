@@ -27,6 +27,13 @@ app = FastAPI(
 )
 
 # --- Requests/Responses ---
+class NewsItem(BaseModel):
+    headline: Optional[str] = None
+    summary: Optional[str] = None
+    source: Optional[str] = None
+    datetime: Optional[str] = None
+    url: Optional[str] = None
+    
 class ScanRequest(BaseModel):
     universe: List[str]
     top_n: int = 8
@@ -100,12 +107,7 @@ class LogRequest(BaseModel):
     rows: List[PlanRowOut]
     meta: dict = Field(default_factory=dict)
 
-class NewsItem(BaseModel):
-    headline: Optional[str] = None
-    summary: Optional[str] = None
-    source: Optional[str] = None
-    datetime: Optional[str] = None
-    url: Optional[str] = None
+
 
 @app.post("/history/log")
 def log_history(req: LogRequest, db: Session = Depends(get_db)):
