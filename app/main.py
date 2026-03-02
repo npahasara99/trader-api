@@ -150,6 +150,8 @@ def log_history(req: LogRequest, db: Session = Depends(get_db), _=Depends(requir
                 llm_style=req.meta.get("llm_style"),
                 llm_action=r.llm_action,
                 llm_rationale=r.llm_rationale,
+                news_score=r.news_score,
+                news_json=json.dumps([n.model_dump() for n in (r.news or [])]),
             )
         )
     db.commit()
@@ -188,6 +190,7 @@ def evaluate_history(limit: int = 200, db: Session = Depends(get_db), _=Depends(
                 "return_since_entry": ret,
                 "strategy_action": d.strategy_action,
                 "llm_action": d.llm_action,
+                "news_score": d.news_score,
             }
         )
     db.commit()

@@ -55,37 +55,32 @@ NEGATIVE_KWS = [
     "layoff", "layoffs", "weak", "bearish", "recall", "fall", "plunge", "risk"
 ]
 
-def _kw_score(text: str) -> int:
+def _count_hits(text: str, keywords: list[str]) -> int:
     t = text.lower()
-    score = 0
-    for kw in POSITIVE_KWS:
-        if kw in t:
-            score += 2
-    for kw in NEGATIVE_KWS:
-        if kw in t:
-            score -= 2
-    return score
+    return sum(1 for kw in keywords if kw in t)
 
 def compute_news_score(news_items: list[dict]) -> int:
     """
-    Returns an integer score roughly in [-20, +20] (not bounded strictly).
-    Uses headline+summary keywords and recency decay.
+    Returns int in [-10, +10].
+    Uses per-article (pos-neg) then weighted average by recency.
     """
     if not news_items:
         return 0
 
     now = datetime.now(timezone.utc)
-    total = 0.0
+    weighted_sum = 0.0
+    weight_total = 0.0
 
     for item in news_items:
         headline = (item.get("headline") or "").strip()
         summary = (item.get("summary") or "").strip()
         text = f"{headline}. {summary}"
 
-        base = _kw_score(text)
+        pos = _count_hits(text, POSITIVE_KWS)
+        neg = _count_hits(text, NEGATIVE_KWS)
+        raw = float(pos - neg)  # per-article balance
 
-        # Recency decay: newer news weighs more
-        # We stored item["datetime"] as ISO string; handle safely
+        # Recency weight
         w = 1.0
         dt_str = item.get("datetime")
         try:
@@ -95,7 +90,6 @@ def compute_news_score(news_items: list[dict]) -> int:
 
         if dt:
             age_hours = max(0.0, (now - dt).total_seconds() / 3600.0)
-            # 0-24h: 1.0, 24-72h: 0.6, 72h+: 0.3
             if age_hours <= 24:
                 w = 1.0
             elif age_hours <= 72:
@@ -103,11 +97,17 @@ def compute_news_score(news_items: list[dict]) -> int:
             else:
                 w = 0.3
 
-        total += base * w
+        weighted_sum += raw * w
+        weight_total += w
 
-    # Round to int for clean API output
-    return int(round(total))
+    avg = weighted_sum / max(weight_total, 1e-9)
 
+    # Scale average balance to [-10, +10] using tanh for stability
+    # avg ~ +/-3 already becomes strong; adjust multiplier if you want
+    scaled = 10.0 * math.tanh(avg / 2.0)
+
+    # Clamp + round
+    return int(round(max(-10.0, min(10.0, scaled))))
 
 def build_swing_plan(tickers: list[str]) -> list[PlanRow]:
     rows: list[PlanRow] = []
