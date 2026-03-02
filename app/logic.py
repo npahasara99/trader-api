@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 import yfinance as yf
 import os
 import requests
+import math
 from dateutil.parser import isoparse
 @dataclass
 class PlanRow:
