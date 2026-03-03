@@ -31,6 +31,8 @@ class SwingDecision(Base):
 
     llm_action: Mapped[str | None] = mapped_column(String(40), nullable=True)
     llm_rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    news_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    news_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Evaluation fields (latest evaluation snapshot)
     last_eval_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -43,3 +45,4 @@ class SwingDecision(Base):
     success_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON list of tags
+    MODEL_VERSION = "2026-03-02-news_score"
