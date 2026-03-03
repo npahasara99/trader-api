@@ -86,6 +86,11 @@ class PlanResponse(BaseModel):
     planned_at: datetime
     rows: List[PlanRowOut]
 
+@app.get("/debug/model")
+def debug_model(_=Depends(require_bearer_token)):
+    cols = list(SwingDecision.__table__.columns.keys())
+    return {"columns": cols}
+
 @app.post("/scan/swing", response_model=ScanResponse)
 def scan_swing(req: ScanRequest, _=Depends(require_bearer_token)):
     picks = scan_swing_candidates_largecaps(req.universe, top_n=req.top_n)
