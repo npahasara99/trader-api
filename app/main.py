@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, Header, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from .logic import bucket_news, classify_assumption
 import json
 import os
