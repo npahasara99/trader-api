@@ -218,3 +218,67 @@ def get_company_news_summary(ticker: str, days: int = 7, limit: int = 5) -> list
         )
     return items
 
+@dataclass
+class LearningRow:
+    id: int
+    ticker: str
+    planned_at: datetime
+    max_hold_date: datetime | None
+    llm_action: str | None
+    news_score: int | None
+    entry: float
+    stop: float
+    take_profit: float
+    last_price: float
+    assumed_executed: bool
+    label: str
+    ret: float
+
+def bucket_news(score: int | None) -> str:
+    if score is None:
+        return "unknown"
+    if score <= -5:
+        return "negative"
+    if score >= 5:
+        return "positive"
+    return "neutral"
+
+def classify_assumption(
+    *,
+    llm_action: str | None,
+    entry: float,
+    stop: float,
+    take_profit: float,
+    last_price: float,
+    max_hold_date: datetime | None,
+    now: datetime,
+) -> tuple[bool, str, float]:
+    """
+    Snapshot classifier:
+    - BUY => assumed executed
+    - WAIT/HOLD/None => assumed not executed
+    """
+    action = (llm_action or "").strip().upper()
+    assumed_executed = action == "BUY"
+
+    ret = (last_price - entry) / max(entry, 1e-9)
+
+    expired = (max_hold_date is not None) and (now > max_hold_date)
+
+    if assumed_executed:
+        if last_price <= stop:
+            return True, "buy_fail_sl", ret
+        if last_price >= take_profit:
+            return True, "buy_success_tp", ret
+        if expired:
+            return True, ("buy_expired_win" if last_price >= entry else "buy_expired_loss"), ret
+        return True, "buy_open", ret
+
+    # WAIT / HOLD / anything else => not executed
+    if last_price <= stop:
+        return False, "wait_good_avoid", ret
+    if last_price >= take_profit:
+        # If still within the holding window, it's “currently missed opportunity”
+        # If expired, it's “missed by expiry” (still missed)
+        return False, ("wait_missed_tp" if not expired else "wait_missed_tp_expired"), ret
+    return False, "wait_neutral", ret

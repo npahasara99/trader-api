@@ -2,6 +2,7 @@ from fastapi import FastAPI, Depends, Header, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 from datetime import datetime, timezone
+from .logic import bucket_news, classify_assumption
 import json
 import os
 
@@ -246,3 +247,150 @@ def evaluate_history(limit: int = 200, db: Session = Depends(get_db), _=Depends(
         )
     db.commit()
     return {"rows": results, "evaluated": len(results)}
+
+@app.get("/learning/patterns")
+def learning_patterns(
+    lookback_days: int = 120,
+    limit: int = 500,
+    db: Session = Depends(get_db),
+    _=Depends(require_bearer_token),
+):
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=lookback_days)
+
+    q = (
+        db.query(SwingDecision)
+        .filter(SwingDecision.planned_at >= cutoff)
+        .order_by(SwingDecision.planned_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    rows = []
+    for d in q:
+        # only learn from rows with valid levels
+        if d.entry is None or d.stop is None or d.take_profit is None:
+            continue
+
+        last = get_last_price(d.ticker)
+        if last is None:
+            continue
+
+        assumed_executed, label, ret = classify_assumption(
+            llm_action=d.llm_action,
+            entry=float(d.entry),
+            stop=float(d.stop),
+            take_profit=float(d.take_profit),
+            last_price=float(last),
+            max_hold_date=d.max_hold_date,
+            now=now,
+        )
+
+        rows.append(
+            {
+                "id": d.id,
+                "ticker": d.ticker,
+                "planned_at": d.planned_at,
+                "max_hold_date": d.max_hold_date,
+                "llm_action": d.llm_action,
+                "news_score": getattr(d, "news_score", None),
+                "news_bucket": bucket_news(getattr(d, "news_score", None)),
+                "entry": float(d.entry),
+                "stop": float(d.stop),
+                "take_profit": float(d.take_profit),
+                "last_price": float(last),
+                "assumed_executed": assumed_executed,
+                "label": label,
+                "return_since_entry": float(ret),
+            }
+        )
+
+    # --- aggregate ---
+    total = len(rows)
+    by_label = {}
+    for r in rows:
+        by_label[r["label"]] = by_label.get(r["label"], 0) + 1
+
+    def rate(n: int, d: int) -> float:
+        return (n / d) if d else 0.0
+
+    buy_total = sum(1 for r in rows if r["assumed_executed"])
+    buy_success = sum(1 for r in rows if r["label"] in ("buy_success_tp", "buy_expired_win"))
+    buy_fail = sum(1 for r in rows if r["label"] in ("buy_fail_sl", "buy_expired_loss"))
+
+    wait_total = total - buy_total
+    wait_good_avoid = sum(1 for r in rows if r["label"] == "wait_good_avoid")
+    wait_missed = sum(1 for r in rows if r["label"] in ("wait_missed_tp", "wait_missed_tp_expired"))
+
+    # by news bucket (BUY success rate, WAIT missed rate)
+    buckets = ["negative", "neutral", "positive", "unknown"]
+    by_bucket = {}
+    for b in buckets:
+        br = [x for x in rows if x["news_bucket"] == b]
+        b_buy = [x for x in br if x["assumed_executed"]]
+        b_wait = [x for x in br if not x["assumed_executed"]]
+        by_bucket[b] = {
+            "samples": len(br),
+            "buy_samples": len(b_buy),
+            "buy_success_rate": rate(sum(1 for x in b_buy if x["label"] in ("buy_success_tp", "buy_expired_win")), len(b_buy)),
+            "wait_samples": len(b_wait),
+            "wait_missed_rate": rate(sum(1 for x in b_wait if x["label"] in ("wait_missed_tp", "wait_missed_tp_expired")), len(b_wait)),
+            "wait_good_avoid_rate": rate(sum(1 for x in b_wait if x["label"] == "wait_good_avoid"), len(b_wait)),
+        }
+
+    # by ticker quick stats
+    by_ticker = {}
+    for r in rows:
+        t = r["ticker"]
+        d = by_ticker.setdefault(t, {"samples": 0, "buy": 0, "buy_success": 0, "wait": 0, "wait_missed": 0, "avg_ret": 0.0})
+        d["samples"] += 1
+        d["avg_ret"] += r["return_since_entry"]
+        if r["assumed_executed"]:
+            d["buy"] += 1
+            if r["label"] in ("buy_success_tp", "buy_expired_win"):
+                d["buy_success"] += 1
+        else:
+            d["wait"] += 1
+            if r["label"] in ("wait_missed_tp", "wait_missed_tp_expired"):
+                d["wait_missed"] += 1
+
+    for t, d in by_ticker.items():
+        d["avg_ret"] = d["avg_ret"] / max(d["samples"], 1)
+        d["buy_success_rate"] = rate(d["buy_success"], d["buy"])
+        d["wait_missed_rate"] = rate(d["wait_missed"], d["wait"])
+
+    # --- prompt context (what you inject into next plans) ---
+    prompt_context = (
+        "Learning snapshot (assumptions: BUY executed; WAIT not executed).\n"
+        f"Lookback: {lookback_days}d, samples: {total}\n"
+        f"BUY success rate: {buy_success}/{buy_total} = {rate(buy_success,buy_total):.0%}; "
+        f"BUY fail rate: {buy_fail}/{buy_total} = {rate(buy_fail,buy_total):.0%}\n"
+        f"WAIT missed rate: {wait_missed}/{wait_total} = {rate(wait_missed,wait_total):.0%}; "
+        f"WAIT good-avoid rate: {wait_good_avoid}/{wait_total} = {rate(wait_good_avoid,wait_total):.0%}\n"
+        "News buckets impact:\n"
+        + "\n".join(
+            [
+                f"- {b}: buy_success_rate={by_bucket[b]['buy_success_rate']:.0%} "
+                f"(n={by_bucket[b]['buy_samples']}), "
+                f"wait_missed_rate={by_bucket[b]['wait_missed_rate']:.0%} "
+                f"(n={by_bucket[b]['wait_samples']})"
+                for b in buckets
+            ]
+        )
+    )
+
+    return {
+        "as_of": now,
+        "lookback_days": lookback_days,
+        "samples": total,
+        "by_label": by_label,
+        "rates": {
+            "buy_success_rate": rate(buy_success, buy_total),
+            "buy_fail_rate": rate(buy_fail, buy_total),
+            "wait_missed_rate": rate(wait_missed, wait_total),
+            "wait_good_avoid_rate": rate(wait_good_avoid, wait_total),
+        },
+        "by_bucket": by_bucket,
+        "by_ticker": by_ticker,
+        "prompt_context": prompt_context,
+    }
