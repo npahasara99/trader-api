@@ -28,6 +28,7 @@ app = FastAPI(
     ],
 )
 
+
 def require_bearer_token(authorization: Optional[str] = Header(default=None)):
     expected = os.getenv("API_BEARER_TOKEN")
     # If you haven't set a token, don't block (useful for local dev).
@@ -41,6 +42,7 @@ def require_bearer_token(authorization: Optional[str] = Header(default=None)):
     if token != expected:
         raise HTTPException(status_code=403, detail="Invalid token")
 
+
 # --- Requests/Responses ---
 class NewsItem(BaseModel):
     headline: Optional[str] = None
@@ -49,12 +51,15 @@ class NewsItem(BaseModel):
     datetime: Optional[str] = None
     url: Optional[str] = None
 
+
 class ScanRequest(BaseModel):
     universe: List[str]
     top_n: int = 8
 
+
 class ScanResponse(BaseModel):
     tickers: List[str]
+
 
 class PlanRequest(BaseModel):
     tickers: List[str]
@@ -63,6 +68,7 @@ class PlanRequest(BaseModel):
     llm_provider: Optional[str] = None
     llm_model: Optional[str] = None
     llm_style: Optional[str] = None
+
 
 class PlanRowOut(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
@@ -79,23 +85,29 @@ class PlanRowOut(BaseModel):
 
     news: Optional[List[NewsItem]] = None
     news_score: int = 0
+    earnings_score: int = 0
+    earnings_context: Optional[dict] = None
 
     llm_action: Optional[str] = None
     llm_rationale: Optional[str] = None
 
+
 class PlanResponse(BaseModel):
     planned_at: datetime
     rows: List[PlanRowOut]
+
 
 @app.get("/debug/model")
 def debug_model(_=Depends(require_bearer_token)):
     cols = list(SwingDecision.__table__.columns.keys())
     return {"columns": cols}
 
+
 @app.post("/scan/swing", response_model=ScanResponse)
 def scan_swing(req: ScanRequest, _=Depends(require_bearer_token)):
     picks = scan_swing_candidates_largecaps(req.universe, top_n=req.top_n)
     return {"tickers": picks}
+
 
 @app.post("/plan/swing", response_model=PlanResponse)
 def plan_swing(req: PlanRequest, _=Depends(require_bearer_token)):
@@ -117,6 +129,8 @@ def plan_swing(req: PlanRequest, _=Depends(require_bearer_token)):
                 strategy_reason=f"Planner crashed: {e}",
                 news=[],
                 news_score=0,
+                earnings_score=0,
+                earnings_context=None,
                 llm_action=None,
                 llm_rationale=None,
             )
@@ -139,11 +153,14 @@ def plan_swing(req: PlanRequest, _=Depends(require_bearer_token)):
                 llm_action=r.llm_action,
                 llm_rationale=r.llm_rationale,
                 news_score=getattr(r, "news_score", 0),
+                earnings_score=getattr(r, "earnings_score", 0),
+                earnings_context=getattr(r, "earnings_context", None),
                 news=[NewsItem(**n) for n in (getattr(r, "news", None) or [])],
             )
         )
 
     return {"planned_at": planned_at, "rows": out}
+
 
 class LogRequest(BaseModel):
     planned_at: datetime
@@ -151,8 +168,6 @@ class LogRequest(BaseModel):
     rows: List[PlanRowOut]
     meta: dict = Field(default_factory=dict)
 
-
-from fastapi import HTTPException  # make sure this import exists
 
 @app.post("/history/log")
 def log_history(req: LogRequest, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
@@ -209,6 +224,7 @@ def log_history(req: LogRequest, db: Session = Depends(get_db), _=Depends(requir
         # Return the real error so you can see it in GPT / curl instead of a generic 500
         raise HTTPException(status_code=500, detail=f"Logging failed: {e}")
 
+
 @app.get("/history/evaluate")
 def evaluate_history(limit: int = 200, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
     q = (
@@ -247,6 +263,7 @@ def evaluate_history(limit: int = 200, db: Session = Depends(get_db), _=Depends(
         )
     db.commit()
     return {"rows": results, "evaluated": len(results)}
+
 
 @app.get("/learning/patterns")
 def learning_patterns(
