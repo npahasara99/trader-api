@@ -3,8 +3,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 from datetime import datetime, timezone
 from .db import Base
 
+
 def utcnow():
     return datetime.now(timezone.utc)
+
 
 class SwingDecision(Base):
     __tablename__ = "swing_decisions"
@@ -32,6 +34,8 @@ class SwingDecision(Base):
     llm_action: Mapped[str | None] = mapped_column(String(40), nullable=True)
     llm_rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     news_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    earnings_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    earnings_context_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     news_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Evaluation fields (latest evaluation snapshot)
@@ -45,4 +49,4 @@ class SwingDecision(Base):
     success_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON list of tags
-    MODEL_VERSION = "2026-03-02-news_score"
+    MODEL_VERSION = "2026-03-07-earnings_score_v1"

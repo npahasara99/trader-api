@@ -7,6 +7,7 @@ import json
 import os
 
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from .db import Base, engine, get_db
 from .models import SwingDecision
@@ -17,12 +18,41 @@ from .logic import (
     evaluate_plan_row,
 )
 
-# Create tables
+
+def _ensure_runtime_columns() -> None:
+    required_cols = {
+        "news_score": "INTEGER",
+        "news_json": "TEXT",
+        "earnings_score": "INTEGER",
+        "earnings_context_json": "TEXT",
+    }
+    try:
+        with engine.begin() as conn:
+            dialect = conn.dialect.name
+            if dialect == "sqlite":
+                existing = {
+                    row[1]
+                    for row in conn.execute(text("PRAGMA table_info(swing_decisions)")).fetchall()
+                }
+                for col, col_type in required_cols.items():
+                    if col not in existing:
+                        conn.execute(text(f"ALTER TABLE swing_decisions ADD COLUMN {col} {col_type}"))
+                return
+
+            for col, col_type in required_cols.items():
+                conn.execute(text(f"ALTER TABLE swing_decisions ADD COLUMN IF NOT EXISTS {col} {col_type}"))
+    except Exception:
+        # Do not block startup if migration cannot be applied here.
+        pass
+
+
+# Create tables + best-effort additive columns
 Base.metadata.create_all(bind=engine)
+_ensure_runtime_columns()
 
 app = FastAPI(
     title="Trader Backend (Stocks Only)",
-    version="0.1.0",
+    version="0.1.1",
     servers=[
         {"url": "https://trader-api-production-7875.up.railway.app", "description": "Production"}
     ],
@@ -190,7 +220,6 @@ def log_history(req: LogRequest, db: Session = Depends(get_db), _=Depends(requir
                 if isinstance(n, dict):
                     news_items.append(n)
                 else:
-                    # pydantic BaseModel
                     news_items.append(n.model_dump())
 
             db.add(
@@ -211,6 +240,8 @@ def log_history(req: LogRequest, db: Session = Depends(get_db), _=Depends(requir
                     llm_action=r.llm_action,
                     llm_rationale=r.llm_rationale,
                     news_score=int(r.news_score) if r.news_score is not None else None,
+                    earnings_score=int(r.earnings_score) if r.earnings_score is not None else None,
+                    earnings_context_json=(json.dumps(r.earnings_context) if r.earnings_context is not None else None),
                     news_json=json.dumps(news_items),
                 )
             )
@@ -221,7 +252,6 @@ def log_history(req: LogRequest, db: Session = Depends(get_db), _=Depends(requir
 
     except Exception as e:
         db.rollback()
-        # Return the real error so you can see it in GPT / curl instead of a generic 500
         raise HTTPException(status_code=500, detail=f"Logging failed: {e}")
 
 
@@ -259,10 +289,142 @@ def evaluate_history(limit: int = 200, db: Session = Depends(get_db), _=Depends(
                 "strategy_action": d.strategy_action,
                 "llm_action": d.llm_action,
                 "news_score": getattr(d, "news_score", None),
+                "earnings_score": getattr(d, "earnings_score", None),
             }
         )
     db.commit()
     return {"rows": results, "evaluated": len(results)}
+
+
+@app.get("/analysis/earnings-score")
+def earnings_score_analysis(
+    lookback_days: int = 180,
+    limit: int = 500,
+    refresh_prices: bool = True,
+    db: Session = Depends(get_db),
+    _=Depends(require_bearer_token),
+):
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=lookback_days)
+
+    q = (
+        db.query(SwingDecision)
+        .filter(SwingDecision.planned_at >= cutoff)
+        .filter(SwingDecision.earnings_score.isnot(None))
+        .order_by(SwingDecision.planned_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    samples = []
+    for d in q:
+        if d.entry is None or d.stop is None or d.take_profit is None or d.earnings_score is None:
+            continue
+
+        outcome = d.last_eval_outcome
+        ret = d.last_eval_return
+        last_price = d.last_eval_price
+
+        if refresh_prices:
+            live_last = get_last_price(d.ticker)
+            if live_last is not None:
+                outcome, ret = evaluate_plan_row(d.entry, d.stop, d.take_profit, live_last, d.max_hold_date)
+                d.last_eval_ts = now
+                d.last_eval_price = float(live_last)
+                d.last_eval_outcome = outcome
+                d.last_eval_return = float(ret)
+                last_price = float(live_last)
+
+        if ret is None:
+            continue
+
+        score = int(d.earnings_score)
+        if score <= -4:
+            bucket = "negative"
+        elif score >= 4:
+            bucket = "positive"
+        else:
+            bucket = "neutral"
+
+        samples.append(
+            {
+                "id": d.id,
+                "ticker": d.ticker,
+                "planned_at": d.planned_at,
+                "earnings_score": score,
+                "bucket": bucket,
+                "outcome": outcome,
+                "return_since_entry": float(ret),
+                "last_price": last_price,
+            }
+        )
+
+    db.commit()
+
+    def rate(n: int, d: int) -> float:
+        return (n / d) if d else 0.0
+
+    def summarize(rows: list[dict]) -> dict:
+        n = len(rows)
+        if n == 0:
+            return {
+                "samples": 0,
+                "avg_return": 0.0,
+                "win_rate": 0.0,
+                "tp_rate": 0.0,
+                "sl_rate": 0.0,
+                "expired_rate": 0.0,
+                "open_rate": 0.0,
+            }
+
+        avg_return = sum(r["return_since_entry"] for r in rows) / n
+        wins = sum(1 for r in rows if r["return_since_entry"] > 0)
+        tp = sum(1 for r in rows if r["outcome"] == "TP hit")
+        sl = sum(1 for r in rows if r["outcome"] == "SL hit")
+        expired = sum(1 for r in rows if r["outcome"] == "Expired")
+        open_ = sum(1 for r in rows if r["outcome"] == "Open / In range")
+
+        return {
+            "samples": n,
+            "avg_return": avg_return,
+            "win_rate": rate(wins, n),
+            "tp_rate": rate(tp, n),
+            "sl_rate": rate(sl, n),
+            "expired_rate": rate(expired, n),
+            "open_rate": rate(open_, n),
+        }
+
+    by_bucket = {
+        "negative": summarize([r for r in samples if r["bucket"] == "negative"]),
+        "neutral": summarize([r for r in samples if r["bucket"] == "neutral"]),
+        "positive": summarize([r for r in samples if r["bucket"] == "positive"]),
+    }
+
+    def pearson(rows: list[dict]) -> float | None:
+        n = len(rows)
+        if n < 2:
+            return None
+        xs = [float(r["earnings_score"]) for r in rows]
+        ys = [float(r["return_since_entry"]) for r in rows]
+        mx = sum(xs) / n
+        my = sum(ys) / n
+        cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+        vx = sum((x - mx) ** 2 for x in xs)
+        vy = sum((y - my) ** 2 for y in ys)
+        if vx <= 1e-12 or vy <= 1e-12:
+            return None
+        return cov / ((vx ** 0.5) * (vy ** 0.5))
+
+    return {
+        "as_of": now,
+        "lookback_days": lookback_days,
+        "samples": len(samples),
+        "refresh_prices": refresh_prices,
+        "overall": summarize(samples),
+        "score_return_correlation": pearson(samples),
+        "by_bucket": by_bucket,
+        "rows_preview": samples[:25],
+    }
 
 
 @app.get("/learning/patterns")
