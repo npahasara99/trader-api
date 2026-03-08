@@ -1,4 +1,6 @@
 from datetime import datetime, timezone, timedelta, date
+import csv
+import io
 import time
 import requests
 from sqlalchemy.orm import Session
@@ -8,12 +10,42 @@ from .models import DailyBar
 from .logic import FINNHUB_API_KEY, FINNHUB_BASE
 
 
-YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
+YAHOO_CHART_BASES = [
+    "https://query1.finance.yahoo.com/v8/finance/chart",
+    "https://query2.finance.yahoo.com/v8/finance/chart",
+]
+YAHOO_REQUEST_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Accept": "application/json,text/plain,*/*",
+}
+STOOQ_DAILY_URL = "https://stooq.com/q/d/l/"
+
+_LAST_YAHOO_REQUEST_TS = 0.0
 
 
 def _normalize_symbol_for_yahoo(symbol: str) -> str:
     # Yahoo uses '-' for class shares (e.g. BRK-B instead of BRK.B)
     return symbol.upper().replace(".", "-")
+
+
+def _stooq_symbol_candidates(symbol: str) -> list[str]:
+    s = symbol.upper()
+    cands: list[str] = []
+    for cand in (s, s.replace(".", "-"), s.replace("-", "."), s.replace(".", ""), s.replace("-", "")):
+        cand = cand.strip().lower()
+        if cand and cand not in cands:
+            cands.append(cand)
+    return cands
+
+
+def _yahoo_pace(min_interval_sec: float = 0.9) -> None:
+    global _LAST_YAHOO_REQUEST_TS
+    now = time.time()
+    delta = now - _LAST_YAHOO_REQUEST_TS
+    if delta < min_interval_sec:
+        time.sleep(min_interval_sec - delta)
+    _LAST_YAHOO_REQUEST_TS = time.time()
 
 
 def _fetch_finnhub_candles_payload(symbol: str, frm: date, to: date, *, max_attempts: int = 3) -> tuple[dict | None, str]:
@@ -64,7 +96,7 @@ def _fetch_finnhub_candles_payload(symbol: str, frm: date, to: date, *, max_atte
     return None, last_status
 
 
-def _fetch_yahoo_candles_payload(symbol: str, frm: date, to: date, *, max_attempts: int = 2) -> tuple[dict | None, str]:
+def _fetch_yahoo_candles_payload(symbol: str, frm: date, to: date, *, max_attempts: int = 4) -> tuple[dict | None, str]:
     yahoo_symbol = _normalize_symbol_for_yahoo(symbol)
     period1 = int(datetime(frm.year, frm.month, frm.day, tzinfo=timezone.utc).timestamp())
     # Yahoo period2 is exclusive; add one day to include `to`.
@@ -80,37 +112,127 @@ def _fetch_yahoo_candles_payload(symbol: str, frm: date, to: date, *, max_attemp
 
     last_status = "yahoo_fetch_failed"
     for attempt in range(max_attempts):
-        try:
-            r = requests.get(f"{YAHOO_CHART_BASE}/{yahoo_symbol}", params=params, timeout=12)
-            status_code = int(r.status_code)
-
-            payload = None
+        for base in YAHOO_CHART_BASES:
             try:
-                payload = r.json()
-            except Exception:
+                _yahoo_pace()
+                r = requests.get(f"{base}/{yahoo_symbol}", params=params, headers=YAHOO_REQUEST_HEADERS, timeout=12)
+                status_code = int(r.status_code)
+
                 payload = None
+                try:
+                    payload = r.json()
+                except Exception:
+                    payload = None
 
-            if status_code == 200 and isinstance(payload, dict):
-                chart = payload.get("chart") or {}
-                err = chart.get("error")
-                if err:
-                    msg = str((err or {}).get("description") or (err or {}).get("code") or "unknown")
-                    last_status = f"yahoo_error:{msg[:80]}"
+                if status_code == 429:
+                    retry_after = r.headers.get("Retry-After")
+                    try:
+                        delay = max(1.5, float(retry_after)) if retry_after is not None else (1.5 + attempt)
+                    except Exception:
+                        delay = 1.5 + attempt
+                    time.sleep(delay)
+                    last_status = "yahoo_http_429"
+                    continue
+
+                if status_code == 200 and isinstance(payload, dict):
+                    chart = payload.get("chart") or {}
+                    err = chart.get("error")
+                    if err:
+                        msg = str((err or {}).get("description") or (err or {}).get("code") or "unknown")
+                        last_status = f"yahoo_error:{msg[:80]}"
+                    else:
+                        results = chart.get("result") or []
+                        if results:
+                            return payload, "ok"
+                        last_status = "yahoo_empty_result"
                 else:
-                    results = chart.get("result") or []
-                    if results:
-                        return payload, "ok"
-                    last_status = "yahoo_empty_result"
-            else:
-                last_status = f"yahoo_http_{status_code}"
+                    last_status = f"yahoo_http_{status_code}"
 
-        except requests.RequestException:
-            last_status = "yahoo_request_exception"
+            except requests.RequestException:
+                last_status = "yahoo_request_exception"
 
         if attempt < (max_attempts - 1):
-            time.sleep(0.35 * (attempt + 1))
+            time.sleep(0.8 * (attempt + 1))
 
     return None, last_status
+
+
+def _fetch_stooq_daily_csv(symbol: str, frm: date, to: date, *, max_attempts: int = 2) -> tuple[list[dict], str]:
+    last_status = "stooq_fetch_failed"
+
+    for candidate in _stooq_symbol_candidates(symbol):
+        ticker = f"{candidate}.us"
+        for attempt in range(max_attempts):
+            try:
+                r = requests.get(
+                    STOOQ_DAILY_URL,
+                    params={"s": ticker, "i": "d"},
+                    headers={"User-Agent": YAHOO_REQUEST_HEADERS["User-Agent"]},
+                    timeout=12,
+                )
+                status_code = int(r.status_code)
+                if status_code != 200:
+                    last_status = f"stooq_http_{status_code}"
+                    if attempt < (max_attempts - 1):
+                        time.sleep(0.6 * (attempt + 1))
+                    continue
+
+                text_body = (r.text or "").strip()
+                if not text_body or text_body.lower().startswith("no data"):
+                    last_status = "stooq_no_data"
+                    break
+
+                reader = csv.DictReader(io.StringIO(text_body))
+                rows = list(reader)
+                if not rows:
+                    last_status = "stooq_empty_csv"
+                    break
+
+                bars: list[dict] = []
+                for row in rows:
+                    try:
+                        d = datetime.strptime(str(row.get("Date", "")), "%Y-%m-%d").date()
+                        if d < frm or d > to:
+                            continue
+
+                        close_raw = row.get("Close")
+                        if close_raw in (None, "", "null"):
+                            continue
+
+                        close_val = float(close_raw)
+                        open_val = row.get("Open")
+                        high_val = row.get("High")
+                        low_val = row.get("Low")
+                        vol_val = row.get("Volume")
+
+                        bars.append(
+                            {
+                                "symbol": symbol,
+                                "bar_date": d,
+                                "open": (float(open_val) if open_val not in (None, "", "null") else None),
+                                "high": (float(high_val) if high_val not in (None, "", "null") else None),
+                                "low": (float(low_val) if low_val not in (None, "", "null") else None),
+                                "close": close_val,
+                                "volume": (float(vol_val) if vol_val not in (None, "", "null") else None),
+                                "adjusted_close": close_val,
+                                "source": "stooq",
+                                "updated_at": datetime.now(timezone.utc),
+                            }
+                        )
+                    except Exception:
+                        continue
+
+                if bars:
+                    return bars, f"ok:{ticker}"
+                last_status = "stooq_no_inrange_rows"
+
+            except requests.RequestException:
+                last_status = "stooq_request_exception"
+
+            if attempt < (max_attempts - 1):
+                time.sleep(0.6 * (attempt + 1))
+
+    return [], last_status
 
 
 def _bars_from_finnhub_payload(symbol: str, data: dict) -> list[dict]:
@@ -206,9 +328,13 @@ def fetch_finnhub_daily_bars_with_meta(symbol: str, frm: date, to: date) -> tupl
         y_bars = _bars_from_yahoo_payload(symbol, y_data)
         if y_bars:
             return y_bars, f"fallback_yahoo_after:{fetch_status}"
-        return [], f"fallback_yahoo_empty_after:{fetch_status}"
+        y_status = "yahoo_empty_rows"
 
-    return [], f"{fetch_status}|yahoo:{y_status}"
+    s_bars, s_status = _fetch_stooq_daily_csv(symbol, frm, to)
+    if s_bars:
+        return s_bars, f"fallback_stooq_after:{fetch_status}|yahoo:{y_status}|stooq:{s_status}"
+
+    return [], f"{fetch_status}|yahoo:{y_status}|stooq:{s_status}"
 
 
 def fetch_finnhub_daily_bars(symbol: str, frm: date, to: date) -> list[dict]:
