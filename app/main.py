@@ -24,6 +24,7 @@ from .logic import (
 from .market_data import (
     ensure_cached_daily_closes,
     backfill_universe_daily_bars,
+    fetch_finnhub_daily_bars_with_meta,
 )
 
 
@@ -679,6 +680,19 @@ def _apply_prob_and_action(
 def debug_model(_=Depends(require_bearer_token)):
     cols = list(SwingDecision.__table__.columns.keys())
     return {"columns": cols}
+
+
+@app.get("/debug/finnhub")
+def debug_finnhub(_=Depends(require_bearer_token)):
+    today = datetime.now(timezone.utc).date()
+    bars, fetch_status = fetch_finnhub_daily_bars_with_meta("AAPL", today - timedelta(days=14), today)
+    last = get_last_price("AAPL")
+    return {
+        "finnhub_key_configured": bool(os.getenv("FINNHUB_API_KEY")),
+        "candle_fetch_status": fetch_status,
+        "candle_bars": len(bars),
+        "aapl_last_price": last,
+    }
 
 
 @app.get("/scan/sp100", response_model=ScanResponse)

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text, func
 
 from .models import DailyBar
-from .logic import finnhub_get
+from .logic import finnhub_get, FINNHUB_API_KEY
 
 
 def _fetch_finnhub_candles_payload(symbol: str, frm: date, to: date, *, max_attempts: int = 3) -> tuple[dict | None, str]:
@@ -14,6 +14,9 @@ def _fetch_finnhub_candles_payload(symbol: str, frm: date, to: date, *, max_atte
         "from": int(datetime(frm.year, frm.month, frm.day, tzinfo=timezone.utc).timestamp()),
         "to": int(datetime(to.year, to.month, to.day, tzinfo=timezone.utc).timestamp()),
     }
+
+    if not FINNHUB_API_KEY:
+        return None, "missing_api_key"
 
     last_status = "fetch_failed"
     for attempt in range(max_attempts):
