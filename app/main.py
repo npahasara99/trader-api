@@ -202,11 +202,20 @@ class DailyBarsBackfillRequest(BaseModel):
     years: int = 10
     refresh: bool = False
     commit_every: int = 5
+    start_index: int = 0
+    batch_size: Optional[int] = None
+    include_results: bool = True
 
 
 class DailyBarsBackfillResponse(BaseModel):
     as_of: datetime
     universe_size: int
+    requested_total: int
+    start_index: int
+    end_index: int
+    processed_count: int
+    remaining: int
+    next_start_index: Optional[int] = None
     total: int
     updated: int
     skipped_cached: int
@@ -928,17 +937,35 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
 
 @app.post("/data/daily-bars/backfill", response_model=DailyBarsBackfillResponse)
 def daily_bars_backfill(req: DailyBarsBackfillRequest, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
-    symbols = _resolve_universe(req.symbols, use_sp100=req.use_sp100, top_n=req.top_n)
-    if not symbols:
+    universe = _resolve_universe(req.symbols, use_sp100=req.use_sp100, top_n=req.top_n)
+    if not universe:
         raise HTTPException(status_code=400, detail="No symbols provided. Pass symbols or set use_sp100=true.")
 
     years = max(1, min(int(req.years), 15))
     commit_every = max(1, min(int(req.commit_every), 50))
+    start_index = max(0, int(req.start_index))
+
+    if start_index >= len(universe):
+        raise HTTPException(status_code=400, detail=f"start_index={start_index} is out of range for universe_size={len(universe)}")
+
+    batch_size = req.batch_size
+    if batch_size is None:
+        selected = universe[start_index:]
+    else:
+        size = max(1, min(int(batch_size), 100))
+        selected = universe[start_index : start_index + size]
+
+    if not selected:
+        raise HTTPException(status_code=400, detail="No symbols selected for this batch.")
+
+    end_index = start_index + len(selected)
+    remaining = max(0, len(universe) - end_index)
+    next_start_index = end_index if remaining > 0 else None
 
     try:
         result = backfill_universe_daily_bars(
             db,
-            symbols,
+            selected,
             years=years,
             refresh=bool(req.refresh),
             commit_every=commit_every,
@@ -947,15 +974,23 @@ def daily_bars_backfill(req: DailyBarsBackfillRequest, db: Session = Depends(get
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Daily bars backfill failed: {e}")
 
+    results_payload = list(result.get("results", [])) if req.include_results else []
+
     return DailyBarsBackfillResponse(
         as_of=datetime.now(timezone.utc),
-        universe_size=len(symbols),
+        universe_size=len(universe),
+        requested_total=len(universe),
+        start_index=start_index,
+        end_index=end_index,
+        processed_count=len(selected),
+        remaining=remaining,
+        next_start_index=next_start_index,
         total=int(result.get("total", 0)),
         updated=int(result.get("updated", 0)),
         skipped_cached=int(result.get("skipped_cached", 0)),
         failed=int(result.get("failed", 0)),
         no_data=int(result.get("no_data", 0)),
-        results=list(result.get("results", [])),
+        results=results_payload,
     )
 
 
