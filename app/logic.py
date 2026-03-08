@@ -21,6 +21,15 @@ class PlanRow:
     news_score: int = 0
     earnings_score: int = 0
     earnings_context: dict | None = None
+    signal_score: int = 0
+    market_regime: str | None = None
+    prob_tp: float | None = None
+    prob_sl: float | None = None
+    prob_open: float | None = None
+    expected_return: float | None = None
+    confidence: float | None = None
+    buy_threshold: int | None = None
+    avoid_threshold: int | None = None
 
 
 # Static S&P 100-like liquid large-cap universe for API-side scanning.
@@ -86,11 +95,26 @@ def finnhub_get(path: str, params: dict) -> dict | list | None:
         return None
 
 
+def _sigmoid(x: float) -> float:
+    if x >= 0:
+        z = math.exp(-x)
+        return 1.0 / (1.0 + z)
+    z = math.exp(x)
+    return z / (1.0 + z)
+
+
 def get_last_price(ticker: str) -> float | None:
     data = finnhub_get("/quote", {"symbol": ticker})
     if not isinstance(data, dict) or data.get("c") in (None, 0):
         return None
     return float(data["c"])
+
+
+def _moving_average(values: list[float], window: int) -> float | None:
+    if len(values) < window or window <= 0:
+        return None
+    tail = values[-window:]
+    return sum(tail) / max(len(tail), 1)
 
 
 def get_company_news_summary(ticker: str, days: int = 7, limit: int = 5) -> list[dict]:
@@ -249,6 +273,70 @@ def _get_daily_closes(ticker: str, frm: date, to: date) -> dict[date, float]:
     return out
 
 
+def detect_market_regime(breadth_universe: list[str] | None = None) -> dict:
+    now = datetime.now(timezone.utc)
+    end = now.date()
+    start = end - timedelta(days=130)
+
+    spy_closes_map = _get_daily_closes("SPY", start, end)
+    spy_closes = [spy_closes_map[d] for d in sorted(spy_closes_map.keys())]
+
+    spy_price = spy_closes[-1] if spy_closes else None
+    spy_ma20 = _moving_average(spy_closes, 20)
+    spy_ma50 = _moving_average(spy_closes, 50)
+
+    trend_score = 0.0
+    if spy_price is not None and spy_ma20 is not None:
+        trend_score += 0.7 if spy_price >= spy_ma20 else -0.7
+    if spy_price is not None and spy_ma50 is not None:
+        trend_score += 1.1 if spy_price >= spy_ma50 else -1.1
+    if spy_ma20 is not None and spy_ma50 is not None:
+        trend_score += 0.7 if spy_ma20 >= spy_ma50 else -0.7
+
+    breadth = breadth_universe or [
+        "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOG", "TSLA", "JPM", "XOM", "UNH", "HD", "LLY"
+    ]
+    breadth = breadth[:12]
+    breadth_ok = 0
+    breadth_total = 0
+
+    for t in breadth:
+        c_map = _get_daily_closes(t, end - timedelta(days=70), end)
+        if not c_map:
+            continue
+        vals = [c_map[d] for d in sorted(c_map.keys())]
+        if not vals:
+            continue
+        ma20 = _moving_average(vals, 20)
+        if ma20 is None:
+            continue
+        breadth_total += 1
+        if vals[-1] >= ma20:
+            breadth_ok += 1
+
+    breadth_ratio = (breadth_ok / breadth_total) if breadth_total else None
+    if breadth_ratio is not None:
+        trend_score += (breadth_ratio - 0.5) * 2.0
+
+    if trend_score >= 0.85:
+        regime = "risk_on"
+    elif trend_score <= -0.85:
+        regime = "risk_off"
+    else:
+        regime = "neutral"
+
+    return {
+        "as_of": now,
+        "regime": regime,
+        "score": round(trend_score, 4),
+        "spy_price": spy_price,
+        "spy_ma20": spy_ma20,
+        "spy_ma50": spy_ma50,
+        "breadth_ratio": breadth_ratio,
+        "breadth_samples": breadth_total,
+    }
+
+
 def _price_change_after_event(closes: dict[date, float], event_day: date) -> float | None:
     # Compare first close after event with previous close before event.
     prev_candidates = [d for d in closes.keys() if d < event_day]
@@ -360,8 +448,73 @@ def compute_earnings_signal(ticker: str, last_price: float | None) -> tuple[int,
     return earnings_score, context
 
 
-def build_swing_plan(tickers: list[str]) -> list[PlanRow]:
+def estimate_trade_probabilities(
+    *,
+    signal_score: int,
+    entry: float,
+    stop: float,
+    take_profit: float,
+    regime: str,
+    history_win_rate: float | None,
+    history_samples: int,
+) -> dict:
+    # Baseline logits from signal strength.
+    score_tp = -0.2 + 0.24 * float(signal_score)
+    score_sl = -0.35 - 0.19 * float(signal_score)
+
+    if regime == "risk_on":
+        score_tp += 0.35
+        score_sl -= 0.22
+    elif regime == "risk_off":
+        score_tp -= 0.45
+        score_sl += 0.35
+
+    confidence_hist = min(1.0, max(0.0, history_samples / 10.0))
+    if history_win_rate is not None:
+        score_tp += (history_win_rate - 0.5) * 1.3 * confidence_hist
+        score_sl += (0.5 - history_win_rate) * 0.9 * confidence_hist
+
+    p_tp = _sigmoid(score_tp)
+    p_sl = _sigmoid(score_sl)
+
+    # Keep room for open/undecided state.
+    total = p_tp + p_sl
+    if total > 0.92:
+        k = 0.92 / total
+        p_tp *= k
+        p_sl *= k
+
+    p_open = max(0.0, 1.0 - p_tp - p_sl)
+
+    reward = (take_profit - entry) / max(entry, 1e-9)
+    loss = (entry - stop) / max(entry, 1e-9)
+    open_drift = (p_tp - p_sl) * 0.25 * reward
+
+    expected_return = p_tp * reward - p_sl * loss + p_open * open_drift
+
+    confidence = 0.35 + 0.3 * min(1.0, abs(signal_score) / 8.0) + 0.25 * confidence_hist
+    if regime != "neutral":
+        confidence += 0.1
+    confidence = max(0.0, min(0.95, confidence))
+
+    return {
+        "p_tp": float(round(p_tp, 6)),
+        "p_sl": float(round(p_sl, 6)),
+        "p_open": float(round(p_open, 6)),
+        "expected_return": float(round(expected_return, 6)),
+        "confidence": float(round(confidence, 6)),
+    }
+
+
+def build_swing_plan(
+    tickers: list[str],
+    *,
+    regime: str | None = None,
+    buy_threshold: int = 4,
+    avoid_threshold: int = -4,
+) -> list[PlanRow]:
     rows: list[PlanRow] = []
+    regime_val = regime or "neutral"
 
     for t in tickers:
         last = get_last_price(t)
@@ -369,7 +522,7 @@ def build_swing_plan(tickers: list[str]) -> list[PlanRow]:
         news_score = compute_news_score(news)
 
         earnings_score, earnings_context = compute_earnings_signal(t, last)
-        combined_signal = news_score + earnings_score
+        signal_score = int(news_score + earnings_score)
 
         if last is None:
             rows.append(
@@ -386,6 +539,10 @@ def build_swing_plan(tickers: list[str]) -> list[PlanRow]:
                     news_score=news_score,
                     earnings_score=earnings_score,
                     earnings_context=earnings_context,
+                    signal_score=signal_score,
+                    market_regime=regime_val,
+                    buy_threshold=buy_threshold,
+                    avoid_threshold=avoid_threshold,
                 )
             )
             continue
@@ -394,15 +551,26 @@ def build_swing_plan(tickers: list[str]) -> list[PlanRow]:
         stop = entry * 0.97
         take_profit = entry * 1.06
 
-        if combined_signal >= 4:
+        probs = estimate_trade_probabilities(
+            signal_score=signal_score,
+            entry=entry,
+            stop=stop,
+            take_profit=take_profit,
+            regime=regime_val,
+            history_win_rate=None,
+            history_samples=0,
+        )
+
+        if signal_score >= buy_threshold:
             strategy_action = "BUY"
-        elif combined_signal <= -4:
-            strategy_action = "WAIT"
+        elif signal_score <= avoid_threshold:
+            strategy_action = "WAIT / AVOID"
         else:
             strategy_action = "HOLD / WAIT"
 
         reason = (
-            f"signal={combined_signal} (news={news_score}, earnings={earnings_score}); "
+            f"regime={regime_val}; signal={signal_score} (news={news_score}, earnings={earnings_score}); "
+            f"p_tp={probs['p_tp']:.2f}, p_sl={probs['p_sl']:.2f}, exp_ret={probs['expected_return']:.3f}; "
             f"earnings move avg={earnings_context.get('avg_post_earnings_move_pct')}, "
             f"up-rate={earnings_context.get('post_earnings_up_rate')}, "
             f"52w-pos={earnings_context.get('price_position_52w')}, "
@@ -423,6 +591,15 @@ def build_swing_plan(tickers: list[str]) -> list[PlanRow]:
                 news_score=news_score,
                 earnings_score=earnings_score,
                 earnings_context=earnings_context,
+                signal_score=signal_score,
+                market_regime=regime_val,
+                prob_tp=probs["p_tp"],
+                prob_sl=probs["p_sl"],
+                prob_open=probs["p_open"],
+                expected_return=probs["expected_return"],
+                confidence=probs["confidence"],
+                buy_threshold=buy_threshold,
+                avoid_threshold=avoid_threshold,
             )
         )
 

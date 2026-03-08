@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, Depends, Header, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
@@ -17,6 +18,8 @@ from .logic import (
     get_last_price,
     evaluate_plan_row,
     get_sp100_universe,
+    detect_market_regime,
+    estimate_trade_probabilities,
 )
 
 
@@ -53,7 +56,7 @@ _ensure_runtime_columns()
 
 app = FastAPI(
     title="Trader Backend (Stocks Only)",
-    version="0.1.2",
+    version="0.1.3",
     servers=[
         {"url": "https://trader-api-production-7875.up.railway.app", "description": "Production"}
     ],
@@ -119,12 +122,26 @@ class PlanRowOut(BaseModel):
     earnings_score: int = 0
     earnings_context: Optional[dict] = None
 
+    signal_score: int = 0
+    market_regime: Optional[str] = None
+    prob_tp: Optional[float] = None
+    prob_sl: Optional[float] = None
+    prob_open: Optional[float] = None
+    expected_return: Optional[float] = None
+    confidence: Optional[float] = None
+    buy_threshold: Optional[int] = None
+    avoid_threshold: Optional[int] = None
+
     llm_action: Optional[str] = None
     llm_rationale: Optional[str] = None
 
 
 class PlanResponse(BaseModel):
     planned_at: datetime
+    market_regime: Optional[str] = None
+    regime_score: Optional[float] = None
+    buy_threshold: Optional[int] = None
+    avoid_threshold: Optional[int] = None
     rows: List[PlanRowOut]
 
 
@@ -159,6 +176,10 @@ class RankedPlanOut(BaseModel):
 
 class Sp100WorkflowResponse(BaseModel):
     planned_at: datetime
+    market_regime: str
+    regime_score: float
+    buy_threshold: int
+    avoid_threshold: int
     scanned_universe_size: int
     candidates_with_price: int
     selected_count: int
@@ -181,6 +202,15 @@ def _to_plan_row_out(r) -> PlanRowOut:
         news_score=getattr(r, "news_score", 0),
         earnings_score=getattr(r, "earnings_score", 0),
         earnings_context=getattr(r, "earnings_context", None),
+        signal_score=getattr(r, "signal_score", 0),
+        market_regime=getattr(r, "market_regime", None),
+        prob_tp=getattr(r, "prob_tp", None),
+        prob_sl=getattr(r, "prob_sl", None),
+        prob_open=getattr(r, "prob_open", None),
+        expected_return=getattr(r, "expected_return", None),
+        confidence=getattr(r, "confidence", None),
+        buy_threshold=getattr(r, "buy_threshold", None),
+        avoid_threshold=getattr(r, "avoid_threshold", None),
         news=[NewsItem(**n) for n in (getattr(r, "news", None) or [])],
     )
 
@@ -263,6 +293,160 @@ def _history_stats_by_ticker(db: Session, lookback_days: int) -> dict[str, dict]
     return out
 
 
+def _rolling_performance_snapshot(db: Session, lookback_days: int = 180) -> dict:
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=lookback_days)
+    rows = (
+        db.query(SwingDecision)
+        .filter(SwingDecision.planned_at >= cutoff)
+        .filter(SwingDecision.last_eval_return.isnot(None))
+        .all()
+    )
+
+    overall_samples = 0
+    overall_wins = 0
+    overall_sum = 0.0
+
+    buy_samples = 0
+    buy_wins = 0
+    buy_sum = 0.0
+
+    for d in rows:
+        if d.last_eval_return is None:
+            continue
+        ret = float(d.last_eval_return)
+        overall_samples += 1
+        overall_sum += ret
+        if ret > 0:
+            overall_wins += 1
+
+        action = (d.llm_action or d.strategy_action or "").strip().upper()
+        if action.startswith("BUY"):
+            buy_samples += 1
+            buy_sum += ret
+            if ret > 0:
+                buy_wins += 1
+
+    return {
+        "overall_samples": overall_samples,
+        "overall_avg_return": (overall_sum / max(overall_samples, 1)) if overall_samples else 0.0,
+        "overall_win_rate": (overall_wins / max(overall_samples, 1)) if overall_samples else 0.0,
+        "buy_samples": buy_samples,
+        "buy_avg_return": (buy_sum / max(buy_samples, 1)) if buy_samples else 0.0,
+        "buy_win_rate": (buy_wins / max(buy_samples, 1)) if buy_samples else 0.0,
+    }
+
+
+def _compute_dynamic_thresholds(regime: str, perf: dict) -> dict:
+    base_buy = 4
+    base_avoid = -4
+    if regime == "risk_on":
+        base_buy = 3
+        base_avoid = -5
+    elif regime == "risk_off":
+        base_buy = 6
+        base_avoid = -3
+
+    buy_adj = 0
+    avoid_adj = 0
+
+    if perf.get("buy_samples", 0) >= 12:
+        buy_win = float(perf.get("buy_win_rate", 0.0))
+        buy_avg = float(perf.get("buy_avg_return", 0.0))
+
+        if buy_win < 0.45 or buy_avg < 0.0:
+            buy_adj += 1
+            avoid_adj += 1
+        elif buy_win > 0.58 and buy_avg > 0.01:
+            buy_adj -= 1
+            avoid_adj -= 1
+
+    overall_avg = float(perf.get("overall_avg_return", 0.0))
+    if perf.get("overall_samples", 0) >= 20:
+        if overall_avg < -0.004:
+            buy_adj += 1
+        elif overall_avg > 0.008:
+            buy_adj -= 1
+
+    buy_threshold = max(3, min(7, base_buy + buy_adj))
+    avoid_threshold = max(-7, min(-2, base_avoid + avoid_adj))
+
+    return {
+        "buy_threshold": int(buy_threshold),
+        "avoid_threshold": int(avoid_threshold),
+    }
+
+
+def _apply_prob_and_action(
+    row,
+    *,
+    regime: str,
+    buy_threshold: int,
+    avoid_threshold: int,
+    history_win_rate: float | None,
+    history_samples: int,
+) -> dict:
+    if row.entry is None or row.stop is None or row.take_profit is None:
+        return {
+            "p_tp": None,
+            "p_sl": None,
+            "p_open": None,
+            "expected_return": None,
+            "confidence": None,
+            "action": "WAIT",
+        }
+
+    signal_score = int(getattr(row, "signal_score", getattr(row, "news_score", 0) + getattr(row, "earnings_score", 0)))
+    probs = estimate_trade_probabilities(
+        signal_score=signal_score,
+        entry=float(row.entry),
+        stop=float(row.stop),
+        take_profit=float(row.take_profit),
+        regime=regime,
+        history_win_rate=history_win_rate,
+        history_samples=history_samples,
+    )
+
+    buy_ok = signal_score >= buy_threshold and probs["p_tp"] >= 0.5 and probs["expected_return"] > 0
+    avoid_ok = signal_score <= avoid_threshold or probs["p_sl"] >= 0.47
+
+    if buy_ok:
+        action = "BUY"
+        strategy_action = "BUY"
+    elif avoid_ok:
+        action = "AVOID"
+        strategy_action = "WAIT / AVOID"
+    else:
+        action = "WAIT"
+        strategy_action = "HOLD / WAIT"
+
+    row.signal_score = signal_score
+    row.market_regime = regime
+    row.prob_tp = probs["p_tp"]
+    row.prob_sl = probs["p_sl"]
+    row.prob_open = probs["p_open"]
+    row.expected_return = probs["expected_return"]
+    row.confidence = probs["confidence"]
+    row.buy_threshold = buy_threshold
+    row.avoid_threshold = avoid_threshold
+    row.strategy_action = strategy_action
+    row.llm_action = action
+    row.llm_rationale = (
+        f"regime={regime}; signal={signal_score}; p_tp={probs['p_tp']:.2f}; "
+        f"p_sl={probs['p_sl']:.2f}; exp_ret={probs['expected_return']:.3f}; "
+        f"confidence={probs['confidence']:.2f}; history_samples={history_samples}"
+    )
+
+    return {
+        "p_tp": probs["p_tp"],
+        "p_sl": probs["p_sl"],
+        "p_open": probs["p_open"],
+        "expected_return": probs["expected_return"],
+        "confidence": probs["confidence"],
+        "action": action,
+    }
+
+
 @app.get("/debug/model")
 def debug_model(_=Depends(require_bearer_token)):
     cols = list(SwingDecision.__table__.columns.keys())
@@ -281,13 +465,22 @@ def scan_swing(req: ScanRequest, _=Depends(require_bearer_token)):
 
 
 @app.post("/plan/swing", response_model=PlanResponse)
-def plan_swing(req: PlanRequest, _=Depends(require_bearer_token)):
+def plan_swing(req: PlanRequest, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
     planned_at = datetime.now(timezone.utc)
 
+    regime_snapshot = detect_market_regime(req.tickers)
+    perf = _rolling_performance_snapshot(db, lookback_days=180)
+    thresholds = _compute_dynamic_thresholds(regime_snapshot["regime"], perf)
+    ticker_hist = _history_stats_by_ticker(db, lookback_days=180)
+
     try:
-        rows = build_swing_plan(req.tickers)
+        rows = build_swing_plan(
+            req.tickers,
+            regime=regime_snapshot["regime"],
+            buy_threshold=thresholds["buy_threshold"],
+            avoid_threshold=thresholds["avoid_threshold"],
+        )
     except Exception as e:
-        # Never return 500 for planner bugs; return a NO DATA row per ticker
         out = [
             PlanRowOut(
                 ticker=t,
@@ -302,15 +495,44 @@ def plan_swing(req: PlanRequest, _=Depends(require_bearer_token)):
                 news_score=0,
                 earnings_score=0,
                 earnings_context=None,
-                llm_action=None,
-                llm_rationale=None,
+                signal_score=0,
+                market_regime=regime_snapshot["regime"],
+                buy_threshold=thresholds["buy_threshold"],
+                avoid_threshold=thresholds["avoid_threshold"],
+                llm_action="WAIT",
+                llm_rationale="no-data",
             )
             for t in req.tickers
         ]
-        return {"planned_at": planned_at, "rows": out}
+        return {
+            "planned_at": planned_at,
+            "market_regime": regime_snapshot["regime"],
+            "regime_score": regime_snapshot["score"],
+            "buy_threshold": thresholds["buy_threshold"],
+            "avoid_threshold": thresholds["avoid_threshold"],
+            "rows": out,
+        }
+
+    for r in rows:
+        h = ticker_hist.get(r.ticker, {})
+        _apply_prob_and_action(
+            r,
+            regime=regime_snapshot["regime"],
+            buy_threshold=thresholds["buy_threshold"],
+            avoid_threshold=thresholds["avoid_threshold"],
+            history_win_rate=(float(h["win_rate"]) if "win_rate" in h else None),
+            history_samples=int(h.get("samples", 0)),
+        )
 
     out = [_to_plan_row_out(r) for r in rows]
-    return {"planned_at": planned_at, "rows": out}
+    return {
+        "planned_at": planned_at,
+        "market_regime": regime_snapshot["regime"],
+        "regime_score": regime_snapshot["score"],
+        "buy_threshold": thresholds["buy_threshold"],
+        "avoid_threshold": thresholds["avoid_threshold"],
+        "rows": out,
+    }
 
 
 @app.post("/workflow/sp100/top10-log", response_model=Sp100WorkflowResponse)
@@ -322,15 +544,22 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
     min_history_samples = max(1, min(int(req.min_history_samples), 20))
 
     universe = get_sp100_universe(top_scan)
-    rows = build_swing_plan(universe)
+    regime_snapshot = detect_market_regime(universe[:20])
+    perf = _rolling_performance_snapshot(db, lookback_days=lookback_days)
+    thresholds = _compute_dynamic_thresholds(regime_snapshot["regime"], perf)
+
+    rows = build_swing_plan(
+        universe,
+        regime=regime_snapshot["regime"],
+        buy_threshold=thresholds["buy_threshold"],
+        avoid_threshold=thresholds["avoid_threshold"],
+    )
     history_stats = _history_stats_by_ticker(db, lookback_days=lookback_days)
 
     ranked: list[dict] = []
     for r in rows:
         if r.entry is None or r.stop is None or r.take_profit is None:
             continue
-
-        signal_score = int(getattr(r, "news_score", 0) + getattr(r, "earnings_score", 0))
 
         h = history_stats.get(r.ticker)
         history_samples = 0
@@ -347,18 +576,26 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
                 hist_raw = (history_avg_return * 100.0) * 0.35 + (history_win_rate - 0.5) * 4.0
                 history_boost = max(-3.0, min(3.0, hist_raw * confidence))
 
-        score = float(signal_score) + float(history_boost)
+        decision = _apply_prob_and_action(
+            r,
+            regime=regime_snapshot["regime"],
+            buy_threshold=thresholds["buy_threshold"],
+            avoid_threshold=thresholds["avoid_threshold"],
+            history_win_rate=history_win_rate,
+            history_samples=history_samples,
+        )
 
-        if score >= 5.0:
-            r.llm_action = "BUY"
-        elif score <= -4.0:
-            r.llm_action = "AVOID"
-        else:
-            r.llm_action = "WAIT"
+        signal_score = int(getattr(r, "signal_score", 0))
+        exp_ret = float(decision["expected_return"] or 0.0)
+        confidence = float(decision["confidence"] or 0.0)
+        p_edge = float((decision["p_tp"] or 0.0) - (decision["p_sl"] or 0.0))
 
-        r.llm_rationale = (
-            f"sp100_rank score={score:.2f}; signal={signal_score}; "
-            f"history_boost={history_boost:.2f}; history_samples={history_samples}"
+        score = (
+            float(signal_score)
+            + float(history_boost)
+            + exp_ret * 120.0
+            + p_edge * 2.5
+            + confidence * 1.5
         )
 
         ranked.append(
@@ -415,6 +652,10 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
 
     return Sp100WorkflowResponse(
         planned_at=planned_at,
+        market_regime=regime_snapshot["regime"],
+        regime_score=float(regime_snapshot["score"]),
+        buy_threshold=thresholds["buy_threshold"],
+        avoid_threshold=thresholds["avoid_threshold"],
         scanned_universe_size=len(universe),
         candidates_with_price=len(ranked),
         selected_count=len(out_rows),
