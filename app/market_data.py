@@ -1,10 +1,11 @@
 from datetime import datetime, timezone, timedelta, date
 import time
+import requests
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
 
 from .models import DailyBar
-from .logic import finnhub_get, FINNHUB_API_KEY
+from .logic import FINNHUB_API_KEY, FINNHUB_BASE
 
 
 def _fetch_finnhub_candles_payload(symbol: str, frm: date, to: date, *, max_attempts: int = 3) -> tuple[dict | None, str]:
@@ -13,6 +14,7 @@ def _fetch_finnhub_candles_payload(symbol: str, frm: date, to: date, *, max_atte
         "resolution": "D",
         "from": int(datetime(frm.year, frm.month, frm.day, tzinfo=timezone.utc).timestamp()),
         "to": int(datetime(to.year, to.month, to.day, tzinfo=timezone.utc).timestamp()),
+        "token": FINNHUB_API_KEY,
     }
 
     if not FINNHUB_API_KEY:
@@ -20,15 +22,33 @@ def _fetch_finnhub_candles_payload(symbol: str, frm: date, to: date, *, max_atte
 
     last_status = "fetch_failed"
     for attempt in range(max_attempts):
-        data = finnhub_get("/stock/candle", params)
-        if isinstance(data, dict):
-            status = str(data.get("s") or "").lower().strip()
-            if status == "ok":
-                return data, "ok"
-            if status:
-                last_status = f"api_status:{status}"
+        try:
+            r = requests.get(f"{FINNHUB_BASE}/stock/candle", params=params, timeout=12)
+            status_code = int(r.status_code)
+
+            payload = None
+            try:
+                payload = r.json()
+            except Exception:
+                payload = None
+
+            if status_code == 200 and isinstance(payload, dict):
+                status = str(payload.get("s") or "").lower().strip()
+                if status == "ok":
+                    return payload, "ok"
+                if status:
+                    last_status = f"api_status:{status}"
+                else:
+                    err = payload.get("error") if isinstance(payload, dict) else None
+                    last_status = f"api_error:{str(err)[:100]}" if err else "api_status:unknown"
             else:
-                last_status = "api_status:unknown"
+                if isinstance(payload, dict) and payload.get("error"):
+                    last_status = f"http_{status_code}:{str(payload.get('error'))[:80]}"
+                else:
+                    last_status = f"http_{status_code}"
+
+        except requests.RequestException:
+            last_status = "request_exception"
 
         if attempt < (max_attempts - 1):
             time.sleep(0.35 * (attempt + 1))
