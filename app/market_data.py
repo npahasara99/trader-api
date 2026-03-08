@@ -8,6 +8,14 @@ from .models import DailyBar
 from .logic import FINNHUB_API_KEY, FINNHUB_BASE
 
 
+YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
+
+
+def _normalize_symbol_for_yahoo(symbol: str) -> str:
+    # Yahoo uses '-' for class shares (e.g. BRK-B instead of BRK.B)
+    return symbol.upper().replace(".", "-")
+
+
 def _fetch_finnhub_candles_payload(symbol: str, frm: date, to: date, *, max_attempts: int = 3) -> tuple[dict | None, str]:
     params = {
         "symbol": symbol,
@@ -56,15 +64,56 @@ def _fetch_finnhub_candles_payload(symbol: str, frm: date, to: date, *, max_atte
     return None, last_status
 
 
-def fetch_finnhub_daily_bars_with_meta(symbol: str, frm: date, to: date) -> tuple[list[dict], str]:
-    data, fetch_status = _fetch_finnhub_candles_payload(symbol, frm, to)
-    if not isinstance(data, dict):
-        return [], fetch_status
+def _fetch_yahoo_candles_payload(symbol: str, frm: date, to: date, *, max_attempts: int = 2) -> tuple[dict | None, str]:
+    yahoo_symbol = _normalize_symbol_for_yahoo(symbol)
+    period1 = int(datetime(frm.year, frm.month, frm.day, tzinfo=timezone.utc).timestamp())
+    # Yahoo period2 is exclusive; add one day to include `to`.
+    period2 = int(datetime(to.year, to.month, to.day, tzinfo=timezone.utc).timestamp()) + 86400
 
-    if data.get("s") != "ok":
-        status = str(data.get("s") or "unknown").lower().strip()
-        return [], f"api_status:{status}"
+    params = {
+        "period1": period1,
+        "period2": period2,
+        "interval": "1d",
+        "events": "history",
+        "includeAdjustedClose": "true",
+    }
 
+    last_status = "yahoo_fetch_failed"
+    for attempt in range(max_attempts):
+        try:
+            r = requests.get(f"{YAHOO_CHART_BASE}/{yahoo_symbol}", params=params, timeout=12)
+            status_code = int(r.status_code)
+
+            payload = None
+            try:
+                payload = r.json()
+            except Exception:
+                payload = None
+
+            if status_code == 200 and isinstance(payload, dict):
+                chart = payload.get("chart") or {}
+                err = chart.get("error")
+                if err:
+                    msg = str((err or {}).get("description") or (err or {}).get("code") or "unknown")
+                    last_status = f"yahoo_error:{msg[:80]}"
+                else:
+                    results = chart.get("result") or []
+                    if results:
+                        return payload, "ok"
+                    last_status = "yahoo_empty_result"
+            else:
+                last_status = f"yahoo_http_{status_code}"
+
+        except requests.RequestException:
+            last_status = "yahoo_request_exception"
+
+        if attempt < (max_attempts - 1):
+            time.sleep(0.35 * (attempt + 1))
+
+    return None, last_status
+
+
+def _bars_from_finnhub_payload(symbol: str, data: dict) -> list[dict]:
     ts = data.get("t") or []
     o = data.get("o") or []
     h = data.get("h") or []
@@ -94,9 +143,72 @@ def fetch_finnhub_daily_bars_with_meta(symbol: str, frm: date, to: date) -> tupl
         except Exception:
             continue
 
-    if not out:
-        return [], "empty_payload"
-    return out, "ok"
+    return out
+
+
+def _bars_from_yahoo_payload(symbol: str, data: dict) -> list[dict]:
+    chart = data.get("chart") or {}
+    results = chart.get("result") or []
+    if not results:
+        return []
+
+    r0 = results[0] or {}
+    ts = r0.get("timestamp") or []
+    indicators = r0.get("indicators") or {}
+    quote = (indicators.get("quote") or [{}])[0] or {}
+    adj = (indicators.get("adjclose") or [{}])[0] or {}
+
+    o = quote.get("open") or []
+    h = quote.get("high") or []
+    l = quote.get("low") or []
+    c = quote.get("close") or []
+    v = quote.get("volume") or []
+    ac = adj.get("adjclose") or []
+
+    out: list[dict] = []
+    for i, t in enumerate(ts):
+        try:
+            if i >= len(c) or c[i] is None:
+                continue
+            d = datetime.fromtimestamp(int(t), tz=timezone.utc).date()
+            close_val = float(c[i])
+            adj_val = float(ac[i]) if i < len(ac) and ac[i] is not None else close_val
+            out.append(
+                {
+                    "symbol": symbol,
+                    "bar_date": d,
+                    "open": (float(o[i]) if i < len(o) and o[i] is not None else None),
+                    "high": (float(h[i]) if i < len(h) and h[i] is not None else None),
+                    "low": (float(l[i]) if i < len(l) and l[i] is not None else None),
+                    "close": close_val,
+                    "volume": (float(v[i]) if i < len(v) and v[i] is not None else None),
+                    "adjusted_close": adj_val,
+                    "source": "yahoo",
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            )
+        except Exception:
+            continue
+
+    return out
+
+
+def fetch_finnhub_daily_bars_with_meta(symbol: str, frm: date, to: date) -> tuple[list[dict], str]:
+    data, fetch_status = _fetch_finnhub_candles_payload(symbol, frm, to)
+    if isinstance(data, dict) and str(data.get("s") or "").lower().strip() == "ok":
+        bars = _bars_from_finnhub_payload(symbol, data)
+        if bars:
+            return bars, "ok"
+        fetch_status = "empty_payload_finnhub"
+
+    y_data, y_status = _fetch_yahoo_candles_payload(symbol, frm, to)
+    if isinstance(y_data, dict) and y_status == "ok":
+        y_bars = _bars_from_yahoo_payload(symbol, y_data)
+        if y_bars:
+            return y_bars, f"fallback_yahoo_after:{fetch_status}"
+        return [], f"fallback_yahoo_empty_after:{fetch_status}"
+
+    return [], f"{fetch_status}|yahoo:{y_status}"
 
 
 def fetch_finnhub_daily_bars(symbol: str, frm: date, to: date) -> list[dict]:
