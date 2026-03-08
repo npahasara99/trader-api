@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta, date
+import time
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
 
@@ -6,19 +7,40 @@ from .models import DailyBar
 from .logic import finnhub_get
 
 
-def fetch_finnhub_daily_bars(symbol: str, frm: date, to: date) -> list[dict]:
-    data = finnhub_get(
-        "/stock/candle",
-        {
-            "symbol": symbol,
-            "resolution": "D",
-            "from": int(datetime(frm.year, frm.month, frm.day, tzinfo=timezone.utc).timestamp()),
-            "to": int(datetime(to.year, to.month, to.day, tzinfo=timezone.utc).timestamp()),
-        },
-    )
+def _fetch_finnhub_candles_payload(symbol: str, frm: date, to: date, *, max_attempts: int = 3) -> tuple[dict | None, str]:
+    params = {
+        "symbol": symbol,
+        "resolution": "D",
+        "from": int(datetime(frm.year, frm.month, frm.day, tzinfo=timezone.utc).timestamp()),
+        "to": int(datetime(to.year, to.month, to.day, tzinfo=timezone.utc).timestamp()),
+    }
 
-    if not isinstance(data, dict) or data.get("s") != "ok":
-        return []
+    last_status = "fetch_failed"
+    for attempt in range(max_attempts):
+        data = finnhub_get("/stock/candle", params)
+        if isinstance(data, dict):
+            status = str(data.get("s") or "").lower().strip()
+            if status == "ok":
+                return data, "ok"
+            if status:
+                last_status = f"api_status:{status}"
+            else:
+                last_status = "api_status:unknown"
+
+        if attempt < (max_attempts - 1):
+            time.sleep(0.35 * (attempt + 1))
+
+    return None, last_status
+
+
+def fetch_finnhub_daily_bars_with_meta(symbol: str, frm: date, to: date) -> tuple[list[dict], str]:
+    data, fetch_status = _fetch_finnhub_candles_payload(symbol, frm, to)
+    if not isinstance(data, dict):
+        return [], fetch_status
+
+    if data.get("s") != "ok":
+        status = str(data.get("s") or "unknown").lower().strip()
+        return [], f"api_status:{status}"
 
     ts = data.get("t") or []
     o = data.get("o") or []
@@ -49,7 +71,14 @@ def fetch_finnhub_daily_bars(symbol: str, frm: date, to: date) -> list[dict]:
         except Exception:
             continue
 
-    return out
+    if not out:
+        return [], "empty_payload"
+    return out, "ok"
+
+
+def fetch_finnhub_daily_bars(symbol: str, frm: date, to: date) -> list[dict]:
+    bars, _ = fetch_finnhub_daily_bars_with_meta(symbol, frm, to)
+    return bars
 
 
 def upsert_daily_bars(db: Session, bars: list[dict]) -> int:
@@ -80,7 +109,6 @@ def upsert_daily_bars(db: Session, bars: list[dict]) -> int:
         db.execute(sql, bars)
         return len(bars)
 
-    # Generic fallback
     count = 0
     for b in bars:
         existing = db.get(DailyBar, (b["symbol"], b["bar_date"]))
@@ -198,11 +226,26 @@ def backfill_symbol_daily_bars(
                     "status": "skipped_cached",
                     "inserted": 0,
                     "count": count,
+                    "fetch_status": "cached",
                     "min_date": str(min_date),
                     "max_date": str(max_date),
                 }
 
-    bars = fetch_finnhub_daily_bars(symbol, start, end)
+    bars, fetch_status = fetch_finnhub_daily_bars_with_meta(symbol, start, end)
+    if not bars:
+        coverage = _coverage_stats(db, symbol)
+        count = int(coverage.get("count", 0))
+        status = "kept_existing" if count > 0 else "no_data"
+        return {
+            "symbol": symbol,
+            "status": status,
+            "inserted": 0,
+            "count": count,
+            "fetch_status": fetch_status,
+            "min_date": str(coverage.get("min_date")) if coverage.get("min_date") else None,
+            "max_date": str(coverage.get("max_date")) if coverage.get("max_date") else None,
+        }
+
     inserted = upsert_daily_bars(db, bars)
 
     coverage = _coverage_stats(db, symbol)
@@ -211,6 +254,7 @@ def backfill_symbol_daily_bars(
         "status": "updated",
         "inserted": inserted,
         "count": int(coverage.get("count", 0)),
+        "fetch_status": fetch_status,
         "min_date": str(coverage.get("min_date")) if coverage.get("min_date") else None,
         "max_date": str(coverage.get("max_date")) if coverage.get("max_date") else None,
     }
@@ -227,21 +271,26 @@ def backfill_universe_daily_bars(
     commit_every = max(1, min(50, int(commit_every)))
 
     results: list[dict] = []
-    ok = 0
+    updated = 0
     failed = 0
     skipped = 0
+    no_data = 0
 
     for i, sym in enumerate(symbols, start=1):
         try:
             r = backfill_symbol_daily_bars(db, sym, years=years, refresh=refresh)
             results.append(r)
-            status = r.get("status")
+            status = str(r.get("status") or "")
+
             if status == "updated":
-                ok += 1
-            elif status == "skipped_cached":
+                updated += 1
+            elif status in ("skipped_cached", "kept_existing"):
                 skipped += 1
+            elif status == "no_data":
+                no_data += 1
+                failed += 1
             else:
-                ok += 1
+                failed += 1
 
             if i % commit_every == 0:
                 db.commit()
@@ -254,8 +303,9 @@ def backfill_universe_daily_bars(
 
     return {
         "total": len(symbols),
-        "updated": ok,
+        "updated": updated,
         "skipped_cached": skipped,
+        "no_data": no_data,
         "failed": failed,
         "results": results,
     }

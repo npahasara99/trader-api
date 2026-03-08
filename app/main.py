@@ -210,6 +210,7 @@ class DailyBarsBackfillResponse(BaseModel):
     updated: int
     skipped_cached: int
     failed: int
+    no_data: int = 0
     results: List[dict]
 
 
@@ -939,6 +940,7 @@ def daily_bars_backfill(req: DailyBarsBackfillRequest, db: Session = Depends(get
         updated=int(result.get("updated", 0)),
         skipped_cached=int(result.get("skipped_cached", 0)),
         failed=int(result.get("failed", 0)),
+        no_data=int(result.get("no_data", 0)),
         results=list(result.get("results", [])),
     )
 
