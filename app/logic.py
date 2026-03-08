@@ -30,6 +30,10 @@ class PlanRow:
     confidence: float | None = None
     buy_threshold: int | None = None
     avoid_threshold: int | None = None
+    stop_loss_pct: float | None = None
+    take_profit_pct: float | None = None
+    hold_days: int | None = None
+    risk_tuning_reason: str | None = None
 
 
 # Static S&P 100-like liquid large-cap universe for API-side scanning.
@@ -675,3 +679,4 @@ def classify_assumption(
     if last_price >= take_profit:
         return False, ("wait_missed_tp" if not expired else "wait_missed_tp_expired"), ret
     return False, "wait_neutral", ret
+

@@ -131,6 +131,10 @@ class PlanRowOut(BaseModel):
     confidence: Optional[float] = None
     buy_threshold: Optional[int] = None
     avoid_threshold: Optional[int] = None
+    stop_loss_pct: Optional[float] = None
+    take_profit_pct: Optional[float] = None
+    hold_days: Optional[int] = None
+    risk_tuning_reason: Optional[str] = None
 
     llm_action: Optional[str] = None
     llm_rationale: Optional[str] = None
@@ -211,6 +215,10 @@ def _to_plan_row_out(r) -> PlanRowOut:
         confidence=getattr(r, "confidence", None),
         buy_threshold=getattr(r, "buy_threshold", None),
         avoid_threshold=getattr(r, "avoid_threshold", None),
+        stop_loss_pct=getattr(r, "stop_loss_pct", None),
+        take_profit_pct=getattr(r, "take_profit_pct", None),
+        hold_days=getattr(r, "hold_days", None),
+        risk_tuning_reason=getattr(r, "risk_tuning_reason", None),
         news=[NewsItem(**n) for n in (getattr(r, "news", None) or [])],
     )
 
@@ -276,9 +284,10 @@ def _history_stats_by_ticker(db: Session, lookback_days: int) -> dict[str, dict]
             continue
         r = float(d.last_eval_return)
         t = d.ticker
-        s = raw.setdefault(t, {"samples": 0, "wins": 0, "ret_sum": 0.0})
+        s = raw.setdefault(t, {"samples": 0, "wins": 0, "ret_sum": 0.0, "abs_ret_sum": 0.0})
         s["samples"] += 1
         s["ret_sum"] += r
+        s["abs_ret_sum"] += abs(r)
         if r > 0:
             s["wins"] += 1
 
@@ -288,6 +297,7 @@ def _history_stats_by_ticker(db: Session, lookback_days: int) -> dict[str, dict]
         out[t] = {
             "samples": n,
             "avg_return": (s["ret_sum"] / max(n, 1)),
+            "avg_abs_return": (s["abs_ret_sum"] / max(n, 1)),
             "win_rate": (s["wins"] / max(n, 1)),
         }
     return out
@@ -306,6 +316,7 @@ def _rolling_performance_snapshot(db: Session, lookback_days: int = 180) -> dict
     overall_samples = 0
     overall_wins = 0
     overall_sum = 0.0
+    overall_abs_sum = 0.0
 
     buy_samples = 0
     buy_wins = 0
@@ -317,6 +328,7 @@ def _rolling_performance_snapshot(db: Session, lookback_days: int = 180) -> dict
         ret = float(d.last_eval_return)
         overall_samples += 1
         overall_sum += ret
+        overall_abs_sum += abs(ret)
         if ret > 0:
             overall_wins += 1
 
@@ -330,6 +342,7 @@ def _rolling_performance_snapshot(db: Session, lookback_days: int = 180) -> dict
     return {
         "overall_samples": overall_samples,
         "overall_avg_return": (overall_sum / max(overall_samples, 1)) if overall_samples else 0.0,
+        "overall_abs_return": (overall_abs_sum / max(overall_samples, 1)) if overall_samples else 0.0,
         "overall_win_rate": (overall_wins / max(overall_samples, 1)) if overall_samples else 0.0,
         "buy_samples": buy_samples,
         "buy_avg_return": (buy_sum / max(buy_samples, 1)) if buy_samples else 0.0,
@@ -375,6 +388,109 @@ def _compute_dynamic_thresholds(regime: str, perf: dict) -> dict:
         "buy_threshold": int(buy_threshold),
         "avoid_threshold": int(avoid_threshold),
     }
+
+
+
+def _compute_adaptive_trade_levels(
+    *,
+    entry: float,
+    ticker: str,
+    regime: str,
+    planned_at: datetime,
+    ticker_stats: dict,
+    perf: dict,
+) -> dict:
+    base_stop_pct = 0.03
+    base_tp_pct = 0.06
+    base_hold_days = 20
+
+    samples = int(ticker_stats.get("samples", 0)) if ticker_stats else 0
+    ticker_win = float(ticker_stats.get("win_rate", perf.get("overall_win_rate", 0.5))) if ticker_stats else float(perf.get("overall_win_rate", 0.5))
+    ticker_avg = float(ticker_stats.get("avg_return", perf.get("overall_avg_return", 0.0))) if ticker_stats else float(perf.get("overall_avg_return", 0.0))
+    ticker_abs = float(ticker_stats.get("avg_abs_return", perf.get("overall_abs_return", 0.025))) if ticker_stats else float(perf.get("overall_abs_return", 0.025))
+
+    confidence = min(1.0, samples / 12.0)
+
+    stop_pct = max(0.018, min(0.06, 0.012 + 0.6 * max(ticker_abs, 0.005)))
+    tp_pct = base_tp_pct
+    hold_days = base_hold_days
+
+    edge = (ticker_win - 0.5) * 2.2 + ticker_avg * 24.0
+    edge *= (0.55 + 0.45 * confidence)
+
+    if edge > 0:
+        tp_pct += min(0.03, 0.012 * edge)
+        stop_pct += min(0.01, 0.005 * edge)
+        hold_days += int(round(min(8.0, 3.0 * edge)))
+    else:
+        tp_pct -= min(0.02, 0.012 * abs(edge))
+        stop_pct -= min(0.01, 0.004 * abs(edge))
+        hold_days -= int(round(min(8.0, 3.0 * abs(edge))))
+
+    if regime == "risk_on":
+        tp_pct += 0.006
+        stop_pct += 0.002
+        hold_days += 2
+    elif regime == "risk_off":
+        tp_pct -= 0.010
+        stop_pct -= 0.004
+        hold_days -= 4
+
+    stop_pct = max(0.015, min(0.065, stop_pct))
+    tp_pct = max(0.03, min(0.12, tp_pct))
+    hold_days = max(7, min(35, hold_days))
+
+    stop = entry * (1.0 - stop_pct)
+    take_profit = entry * (1.0 + tp_pct)
+    max_hold_date = planned_at + timedelta(days=hold_days)
+
+    reason = (
+        f"adaptive-risk ticker={ticker}; samples={samples}; win={ticker_win:.2f}; "
+        f"avg_ret={ticker_avg:.3f}; regime={regime}; sl%={stop_pct:.3f}; "
+        f"tp%={tp_pct:.3f}; hold={hold_days}"
+    )
+
+    return {
+        "stop": float(stop),
+        "take_profit": float(take_profit),
+        "max_hold_date": max_hold_date,
+        "stop_loss_pct": float(round(stop_pct, 6)),
+        "take_profit_pct": float(round(tp_pct, 6)),
+        "hold_days": int(hold_days),
+        "risk_tuning_reason": reason,
+    }
+
+
+def _apply_adaptive_risk_controls(
+    row,
+    *,
+    planned_at: datetime,
+    regime: str,
+    ticker_stats: dict,
+    perf: dict,
+) -> None:
+    if row.entry is None:
+        return
+
+    levels = _compute_adaptive_trade_levels(
+        entry=float(row.entry),
+        ticker=row.ticker,
+        regime=regime,
+        planned_at=planned_at,
+        ticker_stats=ticker_stats,
+        perf=perf,
+    )
+
+    row.stop = levels["stop"]
+    row.take_profit = levels["take_profit"]
+    row.max_hold_date = levels["max_hold_date"]
+    row.stop_loss_pct = levels["stop_loss_pct"]
+    row.take_profit_pct = levels["take_profit_pct"]
+    row.hold_days = levels["hold_days"]
+    row.risk_tuning_reason = levels["risk_tuning_reason"]
+
+    prior = row.strategy_reason or ""
+    row.strategy_reason = (prior + " | " + levels["risk_tuning_reason"]).strip(" |")
 
 
 def _apply_prob_and_action(
@@ -515,6 +631,13 @@ def plan_swing(req: PlanRequest, db: Session = Depends(get_db), _=Depends(requir
 
     for r in rows:
         h = ticker_hist.get(r.ticker, {})
+        _apply_adaptive_risk_controls(
+            r,
+            planned_at=planned_at,
+            regime=regime_snapshot["regime"],
+            ticker_stats=h,
+            perf=perf,
+        )
         _apply_prob_and_action(
             r,
             regime=regime_snapshot["regime"],
@@ -575,6 +698,14 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
                 confidence = min(1.0, history_samples / 8.0)
                 hist_raw = (history_avg_return * 100.0) * 0.35 + (history_win_rate - 0.5) * 4.0
                 history_boost = max(-3.0, min(3.0, hist_raw * confidence))
+
+        _apply_adaptive_risk_controls(
+            r,
+            planned_at=planned_at,
+            regime=regime_snapshot["regime"],
+            ticker_stats=(h or {}),
+            perf=perf,
+        )
 
         decision = _apply_prob_and_action(
             r,
@@ -999,3 +1130,4 @@ def learning_patterns(
         "by_ticker": by_ticker,
         "prompt_context": prompt_context,
     }
+
