@@ -16,6 +16,7 @@ from .logic import (
     build_swing_plan,
     get_last_price,
     evaluate_plan_row,
+    get_sp100_universe,
 )
 
 
@@ -52,7 +53,7 @@ _ensure_runtime_columns()
 
 app = FastAPI(
     title="Trader Backend (Stocks Only)",
-    version="0.1.1",
+    version="0.1.2",
     servers=[
         {"url": "https://trader-api-production-7875.up.railway.app", "description": "Production"}
     ],
@@ -127,10 +128,150 @@ class PlanResponse(BaseModel):
     rows: List[PlanRowOut]
 
 
+class LogRequest(BaseModel):
+    planned_at: datetime
+    mode: str = "manual"
+    rows: List[PlanRowOut]
+    meta: dict = Field(default_factory=dict)
+
+
+class Sp100WorkflowRequest(BaseModel):
+    top_scan: int = 100
+    top_plan: int = 10
+    lookback_days: int = 180
+    min_history_samples: int = 3
+    mode: str = "sp100_auto"
+    llm_provider: Optional[str] = "chatgpt-actions"
+    llm_model: Optional[str] = None
+    llm_style: Optional[str] = "sp100_ranker_v1"
+
+
+class RankedPlanOut(BaseModel):
+    rank: int
+    score: float
+    signal_score: int
+    history_boost: float = 0.0
+    history_samples: int = 0
+    history_win_rate: Optional[float] = None
+    history_avg_return: Optional[float] = None
+    row: PlanRowOut
+
+
+class Sp100WorkflowResponse(BaseModel):
+    planned_at: datetime
+    scanned_universe_size: int
+    candidates_with_price: int
+    selected_count: int
+    rows_logged: int
+    rows: List[RankedPlanOut]
+
+
+def _to_plan_row_out(r) -> PlanRowOut:
+    return PlanRowOut(
+        ticker=r.ticker,
+        last=r.last,
+        entry=r.entry,
+        stop=r.stop,
+        take_profit=r.take_profit,
+        max_hold_date=r.max_hold_date,
+        strategy_action=r.strategy_action,
+        strategy_reason=r.strategy_reason,
+        llm_action=r.llm_action,
+        llm_rationale=r.llm_rationale,
+        news_score=getattr(r, "news_score", 0),
+        earnings_score=getattr(r, "earnings_score", 0),
+        earnings_context=getattr(r, "earnings_context", None),
+        news=[NewsItem(**n) for n in (getattr(r, "news", None) or [])],
+    )
+
+
+def _queue_rows_for_logging(db: Session, *, planned_at: datetime, mode: str, rows: List[PlanRowOut], meta: dict) -> int:
+    rows_logged = 0
+    for r in rows:
+        if r.entry is None or r.stop is None or r.take_profit is None:
+            continue
+
+        entry_val = float(r.entry)
+        stop_val = float(r.stop)
+        tp_val = float(r.take_profit)
+
+        news_items = []
+        for n in (r.news or []):
+            if isinstance(n, dict):
+                news_items.append(n)
+            else:
+                news_items.append(n.model_dump())
+
+        db.add(
+            SwingDecision(
+                ticker=r.ticker,
+                planned_at=planned_at,
+                mode=mode,
+                entry=entry_val,
+                stop=stop_val,
+                take_profit=tp_val,
+                max_hold_date=r.max_hold_date,
+                strategy_action=r.strategy_action,
+                strategy_reason=r.strategy_reason,
+                llm_used=bool(meta.get("llm_used", False)),
+                llm_provider=meta.get("llm_provider"),
+                llm_model=meta.get("llm_model"),
+                llm_style=meta.get("llm_style"),
+                llm_action=r.llm_action,
+                llm_rationale=r.llm_rationale,
+                news_score=int(r.news_score) if r.news_score is not None else None,
+                earnings_score=int(r.earnings_score) if r.earnings_score is not None else None,
+                earnings_context_json=(json.dumps(r.earnings_context) if r.earnings_context is not None else None),
+                news_json=json.dumps(news_items),
+            )
+        )
+        rows_logged += 1
+
+    return rows_logged
+
+
+def _history_stats_by_ticker(db: Session, lookback_days: int) -> dict[str, dict]:
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=lookback_days)
+    rows = (
+        db.query(SwingDecision)
+        .filter(SwingDecision.planned_at >= cutoff)
+        .filter(SwingDecision.last_eval_return.isnot(None))
+        .all()
+    )
+
+    raw: dict[str, dict] = {}
+    for d in rows:
+        if d.last_eval_return is None:
+            continue
+        r = float(d.last_eval_return)
+        t = d.ticker
+        s = raw.setdefault(t, {"samples": 0, "wins": 0, "ret_sum": 0.0})
+        s["samples"] += 1
+        s["ret_sum"] += r
+        if r > 0:
+            s["wins"] += 1
+
+    out: dict[str, dict] = {}
+    for t, s in raw.items():
+        n = s["samples"]
+        out[t] = {
+            "samples": n,
+            "avg_return": (s["ret_sum"] / max(n, 1)),
+            "win_rate": (s["wins"] / max(n, 1)),
+        }
+    return out
+
+
 @app.get("/debug/model")
 def debug_model(_=Depends(require_bearer_token)):
     cols = list(SwingDecision.__table__.columns.keys())
     return {"columns": cols}
+
+
+@app.get("/scan/sp100", response_model=ScanResponse)
+def scan_sp100(top_n: int = 100, _=Depends(require_bearer_token)):
+    return {"tickers": get_sp100_universe(top_n)}
 
 
 @app.post("/scan/swing", response_model=ScanResponse)
@@ -168,88 +309,132 @@ def plan_swing(req: PlanRequest, _=Depends(require_bearer_token)):
         ]
         return {"planned_at": planned_at, "rows": out}
 
-    out: list[PlanRowOut] = []
-    for r in rows:
-        out.append(
-            PlanRowOut(
-                ticker=r.ticker,
-                last=r.last,
-                entry=r.entry,
-                stop=r.stop,
-                take_profit=r.take_profit,
-                max_hold_date=r.max_hold_date,
-                strategy_action=r.strategy_action,
-                strategy_reason=r.strategy_reason,
-                llm_action=r.llm_action,
-                llm_rationale=r.llm_rationale,
-                news_score=getattr(r, "news_score", 0),
-                earnings_score=getattr(r, "earnings_score", 0),
-                earnings_context=getattr(r, "earnings_context", None),
-                news=[NewsItem(**n) for n in (getattr(r, "news", None) or [])],
-            )
-        )
-
+    out = [_to_plan_row_out(r) for r in rows]
     return {"planned_at": planned_at, "rows": out}
 
 
-class LogRequest(BaseModel):
-    planned_at: datetime
-    mode: str = "manual"
-    rows: List[PlanRowOut]
-    meta: dict = Field(default_factory=dict)
+@app.post("/workflow/sp100/top10-log", response_model=Sp100WorkflowResponse)
+def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
+    planned_at = datetime.now(timezone.utc)
+    top_scan = max(10, min(int(req.top_scan), 100))
+    top_plan = max(1, min(int(req.top_plan), 20))
+    lookback_days = max(30, min(int(req.lookback_days), 720))
+    min_history_samples = max(1, min(int(req.min_history_samples), 20))
+
+    universe = get_sp100_universe(top_scan)
+    rows = build_swing_plan(universe)
+    history_stats = _history_stats_by_ticker(db, lookback_days=lookback_days)
+
+    ranked: list[dict] = []
+    for r in rows:
+        if r.entry is None or r.stop is None or r.take_profit is None:
+            continue
+
+        signal_score = int(getattr(r, "news_score", 0) + getattr(r, "earnings_score", 0))
+
+        h = history_stats.get(r.ticker)
+        history_samples = 0
+        history_win_rate = None
+        history_avg_return = None
+        history_boost = 0.0
+
+        if h:
+            history_samples = int(h.get("samples", 0))
+            history_win_rate = float(h.get("win_rate"))
+            history_avg_return = float(h.get("avg_return"))
+            if history_samples >= min_history_samples:
+                confidence = min(1.0, history_samples / 8.0)
+                hist_raw = (history_avg_return * 100.0) * 0.35 + (history_win_rate - 0.5) * 4.0
+                history_boost = max(-3.0, min(3.0, hist_raw * confidence))
+
+        score = float(signal_score) + float(history_boost)
+
+        if score >= 5.0:
+            r.llm_action = "BUY"
+        elif score <= -4.0:
+            r.llm_action = "AVOID"
+        else:
+            r.llm_action = "WAIT"
+
+        r.llm_rationale = (
+            f"sp100_rank score={score:.2f}; signal={signal_score}; "
+            f"history_boost={history_boost:.2f}; history_samples={history_samples}"
+        )
+
+        ranked.append(
+            {
+                "score": score,
+                "signal_score": signal_score,
+                "history_boost": history_boost,
+                "history_samples": history_samples,
+                "history_win_rate": history_win_rate,
+                "history_avg_return": history_avg_return,
+                "row": r,
+            }
+        )
+
+    ranked.sort(key=lambda x: x["score"], reverse=True)
+    selected = ranked[:top_plan]
+
+    out_rows: list[RankedPlanOut] = []
+    for idx, item in enumerate(selected, start=1):
+        row_out = _to_plan_row_out(item["row"])
+        out_rows.append(
+            RankedPlanOut(
+                rank=idx,
+                score=float(round(item["score"], 4)),
+                signal_score=int(item["signal_score"]),
+                history_boost=float(round(item["history_boost"], 4)),
+                history_samples=int(item["history_samples"]),
+                history_win_rate=item["history_win_rate"],
+                history_avg_return=item["history_avg_return"],
+                row=row_out,
+            )
+        )
+
+    meta = {
+        "llm_used": True,
+        "llm_provider": req.llm_provider,
+        "llm_model": req.llm_model,
+        "llm_style": req.llm_style,
+    }
+
+    rows_logged = 0
+    try:
+        rows_logged = _queue_rows_for_logging(
+            db,
+            planned_at=planned_at,
+            mode=req.mode,
+            rows=[x.row for x in out_rows],
+            meta=meta,
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"SP100 workflow logging failed: {e}")
+
+    return Sp100WorkflowResponse(
+        planned_at=planned_at,
+        scanned_universe_size=len(universe),
+        candidates_with_price=len(ranked),
+        selected_count=len(out_rows),
+        rows_logged=rows_logged,
+        rows=out_rows,
+    )
 
 
 @app.post("/history/log")
 def log_history(req: LogRequest, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
-    rows_logged = 0
-
     try:
-        for r in req.rows:
-            # Skip rows that have no price data (DB columns are NOT NULL)
-            if r.entry is None or r.stop is None or r.take_profit is None:
-                continue
-
-            # Convert numeric fields (safe now because not None)
-            entry_val = float(r.entry)
-            stop_val = float(r.stop)
-            tp_val = float(r.take_profit)
-
-            # Convert news items safely (works whether items are dicts or Pydantic models)
-            news_items = []
-            for n in (r.news or []):
-                if isinstance(n, dict):
-                    news_items.append(n)
-                else:
-                    news_items.append(n.model_dump())
-
-            db.add(
-                SwingDecision(
-                    ticker=r.ticker,
-                    planned_at=req.planned_at,
-                    mode=req.mode,
-                    entry=entry_val,
-                    stop=stop_val,
-                    take_profit=tp_val,
-                    max_hold_date=r.max_hold_date,
-                    strategy_action=r.strategy_action,
-                    strategy_reason=r.strategy_reason,
-                    llm_used=bool(req.meta.get("llm_used", False)),
-                    llm_provider=req.meta.get("llm_provider"),
-                    llm_model=req.meta.get("llm_model"),
-                    llm_style=req.meta.get("llm_style"),
-                    llm_action=r.llm_action,
-                    llm_rationale=r.llm_rationale,
-                    news_score=int(r.news_score) if r.news_score is not None else None,
-                    earnings_score=int(r.earnings_score) if r.earnings_score is not None else None,
-                    earnings_context_json=(json.dumps(r.earnings_context) if r.earnings_context is not None else None),
-                    news_json=json.dumps(news_items),
-                )
-            )
-            rows_logged += 1
-
+        rows_logged = _queue_rows_for_logging(
+            db,
+            planned_at=req.planned_at,
+            mode=req.mode,
+            rows=req.rows,
+            meta=req.meta,
+        )
         db.commit()
         return {"ok": True, "rows_logged": rows_logged}
-
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Logging failed: {e}")

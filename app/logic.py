@@ -23,6 +23,35 @@ class PlanRow:
     earnings_context: dict | None = None
 
 
+# Static S&P 100-like liquid large-cap universe for API-side scanning.
+SP100_UNIVERSE = [
+    "AAPL", "ABBV", "ABT", "ACN", "ADBE", "AMD", "AMGN", "AMT", "AMZN", "AVGO",
+    "AXP", "BA", "BAC", "BK", "BKNG", "BLK", "BMY", "BRK.B", "C", "CAT",
+    "CHTR", "CL", "CMCSA", "COF", "COP", "COST", "CRM", "CSCO", "CVX", "DHR",
+    "DIS", "DOW", "DUK", "EMR", "F", "GD", "GE", "GILD", "GM", "GOOG",
+    "GOOGL", "GS", "HD", "HON", "IBM", "INTC", "JNJ", "JPM", "KHC", "KMI",
+    "KO", "LIN", "LLY", "LMT", "LOW", "MA", "MCD", "MDT", "MET", "META",
+    "MMM", "MO", "MRK", "MS", "MSFT", "NEE", "NFLX", "NKE", "NVDA", "ORCL",
+    "PEP", "PFE", "PG", "PM", "PYPL", "QCOM", "RTX", "SBUX", "SCHW", "SO",
+    "SPG", "T", "TGT", "TMO", "TMUS", "TSLA", "TXN", "UNH", "UNP", "UPS",
+    "USB", "V", "VZ", "WBA", "WFC", "WMT", "XOM", "AIG", "DE", "NOW",
+]
+
+
+def get_sp100_universe(top_n: int | None = None) -> list[str]:
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for t in SP100_UNIVERSE:
+        if t not in seen:
+            uniq.append(t)
+            seen.add(t)
+
+    if top_n is None:
+        return uniq
+    n = max(1, min(int(top_n), len(uniq)))
+    return uniq[:n]
+
+
 def scan_swing_candidates_largecaps(universe: list[str], top_n: int = 8) -> list[str]:
     # TODO: replace with your existing scan logic
     return universe[:top_n]
