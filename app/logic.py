@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta, date
 import os
 import math
 import requests
+from typing import Callable
 
 
 @dataclass
@@ -64,6 +65,8 @@ def get_sp100_universe(top_n: int | None = None) -> list[str]:
     n = max(1, min(int(top_n), len(uniq)))
     return uniq[:n]
 
+
+DailyClosesLoader = Callable[[str, date, date], dict[date, float]]
 
 def scan_swing_candidates_largecaps(universe: list[str], top_n: int = 8) -> list[str]:
     # TODO: replace with your existing scan logic
@@ -250,7 +253,21 @@ def _get_earnings_history(ticker: str, limit: int = 8) -> list[dict]:
     return out
 
 
-def _get_daily_closes(ticker: str, frm: date, to: date) -> dict[date, float]:
+def _get_daily_closes(
+    ticker: str,
+    frm: date,
+    to: date,
+    *,
+    daily_closes_loader: DailyClosesLoader | None = None,
+) -> dict[date, float]:
+    if daily_closes_loader is not None:
+        try:
+            cached = daily_closes_loader(ticker, frm, to)
+            if cached:
+                return cached
+        except Exception:
+            pass
+
     data = finnhub_get(
         "/stock/candle",
         {
@@ -277,12 +294,16 @@ def _get_daily_closes(ticker: str, frm: date, to: date) -> dict[date, float]:
     return out
 
 
-def detect_market_regime(breadth_universe: list[str] | None = None) -> dict:
+def detect_market_regime(
+    breadth_universe: list[str] | None = None,
+    *,
+    daily_closes_loader: DailyClosesLoader | None = None,
+) -> dict:
     now = datetime.now(timezone.utc)
     end = now.date()
     start = end - timedelta(days=130)
 
-    spy_closes_map = _get_daily_closes("SPY", start, end)
+    spy_closes_map = _get_daily_closes("SPY", start, end, daily_closes_loader=daily_closes_loader)
     spy_closes = [spy_closes_map[d] for d in sorted(spy_closes_map.keys())]
 
     spy_price = spy_closes[-1] if spy_closes else None
@@ -305,7 +326,7 @@ def detect_market_regime(breadth_universe: list[str] | None = None) -> dict:
     breadth_total = 0
 
     for t in breadth:
-        c_map = _get_daily_closes(t, end - timedelta(days=70), end)
+        c_map = _get_daily_closes(t, end - timedelta(days=70), end, daily_closes_loader=daily_closes_loader)
         if not c_map:
             continue
         vals = [c_map[d] for d in sorted(c_map.keys())]
@@ -359,13 +380,18 @@ def _price_change_after_event(closes: dict[date, float], event_day: date) -> flo
     return ((next_close - prev_close) / prev_close) * 100.0
 
 
-def _compute_52w_position(last_price: float | None, ticker: str) -> float | None:
+def _compute_52w_position(
+    last_price: float | None,
+    ticker: str,
+    *,
+    daily_closes_loader: DailyClosesLoader | None = None,
+) -> float | None:
     if last_price is None:
         return None
 
     end = datetime.now(timezone.utc).date()
     start = end - timedelta(days=370)
-    closes = _get_daily_closes(ticker, start, end)
+    closes = _get_daily_closes(ticker, start, end, daily_closes_loader=daily_closes_loader)
     if not closes:
         return None
 
@@ -377,7 +403,12 @@ def _compute_52w_position(last_price: float | None, ticker: str) -> float | None
     return max(0.0, min(1.0, (last_price - low) / (high - low)))
 
 
-def compute_earnings_signal(ticker: str, last_price: float | None) -> tuple[int, dict]:
+def compute_earnings_signal(
+    ticker: str,
+    last_price: float | None,
+    *,
+    daily_closes_loader: DailyClosesLoader | None = None,
+) -> tuple[int, dict]:
     upcoming = _get_earnings_calendar(ticker, days_ahead=45)
     history = _get_earnings_history(ticker, limit=8)
 
@@ -391,7 +422,7 @@ def compute_earnings_signal(ticker: str, last_price: float | None) -> tuple[int,
     if periods:
         start = min(periods) - timedelta(days=7)
         end = datetime.now(timezone.utc).date()
-        closes = _get_daily_closes(ticker, start, end)
+        closes = _get_daily_closes(ticker, start, end, daily_closes_loader=daily_closes_loader)
         reactions: list[float] = []
         for p in periods:
             chg = _price_change_after_event(closes, p)
@@ -405,7 +436,7 @@ def compute_earnings_signal(ticker: str, last_price: float | None) -> tuple[int,
     surprise_vals = [h.get("surprise_percent") for h in history if isinstance(h.get("surprise_percent"), (int, float))]
     avg_surprise = (sum(surprise_vals) / len(surprise_vals)) if surprise_vals else None
 
-    pos = _compute_52w_position(last_price, ticker)
+    pos = _compute_52w_position(last_price, ticker, daily_closes_loader=daily_closes_loader)
 
     score_raw = 0.0
     if reaction_avg is not None:
@@ -516,6 +547,7 @@ def build_swing_plan(
     regime: str | None = None,
     buy_threshold: int = 4,
     avoid_threshold: int = -4,
+    daily_closes_loader: DailyClosesLoader | None = None,
 ) -> list[PlanRow]:
     rows: list[PlanRow] = []
     regime_val = regime or "neutral"
@@ -525,7 +557,11 @@ def build_swing_plan(
         news = get_company_news_summary(t, days=7, limit=5)
         news_score = compute_news_score(news)
 
-        earnings_score, earnings_context = compute_earnings_signal(t, last)
+        earnings_score, earnings_context = compute_earnings_signal(
+            t,
+            last,
+            daily_closes_loader=daily_closes_loader,
+        )
         signal_score = int(news_score + earnings_score)
 
         if last is None:
@@ -679,4 +715,3 @@ def classify_assumption(
     if last_price >= take_profit:
         return False, ("wait_missed_tp" if not expired else "wait_missed_tp_expired"), ret
     return False, "wait_neutral", ret
-

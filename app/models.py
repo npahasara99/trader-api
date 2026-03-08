@@ -1,6 +1,6 @@
-from sqlalchemy import String, Float, DateTime, Integer, Text, Boolean
+from sqlalchemy import String, Float, DateTime, Date, Integer, Text, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from .db import Base
 
 
@@ -49,4 +49,22 @@ class SwingDecision(Base):
     success_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON list of tags
-    MODEL_VERSION = "2026-03-07-earnings_score_v1"
+
+    MODEL_VERSION = "2026-03-08-adaptive-risk-v2"
+
+
+class DailyBar(Base):
+    __tablename__ = "daily_bars"
+
+    symbol: Mapped[str] = mapped_column(String(20), primary_key=True)
+    bar_date: Mapped[date] = mapped_column(Date, primary_key=True)
+
+    open: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adjusted_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    source: Mapped[str] = mapped_column(String(20), default="finnhub")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

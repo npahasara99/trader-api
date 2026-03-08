@@ -1,17 +1,17 @@
 
-from fastapi import FastAPI, Depends, Header, HTTPException
+from fastapi import FastAPI, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from .logic import bucket_news, classify_assumption
 import json
 import os
 
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, func
 
 from .db import Base, engine, get_db
-from .models import SwingDecision
+from .models import SwingDecision, DailyBar
 from .logic import (
     scan_swing_candidates_largecaps,
     build_swing_plan,
@@ -20,6 +20,10 @@ from .logic import (
     get_sp100_universe,
     detect_market_regime,
     estimate_trade_probabilities,
+)
+from .market_data import (
+    ensure_cached_daily_closes,
+    backfill_universe_daily_bars,
 )
 
 
@@ -190,6 +194,39 @@ class Sp100WorkflowResponse(BaseModel):
     rows_logged: int
     rows: List[RankedPlanOut]
 
+class DailyBarsBackfillRequest(BaseModel):
+    symbols: Optional[List[str]] = None
+    use_sp100: bool = True
+    top_n: int = 100
+    years: int = 10
+    refresh: bool = False
+    commit_every: int = 5
+
+
+class DailyBarsBackfillResponse(BaseModel):
+    as_of: datetime
+    universe_size: int
+    total: int
+    updated: int
+    skipped_cached: int
+    failed: int
+    results: List[dict]
+
+
+class DailyBarsStatusRow(BaseModel):
+    symbol: str
+    count: int = 0
+    min_date: Optional[date] = None
+    max_date: Optional[date] = None
+
+
+class DailyBarsStatusResponse(BaseModel):
+    as_of: datetime
+    requested_symbols: int
+    symbols_with_data: int
+    total_rows: int
+    rows: List[DailyBarsStatusRow]
+
 
 def _to_plan_row_out(r) -> PlanRowOut:
     return PlanRowOut(
@@ -266,6 +303,80 @@ def _queue_rows_for_logging(db: Session, *, planned_at: datetime, mode: str, row
         rows_logged += 1
 
     return rows_logged
+
+def _normalize_symbols(symbols: List[str]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for s in symbols:
+        sym = (s or "").strip().upper()
+        if not sym or sym in seen:
+            continue
+        out.append(sym)
+        seen.add(sym)
+    return out
+
+
+def _resolve_universe(symbols: Optional[List[str]], *, use_sp100: bool, top_n: int) -> List[str]:
+    if symbols:
+        return _normalize_symbols(symbols)
+    if use_sp100:
+        n = max(1, min(int(top_n), 100))
+        return get_sp100_universe(n)
+    return []
+
+
+def _build_daily_closes_loader(db: Session):
+    memo: dict[tuple[str, date, date], dict[date, float]] = {}
+
+    def _loader(symbol: str, frm: date, to: date) -> dict[date, float]:
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return {}
+
+        key = (sym, frm, to)
+        if key in memo:
+            return memo[key]
+
+        closes = ensure_cached_daily_closes(db, sym, frm, to, auto_fetch=True, commit=False)
+        memo[key] = closes
+        return closes
+
+    return _loader
+
+
+def _daily_bars_status_rows(db: Session, symbols: List[str]) -> List[DailyBarsStatusRow]:
+    if not symbols:
+        return []
+
+    agg = (
+        db.query(
+            DailyBar.symbol.label("symbol"),
+            func.min(DailyBar.bar_date).label("min_date"),
+            func.max(DailyBar.bar_date).label("max_date"),
+            func.count(DailyBar.symbol).label("count"),
+        )
+        .filter(DailyBar.symbol.in_(symbols))
+        .group_by(DailyBar.symbol)
+        .all()
+    )
+
+    by_symbol = {str(r.symbol): r for r in agg}
+    out: List[DailyBarsStatusRow] = []
+    for sym in symbols:
+        row = by_symbol.get(sym)
+        if row is None:
+            out.append(DailyBarsStatusRow(symbol=sym, count=0, min_date=None, max_date=None))
+            continue
+
+        out.append(
+            DailyBarsStatusRow(
+                symbol=sym,
+                count=int(row.count or 0),
+                min_date=row.min_date,
+                max_date=row.max_date,
+            )
+        )
+    return out
 
 
 def _history_stats_by_ticker(db: Session, lookback_days: int) -> dict[str, dict]:
@@ -584,7 +695,8 @@ def scan_swing(req: ScanRequest, _=Depends(require_bearer_token)):
 def plan_swing(req: PlanRequest, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
     planned_at = datetime.now(timezone.utc)
 
-    regime_snapshot = detect_market_regime(req.tickers)
+    daily_closes_loader = _build_daily_closes_loader(db)
+    regime_snapshot = detect_market_regime(req.tickers, daily_closes_loader=daily_closes_loader)
     perf = _rolling_performance_snapshot(db, lookback_days=180)
     thresholds = _compute_dynamic_thresholds(regime_snapshot["regime"], perf)
     ticker_hist = _history_stats_by_ticker(db, lookback_days=180)
@@ -595,6 +707,7 @@ def plan_swing(req: PlanRequest, db: Session = Depends(get_db), _=Depends(requir
             regime=regime_snapshot["regime"],
             buy_threshold=thresholds["buy_threshold"],
             avoid_threshold=thresholds["avoid_threshold"],
+            daily_closes_loader=daily_closes_loader,
         )
     except Exception as e:
         out = [
@@ -667,7 +780,8 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
     min_history_samples = max(1, min(int(req.min_history_samples), 20))
 
     universe = get_sp100_universe(top_scan)
-    regime_snapshot = detect_market_regime(universe[:20])
+    daily_closes_loader = _build_daily_closes_loader(db)
+    regime_snapshot = detect_market_regime(universe[:20], daily_closes_loader=daily_closes_loader)
     perf = _rolling_performance_snapshot(db, lookback_days=lookback_days)
     thresholds = _compute_dynamic_thresholds(regime_snapshot["regime"], perf)
 
@@ -676,6 +790,7 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         regime=regime_snapshot["regime"],
         buy_threshold=thresholds["buy_threshold"],
         avoid_threshold=thresholds["avoid_threshold"],
+        daily_closes_loader=daily_closes_loader,
     )
     history_stats = _history_stats_by_ticker(db, lookback_days=lookback_days)
 
@@ -794,6 +909,63 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         rows=out_rows,
     )
 
+
+
+@app.post("/data/daily-bars/backfill", response_model=DailyBarsBackfillResponse)
+def daily_bars_backfill(req: DailyBarsBackfillRequest, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
+    symbols = _resolve_universe(req.symbols, use_sp100=req.use_sp100, top_n=req.top_n)
+    if not symbols:
+        raise HTTPException(status_code=400, detail="No symbols provided. Pass symbols or set use_sp100=true.")
+
+    years = max(1, min(int(req.years), 15))
+    commit_every = max(1, min(int(req.commit_every), 50))
+
+    try:
+        result = backfill_universe_daily_bars(
+            db,
+            symbols,
+            years=years,
+            refresh=bool(req.refresh),
+            commit_every=commit_every,
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Daily bars backfill failed: {e}")
+
+    return DailyBarsBackfillResponse(
+        as_of=datetime.now(timezone.utc),
+        universe_size=len(symbols),
+        total=int(result.get("total", 0)),
+        updated=int(result.get("updated", 0)),
+        skipped_cached=int(result.get("skipped_cached", 0)),
+        failed=int(result.get("failed", 0)),
+        results=list(result.get("results", [])),
+    )
+
+
+@app.get("/data/daily-bars/status", response_model=DailyBarsStatusResponse)
+def daily_bars_status(
+    symbols: Optional[List[str]] = Query(default=None),
+    use_sp100: bool = True,
+    top_n: int = 100,
+    db: Session = Depends(get_db),
+    _=Depends(require_bearer_token),
+):
+    universe = _resolve_universe(symbols, use_sp100=use_sp100, top_n=top_n)
+    if not universe:
+        raise HTTPException(status_code=400, detail="No symbols provided. Pass symbols or set use_sp100=true.")
+
+    rows = _daily_bars_status_rows(db, universe)
+    symbols_with_data = sum(1 for r in rows if int(r.count) > 0)
+    total_rows = sum(int(r.count) for r in rows)
+
+    return DailyBarsStatusResponse(
+        as_of=datetime.now(timezone.utc),
+        requested_symbols=len(universe),
+        symbols_with_data=symbols_with_data,
+        total_rows=total_rows,
+        rows=rows,
+    )
 
 @app.post("/history/log")
 def log_history(req: LogRequest, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
@@ -1130,4 +1302,3 @@ def learning_patterns(
         "by_ticker": by_ticker,
         "prompt_context": prompt_context,
     }
-
