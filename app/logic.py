@@ -117,6 +117,25 @@ def get_last_price(ticker: str) -> float | None:
     return float(data["c"])
 
 
+def get_last_price_or_recent_close(
+    ticker: str,
+    *,
+    daily_closes_loader: DailyClosesLoader | None = None,
+) -> float | None:
+    last = get_last_price(ticker)
+    if last is not None:
+        return last
+
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=14)
+    close_map = _get_daily_closes(ticker, start, end, daily_closes_loader=daily_closes_loader)
+    if not close_map:
+        return None
+
+    latest_day = max(close_map.keys())
+    return float(close_map[latest_day])
+
+
 def _moving_average(values: list[float], window: int) -> float | None:
     if len(values) < window or window <= 0:
         return None
@@ -553,7 +572,7 @@ def build_swing_plan(
     regime_val = regime or "neutral"
 
     for t in tickers:
-        last = get_last_price(t)
+        last = get_last_price_or_recent_close(t, daily_closes_loader=daily_closes_loader)
         news = get_company_news_summary(t, days=7, limit=5)
         news_score = compute_news_score(news)
 
