@@ -190,6 +190,8 @@ class Sp100WorkflowRequest(BaseModel):
     top_plan: int = 10
     lookback_days: int = 180
     min_history_samples: int = 3
+    max_hold_days: Optional[int] = None
+    max_hold_date: Optional[datetime] = None
     mode: str = "sp100_auto"
     llm_provider: Optional[str] = "chatgpt-actions"
     llm_model: Optional[str] = None
@@ -213,10 +215,14 @@ class Sp100WorkflowResponse(BaseModel):
     regime_score: float
     buy_threshold: int
     avoid_threshold: int
+    max_hold_days: Optional[int] = None
+    requested_max_hold_date: Optional[datetime] = None
     scanned_universe_size: int
     candidates_with_price: int
+    eligible_count: int = 0
     selected_count: int
     rows_logged: int
+    selection_message: Optional[str] = None
     rows: List[RankedPlanOut]
 
 class DailyBarsBackfillRequest(BaseModel):
@@ -536,6 +542,43 @@ def _compute_dynamic_thresholds(regime: str, perf: dict) -> dict:
     }
 
 
+def _normalize_max_hold_days(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    return max(1, min(int(value), 60))
+
+
+def _resolve_requested_hold_window(
+    *,
+    planned_at: datetime,
+    max_hold_days: Optional[int],
+    max_hold_date: Optional[datetime],
+) -> tuple[Optional[int], Optional[datetime]]:
+    normalized_days = _normalize_max_hold_days(max_hold_days)
+    normalized_date = max_hold_date
+
+    if normalized_date is not None:
+        delta_days = (normalized_date.date() - planned_at.date()).days
+        date_days = max(1, min(delta_days, 60))
+        if normalized_days is None or date_days < normalized_days:
+            normalized_days = date_days
+
+    return normalized_days, normalized_date
+
+
+def _holding_window_message(*, max_hold_days: int, eligible_count: int, candidate_count: int, regime: str) -> str:
+    if eligible_count <= 0:
+        return (
+            f"No setups fit a max hold of {max_hold_days} days in the current {regime} regime. "
+            "The workflow kept discipline and returned no forced picks."
+        )
+    if eligible_count < candidate_count:
+        return (
+            f"Filtered for a max hold of {max_hold_days} days. "
+            f"{eligible_count} of {candidate_count} priced candidates fit the holding window."
+        )
+    return f"All ranked candidates fit the requested max hold of {max_hold_days} days."
+
 
 def _compute_adaptive_trade_levels(
     *,
@@ -637,6 +680,15 @@ def _apply_adaptive_risk_controls(
 
     prior = row.strategy_reason or ""
     row.strategy_reason = (prior + " | " + levels["risk_tuning_reason"]).strip(" |")
+
+
+def _row_fits_hold_window(row, max_hold_days: Optional[int]) -> bool:
+    if max_hold_days is None:
+        return True
+    hold_days = getattr(row, "hold_days", None)
+    if hold_days is None:
+        return False
+    return int(hold_days) <= int(max_hold_days)
 
 
 def _apply_prob_and_action(
@@ -826,6 +878,11 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
     top_plan = max(1, min(int(req.top_plan), 20))
     lookback_days = max(30, min(int(req.lookback_days), 720))
     min_history_samples = max(1, min(int(req.min_history_samples), 20))
+    max_hold_days, requested_max_hold_date = _resolve_requested_hold_window(
+        planned_at=planned_at,
+        max_hold_days=req.max_hold_days,
+        max_hold_date=req.max_hold_date,
+    )
 
     universe = get_sp100_universe(top_scan)
     daily_closes_loader = _build_daily_closes_loader(db)
@@ -843,9 +900,12 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
     history_stats = _history_stats_by_ticker(db, lookback_days=lookback_days)
 
     ranked: list[dict] = []
+    priced_candidates = 0
+    eligible_count = 0
     for r in rows:
         if r.entry is None or r.stop is None or r.take_profit is None:
             continue
+        priced_candidates += 1
 
         h = history_stats.get(r.ticker)
         history_samples = 0
@@ -869,6 +929,10 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
             ticker_stats=(h or {}),
             perf=perf,
         )
+
+        if not _row_fits_hold_window(r, max_hold_days):
+            continue
+        eligible_count += 1
 
         decision = _apply_prob_and_action(
             r,
@@ -906,6 +970,16 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
 
     ranked.sort(key=lambda x: x["score"], reverse=True)
     selected = ranked[:top_plan]
+    selection_message = (
+        _holding_window_message(
+            max_hold_days=max_hold_days,
+            eligible_count=eligible_count,
+            candidate_count=priced_candidates,
+            regime=regime_snapshot["regime"],
+        )
+        if max_hold_days is not None
+        else None
+    )
 
     out_rows: list[RankedPlanOut] = []
     for idx, item in enumerate(selected, start=1):
@@ -950,10 +1024,14 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         regime_score=float(regime_snapshot["score"]),
         buy_threshold=thresholds["buy_threshold"],
         avoid_threshold=thresholds["avoid_threshold"],
+        max_hold_days=max_hold_days,
+        requested_max_hold_date=requested_max_hold_date,
         scanned_universe_size=len(universe),
-        candidates_with_price=len(ranked),
+        candidates_with_price=priced_candidates,
+        eligible_count=eligible_count,
         selected_count=len(out_rows),
         rows_logged=rows_logged,
+        selection_message=selection_message,
         rows=out_rows,
     )
 
