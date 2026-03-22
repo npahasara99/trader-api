@@ -161,6 +161,30 @@ class LogRequest(BaseModel):
     meta: dict = Field(default_factory=dict)
 
 
+class SwingPlanLogWorkflowRequest(BaseModel):
+    ticker: str
+    lookback_days: int = 30
+    learning_limit: int = 200
+    mode: str = "manual"
+    llm_provider: Optional[str] = "chatgpt-actions"
+    llm_model: Optional[str] = None
+    llm_style: Optional[str] = "swing_v1"
+
+
+class SwingPlanLogWorkflowResponse(BaseModel):
+    planned_at: datetime
+    ticker: str
+    market_regime: Optional[str] = None
+    regime_score: Optional[float] = None
+    buy_threshold: Optional[int] = None
+    avoid_threshold: Optional[int] = None
+    learning_samples: int = 0
+    learning_prompt_context: Optional[str] = None
+    rows_logged: int
+    logging_skipped_reason: Optional[str] = None
+    row: PlanRowOut
+
+
 class Sp100WorkflowRequest(BaseModel):
     top_scan: int = 100
     top_plan: int = 10
@@ -931,6 +955,80 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         selected_count=len(out_rows),
         rows_logged=rows_logged,
         rows=out_rows,
+    )
+
+
+@app.post("/workflow/swing-plan-log", response_model=SwingPlanLogWorkflowResponse)
+def workflow_swing_plan_log(
+    req: SwingPlanLogWorkflowRequest,
+    db: Session = Depends(get_db),
+    _=Depends(require_bearer_token),
+):
+    ticker = (req.ticker or "").strip().upper()
+    if not ticker:
+        raise HTTPException(status_code=400, detail="ticker is required")
+
+    learning = learning_patterns(
+        lookback_days=max(7, min(int(req.lookback_days), 720)),
+        limit=max(20, min(int(req.learning_limit), 500)),
+        db=db,
+        _=None,
+    )
+
+    plan = plan_swing(
+        PlanRequest(
+            tickers=[ticker],
+            mode=req.mode,
+            llm_used=True,
+            llm_provider=req.llm_provider,
+            llm_model=req.llm_model,
+            llm_style=req.llm_style,
+        ),
+        db=db,
+        _=None,
+    )
+
+    rows = list(plan.get("rows", []))
+    if not rows:
+        raise HTTPException(status_code=500, detail=f"Planner returned no row for ticker={ticker}")
+
+    row = rows[0]
+    rows_logged = 0
+    logging_skipped_reason = None
+
+    if row.entry is None or row.stop is None or row.take_profit is None:
+        logging_skipped_reason = "Plan has incomplete price levels, so nothing was logged."
+    else:
+        try:
+            rows_logged = _queue_rows_for_logging(
+                db,
+                planned_at=plan["planned_at"],
+                mode=req.mode,
+                rows=[row],
+                meta={
+                    "llm_used": True,
+                    "llm_provider": req.llm_provider,
+                    "llm_model": req.llm_model,
+                    "llm_style": req.llm_style,
+                },
+            )
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Swing workflow logging failed: {e}")
+
+    return SwingPlanLogWorkflowResponse(
+        planned_at=plan["planned_at"],
+        ticker=ticker,
+        market_regime=plan.get("market_regime"),
+        regime_score=plan.get("regime_score"),
+        buy_threshold=plan.get("buy_threshold"),
+        avoid_threshold=plan.get("avoid_threshold"),
+        learning_samples=int(learning.get("samples", 0)),
+        learning_prompt_context=learning.get("prompt_context"),
+        rows_logged=rows_logged,
+        logging_skipped_reason=logging_skipped_reason,
+        row=row,
     )
 
 
