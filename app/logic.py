@@ -52,13 +52,185 @@ SP100_UNIVERSE = [
 ]
 
 
-def get_sp100_universe(top_n: int | None = None) -> list[str]:
+SP100_CLASSIFICATION = {
+    "AAPL": {"sector": "technology", "industry": "consumer electronics"},
+    "ABBV": {"sector": "health care", "industry": "biopharma"},
+    "ABT": {"sector": "health care", "industry": "medical devices"},
+    "ACN": {"sector": "technology", "industry": "it services"},
+    "ADBE": {"sector": "technology", "industry": "software"},
+    "AMD": {"sector": "technology", "industry": "semiconductors"},
+    "AMGN": {"sector": "health care", "industry": "biopharma"},
+    "AMT": {"sector": "real estate", "industry": "telecom towers"},
+    "AMZN": {"sector": "consumer discretionary", "industry": "internet retail"},
+    "AVGO": {"sector": "technology", "industry": "semiconductors"},
+    "AXP": {"sector": "financials", "industry": "payments"},
+    "BA": {"sector": "industrials", "industry": "aerospace"},
+    "BAC": {"sector": "financials", "industry": "banks"},
+    "BK": {"sector": "financials", "industry": "asset servicing"},
+    "BKNG": {"sector": "consumer discretionary", "industry": "travel services"},
+    "BLK": {"sector": "financials", "industry": "asset management"},
+    "BMY": {"sector": "health care", "industry": "biopharma"},
+    "BRK.B": {"sector": "financials", "industry": "insurance"},
+    "C": {"sector": "financials", "industry": "banks"},
+    "CAT": {"sector": "industrials", "industry": "machinery"},
+    "CHTR": {"sector": "communication services", "industry": "cable"},
+    "CL": {"sector": "consumer staples", "industry": "household products"},
+    "CMCSA": {"sector": "communication services", "industry": "media"},
+    "COF": {"sector": "financials", "industry": "consumer finance"},
+    "COP": {"sector": "energy", "industry": "oil and gas"},
+    "COST": {"sector": "consumer staples", "industry": "retail"},
+    "CRM": {"sector": "technology", "industry": "software"},
+    "CSCO": {"sector": "technology", "industry": "networking"},
+    "CVX": {"sector": "energy", "industry": "oil and gas"},
+    "DHR": {"sector": "health care", "industry": "life sciences"},
+    "DIS": {"sector": "communication services", "industry": "entertainment"},
+    "DOW": {"sector": "materials", "industry": "chemicals"},
+    "DUK": {"sector": "utilities", "industry": "electric utilities"},
+    "EMR": {"sector": "industrials", "industry": "electrical equipment"},
+    "F": {"sector": "consumer discretionary", "industry": "autos"},
+    "GD": {"sector": "industrials", "industry": "aerospace"},
+    "GE": {"sector": "industrials", "industry": "industrial conglomerates"},
+    "GILD": {"sector": "health care", "industry": "biotech"},
+    "GM": {"sector": "consumer discretionary", "industry": "autos"},
+    "GOOG": {"sector": "communication services", "industry": "internet platforms"},
+    "GOOGL": {"sector": "communication services", "industry": "internet platforms"},
+    "GS": {"sector": "financials", "industry": "capital markets"},
+    "HD": {"sector": "consumer discretionary", "industry": "home improvement retail"},
+    "HON": {"sector": "industrials", "industry": "industrial conglomerates"},
+    "IBM": {"sector": "technology", "industry": "it services"},
+    "INTC": {"sector": "technology", "industry": "semiconductors"},
+    "JNJ": {"sector": "health care", "industry": "pharma"},
+    "JPM": {"sector": "financials", "industry": "banks"},
+    "KHC": {"sector": "consumer staples", "industry": "food products"},
+    "KMI": {"sector": "energy", "industry": "midstream"},
+    "KO": {"sector": "consumer staples", "industry": "beverages"},
+    "LIN": {"sector": "materials", "industry": "industrial gases"},
+    "LLY": {"sector": "health care", "industry": "biopharma"},
+    "LMT": {"sector": "industrials", "industry": "aerospace"},
+    "LOW": {"sector": "consumer discretionary", "industry": "home improvement retail"},
+    "MA": {"sector": "financials", "industry": "payments"},
+    "MCD": {"sector": "consumer discretionary", "industry": "restaurants"},
+    "MDT": {"sector": "health care", "industry": "medical devices"},
+    "MET": {"sector": "financials", "industry": "insurance"},
+    "META": {"sector": "communication services", "industry": "internet platforms"},
+    "MMM": {"sector": "industrials", "industry": "industrial conglomerates"},
+    "MO": {"sector": "consumer staples", "industry": "tobacco"},
+    "MRK": {"sector": "health care", "industry": "biopharma"},
+    "MS": {"sector": "financials", "industry": "capital markets"},
+    "MSFT": {"sector": "technology", "industry": "software"},
+    "NEE": {"sector": "utilities", "industry": "electric utilities"},
+    "NFLX": {"sector": "communication services", "industry": "streaming"},
+    "NKE": {"sector": "consumer discretionary", "industry": "apparel"},
+    "NVDA": {"sector": "technology", "industry": "semiconductors"},
+    "ORCL": {"sector": "technology", "industry": "software"},
+    "PEP": {"sector": "consumer staples", "industry": "beverages"},
+    "PFE": {"sector": "health care", "industry": "biopharma"},
+    "PG": {"sector": "consumer staples", "industry": "household products"},
+    "PM": {"sector": "consumer staples", "industry": "tobacco"},
+    "PYPL": {"sector": "financials", "industry": "payments"},
+    "QCOM": {"sector": "technology", "industry": "semiconductors"},
+    "RTX": {"sector": "industrials", "industry": "aerospace"},
+    "SBUX": {"sector": "consumer discretionary", "industry": "restaurants"},
+    "SCHW": {"sector": "financials", "industry": "brokerage"},
+    "SO": {"sector": "utilities", "industry": "electric utilities"},
+    "SPG": {"sector": "real estate", "industry": "retail reit"},
+    "T": {"sector": "communication services", "industry": "telecom"},
+    "TGT": {"sector": "consumer staples", "industry": "retail"},
+    "TMO": {"sector": "health care", "industry": "life sciences"},
+    "TMUS": {"sector": "communication services", "industry": "telecom"},
+    "TSLA": {"sector": "consumer discretionary", "industry": "autos"},
+    "TXN": {"sector": "technology", "industry": "semiconductors"},
+    "UNH": {"sector": "health care", "industry": "managed care"},
+    "UNP": {"sector": "industrials", "industry": "railroads"},
+    "UPS": {"sector": "industrials", "industry": "logistics"},
+    "USB": {"sector": "financials", "industry": "banks"},
+    "V": {"sector": "financials", "industry": "payments"},
+    "VZ": {"sector": "communication services", "industry": "telecom"},
+    "WBA": {"sector": "consumer staples", "industry": "pharmacy retail"},
+    "WFC": {"sector": "financials", "industry": "banks"},
+    "WMT": {"sector": "consumer staples", "industry": "retail"},
+    "XOM": {"sector": "energy", "industry": "oil and gas"},
+    "AIG": {"sector": "financials", "industry": "insurance"},
+    "DE": {"sector": "industrials", "industry": "machinery"},
+    "NOW": {"sector": "technology", "industry": "software"},
+}
+
+FILTER_ALIASES = {
+    "tech": "technology",
+    "technology": "technology",
+    "it": "technology",
+    "software": "software",
+    "semis": "semiconductors",
+    "semiconductor": "semiconductors",
+    "semiconductors": "semiconductors",
+    "healthcare": "health care",
+    "health care": "health care",
+    "pharma": "biopharma",
+    "biotech": "biotech",
+    "finance": "financials",
+    "financial": "financials",
+    "financials": "financials",
+    "bank": "banks",
+    "banks": "banks",
+    "comms": "communication services",
+    "communication": "communication services",
+    "communication services": "communication services",
+    "media": "media",
+    "telecom": "telecom",
+    "consumer": "consumer discretionary",
+    "consumer discretionary": "consumer discretionary",
+    "consumer staples": "consumer staples",
+    "retail": "retail",
+    "energy": "energy",
+    "oil": "oil and gas",
+    "industrials": "industrials",
+    "industrial": "industrials",
+    "aerospace": "aerospace",
+    "defense": "aerospace",
+    "utilities": "utilities",
+    "materials": "materials",
+    "real estate": "real estate",
+    "reit": "retail reit",
+}
+
+
+def _normalize_filter_value(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = " ".join(value.lower().replace("_", " ").replace("-", " ").split())
+    return FILTER_ALIASES.get(cleaned, cleaned)
+
+
+def _ticker_matches_filter(ticker: str, *, sector: str | None = None, industry: str | None = None) -> bool:
+    if sector is None and industry is None:
+        return True
+
+    meta = SP100_CLASSIFICATION.get(ticker, {})
+    sector_val = _normalize_filter_value(meta.get("sector"))
+    industry_val = _normalize_filter_value(meta.get("industry"))
+
+    if sector is not None and sector not in {sector_val, industry_val}:
+        return False
+    if industry is not None and industry not in {industry_val, sector_val}:
+        return False
+    return True
+
+
+def get_sp100_universe(
+    top_n: int | None = None,
+    *,
+    sector: str | None = None,
+    industry: str | None = None,
+) -> list[str]:
     uniq: list[str] = []
     seen: set[str] = set()
+    sector_filter = _normalize_filter_value(sector)
+    industry_filter = _normalize_filter_value(industry)
     for t in SP100_UNIVERSE:
         if t not in seen:
-            uniq.append(t)
             seen.add(t)
+            if _ticker_matches_filter(t, sector=sector_filter, industry=industry_filter):
+                uniq.append(t)
 
     if top_n is None:
         return uniq

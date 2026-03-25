@@ -190,6 +190,8 @@ class Sp100WorkflowRequest(BaseModel):
     top_plan: int = 10
     lookback_days: int = 180
     min_history_samples: int = 3
+    sector: Optional[str] = None
+    industry: Optional[str] = None
     max_hold_days: Optional[int] = None
     max_hold_date: Optional[datetime] = None
     mode: str = "sp100_auto"
@@ -215,6 +217,8 @@ class Sp100WorkflowResponse(BaseModel):
     regime_score: float
     buy_threshold: int
     avoid_threshold: int
+    sector: Optional[str] = None
+    industry: Optional[str] = None
     max_hold_days: Optional[int] = None
     requested_max_hold_date: Optional[datetime] = None
     scanned_universe_size: int
@@ -781,8 +785,13 @@ def debug_finnhub(_=Depends(require_bearer_token)):
 
 
 @app.get("/scan/sp100", response_model=ScanResponse)
-def scan_sp100(top_n: int = 100, _=Depends(require_bearer_token)):
-    return {"tickers": get_sp100_universe(top_n)}
+def scan_sp100(
+    top_n: int = 100,
+    sector: Optional[str] = None,
+    industry: Optional[str] = None,
+    _=Depends(require_bearer_token),
+):
+    return {"tickers": get_sp100_universe(top_n, sector=sector, industry=industry)}
 
 
 @app.post("/scan/swing", response_model=ScanResponse)
@@ -884,8 +893,28 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         max_hold_date=req.max_hold_date,
     )
 
-    universe = get_sp100_universe(top_scan)
+    universe = get_sp100_universe(top_scan, sector=req.sector, industry=req.industry)
     daily_closes_loader = _build_daily_closes_loader(db)
+    if not universe:
+        return Sp100WorkflowResponse(
+            planned_at=planned_at,
+            market_regime="neutral",
+            regime_score=0.0,
+            buy_threshold=4,
+            avoid_threshold=-4,
+            sector=req.sector,
+            industry=req.industry,
+            max_hold_days=max_hold_days,
+            requested_max_hold_date=requested_max_hold_date,
+            scanned_universe_size=0,
+            candidates_with_price=0,
+            eligible_count=0,
+            selected_count=0,
+            rows_logged=0,
+            selection_message="No SP100 stocks matched the requested sector/industry filter.",
+            rows=[],
+        )
+
     regime_snapshot = detect_market_regime(universe[:20], daily_closes_loader=daily_closes_loader)
     perf = _rolling_performance_snapshot(db, lookback_days=lookback_days)
     thresholds = _compute_dynamic_thresholds(regime_snapshot["regime"], perf)
@@ -1024,6 +1053,8 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         regime_score=float(regime_snapshot["score"]),
         buy_threshold=thresholds["buy_threshold"],
         avoid_threshold=thresholds["avoid_threshold"],
+        sector=req.sector,
+        industry=req.industry,
         max_hold_days=max_hold_days,
         requested_max_hold_date=requested_max_hold_date,
         scanned_universe_size=len(universe),
