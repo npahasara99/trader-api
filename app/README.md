@@ -24,7 +24,11 @@ Backward compatibility:
 - `take_profit` now maps to the first realistic target (`take_profit_1`) for compatibility with logging/evaluation.
 - Richer structured fields are returned alongside the legacy fields for ranking, logging, and UI use.
 - Final API rows now also expose decision nuance:
+  - `quant_action`
+  - `llm_action`
+  - `reconciled_action`
   - `final_action`
+  - `action_alignment`
   - `action_reason_bucket`
   - `monitorable_setup`
   - `avoid_severity_score`

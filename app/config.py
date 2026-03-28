@@ -41,6 +41,10 @@ class PlanningConfig:
     wait_min_composite_score: float = 4.2
     wait_min_entry_quality: float = 4.4
     wait_min_relative_strength_score: float = 5.0
+    weak_breakdown_wait_min_traits: int = 4
+    weak_breakdown_wait_min_support_quality_score: float = 5.0
+    weak_breakdown_wait_min_prob_edge: float = -0.02
+    weak_breakdown_wait_max_severity: float = 4.6
     avoid_severity_threshold: float = 5.0
     avoid_severity_threshold_risk_off: float = 4.8
     avoid_bad_composite_gap: float = 1.7

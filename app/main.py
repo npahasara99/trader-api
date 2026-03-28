@@ -5,7 +5,7 @@ from typing import List, Optional
 from datetime import datetime, timezone, timedelta, date
 from .logic import bucket_news, classify_assumption
 from .config import DEFAULT_PLANNING_CONFIG
-from .llm_reasoning import classify_final_action
+from .llm_reasoning import classify_final_action, reconcile_actions
 import json
 import os
 
@@ -189,7 +189,10 @@ class PlanRowOut(BaseModel):
     llm_quality_score: Optional[float] = None
     composite_score: Optional[float] = None
     llm_review: Optional[dict] = None
+    quant_action: Optional[str] = None
+    reconciled_action: Optional[str] = None
     final_action: Optional[str] = None
+    action_alignment: Optional[str] = None
     action_reason_bucket: Optional[str] = None
     monitorable_setup: Optional[bool] = None
     avoid_severity_score: Optional[float] = None
@@ -409,7 +412,10 @@ def _to_plan_row_out(r) -> PlanRowOut:
         llm_quality_score=getattr(r, "llm_quality_score", None),
         composite_score=getattr(r, "composite_score", None),
         llm_review=getattr(r, "llm_review", None),
+        quant_action=getattr(r, "quant_action", None),
+        reconciled_action=getattr(r, "reconciled_action", None),
         final_action=getattr(r, "final_action", None),
+        action_alignment=getattr(r, "action_alignment", None),
         action_reason_bucket=getattr(r, "action_reason_bucket", None),
         monitorable_setup=getattr(r, "monitorable_setup", None),
         avoid_severity_score=getattr(r, "avoid_severity_score", None),
@@ -876,6 +882,9 @@ def _apply_prob_and_action(
             "p_open": None,
             "expected_return": None,
             "confidence": None,
+            "quant_action": "WAIT",
+            "llm_action": "WAIT",
+            "reconciled_action": "WAIT",
             "action": "WAIT",
         }
 
@@ -917,8 +926,20 @@ def _apply_prob_and_action(
         config=DEFAULT_PLANNING_CONFIG,
     )
 
-    action = str(classification["final_action"])
-    strategy_action = "BUY" if action == "BUY" else "WAIT / AVOID" if action == "AVOID" else "HOLD / WAIT"
+    quant_action = str(classification["quant_action"])
+    reconciled = reconcile_actions(
+        quant_action=quant_action,
+        llm_action=(review_action or quant_action),
+        monitorable_setup=bool(classification["monitorable_setup"]),
+        avoid_severity_score=float(classification["avoid_severity_score"]),
+        constructive_traits=list(classification["constructive_traits"]),
+        trend_state=str(getattr(row, "trend_state", None) or ""),
+        relative_strength_score=float(getattr(row, "relative_strength_score", 5.0) or 5.0),
+        config=DEFAULT_PLANNING_CONFIG,
+    )
+    llm_action = review_action or quant_action
+    action = str(reconciled["reconciled_action"])
+    strategy_action = action
 
     row.signal_score = signal_score
     row.market_regime = regime
@@ -930,8 +951,11 @@ def _apply_prob_and_action(
     row.buy_threshold = buy_threshold
     row.avoid_threshold = avoid_threshold
     row.strategy_action = strategy_action
-    row.llm_action = review_action or str(action)
+    row.quant_action = quant_action
+    row.llm_action = llm_action
+    row.reconciled_action = action
     row.final_action = action
+    row.action_alignment = str(reconciled["action_alignment"])
     row.action_reason_bucket = classification["action_reason_bucket"]
     row.monitorable_setup = bool(classification["monitorable_setup"])
     row.avoid_severity_score = float(classification["avoid_severity_score"])
@@ -944,7 +968,8 @@ def _apply_prob_and_action(
         f"regime={regime}; signal={signal_score}; p_tp={probs['p_tp']:.2f}; "
         f"p_sl={probs['p_sl']:.2f}; exp_ret={probs['expected_return']:.3f}; "
         f"confidence={probs['confidence']:.2f}; history_samples={history_samples}; "
-        f"final_action={action}; severity={classification['avoid_severity_score']:.2f}"
+        f"quant_action={quant_action}; llm_action={llm_action}; final_action={action}; "
+        f"severity={classification['avoid_severity_score']:.2f}; alignment={reconciled['action_alignment']}"
     )
     row.llm_rationale = " | ".join(rationale_bits)
 
@@ -954,8 +979,12 @@ def _apply_prob_and_action(
         "p_open": probs["p_open"],
         "expected_return": probs["expected_return"],
         "confidence": probs["confidence"],
+        "quant_action": quant_action,
+        "llm_action": llm_action,
+        "reconciled_action": action,
         "action": action,
         "classification": classification,
+        "action_alignment": reconciled["action_alignment"],
     }
 
 
@@ -1027,7 +1056,7 @@ def plan_swing(req: PlanRequest, db: Session = Depends(get_db), _=Depends(requir
                 stop=None,
                 take_profit=None,
                 max_hold_date=datetime.now(timezone.utc),
-                strategy_action="NO DATA",
+                strategy_action="WAIT",
                 strategy_reason=f"Planner crashed: {e}",
                 news=[],
                 news_score=0,

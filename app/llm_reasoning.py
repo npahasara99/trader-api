@@ -78,6 +78,53 @@ def _collect_constructive_traits(payload: dict, config: PlanningConfig) -> list[
     return traits
 
 
+def reconcile_actions(
+    *,
+    quant_action: str,
+    llm_action: str,
+    monitorable_setup: bool,
+    avoid_severity_score: float,
+    constructive_traits: list[str],
+    trend_state: str,
+    relative_strength_score: float,
+    config: PlanningConfig,
+) -> dict:
+    """Reconcile quant and LLM actions without hiding disagreement."""
+    quant = str(quant_action or "WAIT").upper()
+    llm = str(llm_action or quant or "WAIT").upper()
+
+    if quant == llm:
+        return {
+            "reconciled_action": quant,
+            "action_alignment": "aligned",
+        }
+
+    mild_wait_override = (
+        quant == "WAIT"
+        and llm == "AVOID"
+        and monitorable_setup
+        and avoid_severity_score < config.weak_breakdown_wait_max_severity
+        and len(constructive_traits) >= 3
+        and not (trend_state == "weak_breakdown_risk" and relative_strength_score < config.wait_min_relative_strength_score)
+    )
+    if mild_wait_override:
+        return {
+            "reconciled_action": "WAIT",
+            "action_alignment": "mild_disagreement",
+        }
+
+    if quant == "AVOID" and llm == "WAIT" and avoid_severity_score >= config.avoid_severity_threshold_risk_off:
+        return {
+            "reconciled_action": "AVOID",
+            "action_alignment": "strong_disagreement",
+        }
+
+    return {
+        "reconciled_action": "AVOID" if "AVOID" in {quant, llm} else "WAIT",
+        "action_alignment": "strong_disagreement",
+    }
+
+
 def classify_final_action(*, payload: dict, config: PlanningConfig) -> dict:
     """Three-bucket action classifier.
 
@@ -103,6 +150,7 @@ def classify_final_action(*, payload: dict, config: PlanningConfig) -> dict:
     prob_sl = payload.get("prob_sl")
     prob_tp_val = _to_float(prob_tp, 0.0) if prob_tp is not None else None
     prob_sl_val = _to_float(prob_sl, 0.0) if prob_sl is not None else None
+    prob_edge = (prob_tp_val - prob_sl_val) if prob_tp_val is not None and prob_sl_val is not None else None
     entry_requires_confirmation = bool(payload.get("entry_requires_confirmation"))
     earnings = payload.get("earnings") or {}
     days_to_earnings = earnings.get("days_to_earnings")
@@ -219,7 +267,30 @@ def classify_final_action(*, payload: dict, config: PlanningConfig) -> dict:
         and not (days_to_earnings is not None and int(days_to_earnings) <= config.earnings_hard_block_days)
     )
 
-    monitorable_setup = bool(len(constructive_traits) >= 2 and composite >= config.wait_min_composite_score and entry_quality >= config.wait_min_entry_quality)
+    weak_breakdown_monitorable = (
+        trend_state == "weak_breakdown_risk"
+        and len(constructive_traits) >= config.weak_breakdown_wait_min_traits
+        and relative_strength_score >= config.wait_min_relative_strength_score
+        and support_quality_score >= config.weak_breakdown_wait_min_support_quality_score
+        and expected_return_val is not None
+        and expected_return_val > 0
+        and (prob_edge is None or prob_edge >= config.weak_breakdown_wait_min_prob_edge)
+        and severity < config.weak_breakdown_wait_max_severity
+    )
+    monitorable_setup = bool(
+        (
+            trend_state in {"pullback_in_uptrend", "uptrend"}
+            and len(constructive_traits) >= 2
+            and composite >= config.wait_min_composite_score
+            and entry_quality >= config.wait_min_entry_quality
+        )
+        or weak_breakdown_monitorable
+        or (
+            trend_state == "range"
+            and len(constructive_traits) >= 3
+            and composite >= config.wait_min_composite_score
+        )
+    )
     severity_threshold = config.avoid_severity_threshold_risk_off if market_regime == "risk_off" else config.avoid_severity_threshold
     avoid_ok = bool(severity >= severity_threshold and not monitorable_setup)
 
@@ -239,7 +310,7 @@ def classify_final_action(*, payload: dict, config: PlanningConfig) -> dict:
         avoid_reasons.append("multiple_weak_factors_reduce_priority")
 
     return {
-        "final_action": final_action,
+        "quant_action": final_action,
         "action_reason_bucket": action_reason_bucket,
         "monitorable_setup": bool(final_action == "WAIT" or monitorable_setup),
         "avoid_severity_score": round(max(0.0, severity), 3),
@@ -264,6 +335,9 @@ def build_llm_prompt(payload: dict) -> str:
         "Differentiate between 'not ready' and 'not attractive'. "
         "Treat pullback_in_uptrend with strong relative strength but weak reversal confirmation as WAIT unless other severe negatives exist. "
         "Treat weak_breakdown_risk with positive offsets as potentially WAIT, not automatically AVOID. "
+        "Treat weak_breakdown_risk with weak relative strength and weak confirmation as AVOID unless constructive offsets are strong. "
+        "Support presence alone is not enough for WAIT. "
+        "Positive expectancy and a non-poor probability profile matter for a weak_breakdown_risk setup to remain monitorable. "
         "Treat no_confirmation + negative expectancy + weak relative strength as AVOID. "
         "Return JSON only with fields: "
         "llm_action, setup_type, confidence, consensus_view, entry_assessment, stop_assessment, "
@@ -298,7 +372,7 @@ def deterministic_review(*, payload: dict, config: PlanningConfig) -> LLMReviewR
     reversal_state = str(volume_context.get("reversal_volume_state") or "unknown")
 
     classification = classify_final_action(payload=payload, config=config)
-    action = str(classification["final_action"])
+    action = str(classification["quant_action"])
     constructive_traits = list(classification.get("constructive_traits") or [])
     buy_blockers = list(classification.get("buy_blockers") or [])
     avoid_reason = classification.get("avoid_reason")

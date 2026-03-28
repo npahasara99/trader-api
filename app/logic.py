@@ -82,7 +82,10 @@ class PlanRow:
     llm_quality_score: float | None = None
     composite_score: float | None = None
     llm_review: dict | None = None
+    quant_action: str | None = None
+    reconciled_action: str | None = None
     final_action: str | None = None
+    action_alignment: str | None = None
     action_reason_bucket: str | None = None
     monitorable_setup: bool | None = None
     avoid_severity_score: float | None = None
@@ -879,7 +882,7 @@ def build_swing_plan(
                     entry=None,
                     stop=None,
                     take_profit=None,
-                    strategy_action="NO DATA",
+                    strategy_action="WAIT",
                     strategy_reason="Price unavailable (Finnhub quote failed or key missing)",
                     max_hold_date=datetime.now(timezone.utc) + timedelta(days=20),
                     news=news,
@@ -909,7 +912,7 @@ def build_swing_plan(
                     entry=None,
                     stop=None,
                     take_profit=None,
-                    strategy_action="NO DATA",
+                    strategy_action="WAIT",
                     strategy_reason="Historical bars unavailable for structured planning",
                     max_hold_date=datetime.now(timezone.utc) + timedelta(days=20),
                     news=news,

@@ -259,13 +259,7 @@ def generate_structured_plan(
     )
 
     signal_score = int(news_score + earnings_score)
-    strategy_action = (
-        "BUY"
-        if llm_review["llm_action"] == "BUY"
-        else "WAIT / AVOID"
-        if llm_review["llm_action"] == "AVOID"
-        else "HOLD / WAIT"
-    )
+    strategy_action = str(llm_review["llm_action"])
 
     plan = {
         "ticker": ticker,
