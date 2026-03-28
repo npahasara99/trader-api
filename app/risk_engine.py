@@ -27,29 +27,29 @@ def build_stop_loss(
 ) -> dict:
     atr = max(float(atr or 0.0), max(current_price * 0.01, 0.01))
     buffer = atr * config.stop_buffer_atr_mult
+    max_valid_stop = preferred_entry - max(atr * 0.35, current_price * 0.0035)
 
     candidates: list[tuple[float, str]] = []
     if support_zone_1:
-        candidates.append(
-            (
-                float(support_zone_1["lower"]) - buffer - current_price * config.stop_below_zone_buffer_pct,
-                "below support_zone_1 and ATR buffer",
-            )
-        )
+        level = float(support_zone_1["lower"]) - buffer - current_price * config.stop_below_zone_buffer_pct
+        if level < max_valid_stop:
+            candidates.append((level, "below support_zone_1 and ATR buffer"))
     if support_zone_2:
-        candidates.append(
-            (
-                float(support_zone_2["lower"]) - buffer * 0.8,
-                "below support_zone_2 and ATR buffer",
-            )
-        )
+        level = float(support_zone_2["lower"]) - buffer * 0.8
+        if level < max_valid_stop:
+            candidates.append((level, "below support_zone_2 and ATR buffer"))
     if recent_swing_low is not None:
-        candidates.append((float(recent_swing_low) - buffer, "below recent swing low and ATR buffer"))
+        level = float(recent_swing_low) - buffer
+        if level < max_valid_stop:
+            candidates.append((level, "below recent swing low and ATR buffer"))
 
     if not candidates:
         candidates.append((preferred_entry - atr * 1.6, "fallback ATR invalidation"))
 
     stop_loss, basis = min(candidates, key=lambda item: item[0])
+    if stop_loss >= preferred_entry:
+        stop_loss = preferred_entry - atr * 1.6
+        basis = "fallback ATR invalidation"
     stop_distance_pct = (preferred_entry - stop_loss) / max(preferred_entry, 1e-9) * 100.0
     stop_too_tight = (preferred_entry - stop_loss) < atr * 0.9
     return {
@@ -78,9 +78,15 @@ def build_take_profits(
 
     tp1 = _zone_mid(resistance_zone_1) or recent_swing_high or preferred_entry + max(risk_per_share * 1.2, atr * config.tp1_atr_mult)
     tp2 = _zone_mid(resistance_zone_2) or preferred_entry + max(risk_per_share * 2.0, atr * config.tp2_atr_mult)
+    min_tp1 = preferred_entry + max(atr * 0.45, risk_per_share * 0.9)
+    min_tp2 = preferred_entry + max(atr * 0.95, risk_per_share * 1.5)
 
+    if tp1 <= preferred_entry:
+        tp1 = min_tp1
+    else:
+        tp1 = max(tp1, min_tp1)
     if tp2 <= tp1:
-        tp2 = tp1 + max(atr * 0.8, risk_per_share * 0.5)
+        tp2 = max(min_tp2, tp1 + max(atr * 0.8, risk_per_share * 0.5))
 
     trend_bonus = 1.4 if trend_state == "uptrend" else 1.0
     tp_final = max(tp2, preferred_entry + min(reachable_move * trend_bonus, atr * 8.0))

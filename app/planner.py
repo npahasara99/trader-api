@@ -179,6 +179,10 @@ def generate_structured_plan(
         trend_state=structure.trend_state,
         config=config,
     )
+    if stop["stop_loss"] >= preferred["preferred_entry"]:
+        raise ValueError(f"Invalid long stop placement for {ticker}: stop >= entry")
+    if targets["take_profit_1"] <= preferred["preferred_entry"]:
+        raise ValueError(f"Invalid long target placement for {ticker}: tp1 <= entry")
 
     earnings = _earnings_payload(earnings_context)
     reward_risk = {

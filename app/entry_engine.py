@@ -123,6 +123,7 @@ def choose_preferred_entry(
     best = None
     best_score = -10_000.0
     support_mid = _zone_mid(support_zone_1)
+    support_lower = float(support_zone_1["lower"]) if support_zone_1 and support_zone_1.get("lower") is not None else None
 
     for cand in candidates:
         price = float(cand["price"])
@@ -140,6 +141,8 @@ def choose_preferred_entry(
 
         if support_mid is not None and price > support_mid + max(current_price * 0.005, 0.01):
             score -= 0.9
+        if support_lower is not None and price < support_lower - max(current_price * 0.004, 0.01):
+            score -= 2.4
         if trend_state in {"weak_breakdown_risk", "downtrend"}:
             score -= 1.1
         if volume_context.get("selloff_volume_state") == "heavy_distribution":
