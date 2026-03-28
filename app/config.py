@@ -45,6 +45,13 @@ class PlanningConfig:
     weak_breakdown_wait_min_support_quality_score: float = 5.0
     weak_breakdown_wait_min_prob_edge: float = -0.02
     weak_breakdown_wait_max_severity: float = 4.6
+    wait_monitor_days_pullback: int = 6
+    wait_monitor_days_structure_repair: int = 4
+    wait_monitor_days_other: int = 3
+    wait_monitor_days_min: int = 2
+    wait_monitor_days_max: int = 7
+    wait_watch_priority_high_composite: float = 5.6
+    wait_watch_priority_medium_composite: float = 4.6
     avoid_severity_threshold: float = 5.0
     avoid_severity_threshold_risk_off: float = 4.8
     avoid_bad_composite_gap: float = 1.7

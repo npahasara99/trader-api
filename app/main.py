@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta, date
 from .logic import bucket_news, classify_assumption
 from .config import DEFAULT_PLANNING_CONFIG
 from .llm_reasoning import classify_final_action, reconcile_actions
+from .monitoring import build_wait_monitoring_plan
 import json
 import os
 
@@ -200,6 +201,28 @@ class PlanRowOut(BaseModel):
     avoid_reason: Optional[str] = None
     buy_blockers: List[str] = Field(default_factory=list)
     constructive_traits: List[str] = Field(default_factory=list)
+    wait_type: Optional[str] = None
+    monitor_window_days: Optional[int] = None
+    monitor_until_date: Optional[datetime] = None
+    stale_after_date: Optional[datetime] = None
+    watch_priority: Optional[str] = None
+    days_to_trigger_estimate: Optional[float] = None
+    support_zone_1_display: Optional[str] = None
+    support_zone_2_display: Optional[str] = None
+    resistance_zone_1_display: Optional[str] = None
+    resistance_zone_2_display: Optional[str] = None
+    support_zone_1_midpoint: Optional[float] = None
+    support_zone_2_midpoint: Optional[float] = None
+    support_zone_1_width_pct: Optional[float] = None
+    support_zone_2_width_pct: Optional[float] = None
+    support_zone_1_note: Optional[str] = None
+    support_zone_2_note: Optional[str] = None
+    support_zone_summary: List[str] = Field(default_factory=list)
+    resistance_zone_summary: List[str] = Field(default_factory=list)
+    upgrade_triggers: List[str] = Field(default_factory=list)
+    failure_triggers: List[str] = Field(default_factory=list)
+    next_check_focus: List[str] = Field(default_factory=list)
+    setup_monitoring_summary: Optional[str] = None
     structure_flags: List[str] = Field(default_factory=list)
     breakout_level: Optional[float] = None
     prior_breakout_retest_zone: Optional[dict] = None
@@ -423,6 +446,28 @@ def _to_plan_row_out(r) -> PlanRowOut:
         avoid_reason=getattr(r, "avoid_reason", None),
         buy_blockers=list(getattr(r, "buy_blockers", []) or []),
         constructive_traits=list(getattr(r, "constructive_traits", []) or []),
+        wait_type=getattr(r, "wait_type", None),
+        monitor_window_days=getattr(r, "monitor_window_days", None),
+        monitor_until_date=getattr(r, "monitor_until_date", None),
+        stale_after_date=getattr(r, "stale_after_date", None),
+        watch_priority=getattr(r, "watch_priority", None),
+        days_to_trigger_estimate=getattr(r, "days_to_trigger_estimate", None),
+        support_zone_1_display=getattr(r, "support_zone_1_display", None),
+        support_zone_2_display=getattr(r, "support_zone_2_display", None),
+        resistance_zone_1_display=getattr(r, "resistance_zone_1_display", None),
+        resistance_zone_2_display=getattr(r, "resistance_zone_2_display", None),
+        support_zone_1_midpoint=getattr(r, "support_zone_1_midpoint", None),
+        support_zone_2_midpoint=getattr(r, "support_zone_2_midpoint", None),
+        support_zone_1_width_pct=getattr(r, "support_zone_1_width_pct", None),
+        support_zone_2_width_pct=getattr(r, "support_zone_2_width_pct", None),
+        support_zone_1_note=getattr(r, "support_zone_1_note", None),
+        support_zone_2_note=getattr(r, "support_zone_2_note", None),
+        support_zone_summary=list(getattr(r, "support_zone_summary", []) or []),
+        resistance_zone_summary=list(getattr(r, "resistance_zone_summary", []) or []),
+        upgrade_triggers=list(getattr(r, "upgrade_triggers", []) or []),
+        failure_triggers=list(getattr(r, "failure_triggers", []) or []),
+        next_check_focus=list(getattr(r, "next_check_focus", []) or []),
+        setup_monitoring_summary=getattr(r, "setup_monitoring_summary", None),
         structure_flags=list(getattr(r, "structure_flags", []) or []),
         breakout_level=getattr(r, "breakout_level", None),
         prior_breakout_retest_zone=getattr(r, "prior_breakout_retest_zone", None),
@@ -963,6 +1008,30 @@ def _apply_prob_and_action(
     row.avoid_reason = classification["avoid_reason"]
     row.buy_blockers = list(classification["buy_blockers"])
     row.constructive_traits = list(classification["constructive_traits"])
+    monitoring_plan = build_wait_monitoring_plan(row, config=DEFAULT_PLANNING_CONFIG)
+    if monitoring_plan:
+        row.wait_type = monitoring_plan["wait_type"]
+        row.monitor_window_days = monitoring_plan["monitor_window_days"]
+        row.monitor_until_date = monitoring_plan["monitor_until_date"]
+        row.stale_after_date = monitoring_plan["stale_after_date"]
+        row.watch_priority = monitoring_plan["watch_priority"]
+        row.days_to_trigger_estimate = monitoring_plan["days_to_trigger_estimate"]
+        row.support_zone_1_display = monitoring_plan["support_zone_1_display"]
+        row.support_zone_2_display = monitoring_plan["support_zone_2_display"]
+        row.resistance_zone_1_display = monitoring_plan["resistance_zone_1_display"]
+        row.resistance_zone_2_display = monitoring_plan["resistance_zone_2_display"]
+        row.support_zone_1_midpoint = monitoring_plan["support_zone_1_midpoint"]
+        row.support_zone_2_midpoint = monitoring_plan["support_zone_2_midpoint"]
+        row.support_zone_1_width_pct = monitoring_plan["support_zone_1_width_pct"]
+        row.support_zone_2_width_pct = monitoring_plan["support_zone_2_width_pct"]
+        row.support_zone_1_note = monitoring_plan["support_zone_1_note"]
+        row.support_zone_2_note = monitoring_plan["support_zone_2_note"]
+        row.support_zone_summary = list(monitoring_plan["support_zone_summary"])
+        row.resistance_zone_summary = list(monitoring_plan["resistance_zone_summary"])
+        row.upgrade_triggers = list(monitoring_plan["upgrade_triggers"])
+        row.failure_triggers = list(monitoring_plan["failure_triggers"])
+        row.next_check_focus = list(monitoring_plan["next_check_focus"])
+        row.setup_monitoring_summary = monitoring_plan["setup_monitoring_summary"]
     rationale_bits = list(review.get("rationale") or [])
     rationale_bits.append(
         f"regime={regime}; signal={signal_score}; p_tp={probs['p_tp']:.2f}; "

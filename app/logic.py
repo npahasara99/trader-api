@@ -93,6 +93,28 @@ class PlanRow:
     avoid_reason: str | None = None
     buy_blockers: list[str] = field(default_factory=list)
     constructive_traits: list[str] = field(default_factory=list)
+    wait_type: str | None = None
+    monitor_window_days: int | None = None
+    monitor_until_date: datetime | None = None
+    stale_after_date: datetime | None = None
+    watch_priority: str | None = None
+    days_to_trigger_estimate: float | None = None
+    support_zone_1_display: str | None = None
+    support_zone_2_display: str | None = None
+    resistance_zone_1_display: str | None = None
+    resistance_zone_2_display: str | None = None
+    support_zone_1_midpoint: float | None = None
+    support_zone_2_midpoint: float | None = None
+    support_zone_1_width_pct: float | None = None
+    support_zone_2_width_pct: float | None = None
+    support_zone_1_note: str | None = None
+    support_zone_2_note: str | None = None
+    support_zone_summary: list[str] = field(default_factory=list)
+    resistance_zone_summary: list[str] = field(default_factory=list)
+    upgrade_triggers: list[str] = field(default_factory=list)
+    failure_triggers: list[str] = field(default_factory=list)
+    next_check_focus: list[str] = field(default_factory=list)
+    setup_monitoring_summary: str | None = None
     structure_flags: list[str] = field(default_factory=list)
     breakout_level: float | None = None
     prior_breakout_retest_zone: dict | None = None

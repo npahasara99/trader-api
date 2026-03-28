@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from .config import DEFAULT_PLANNING_CONFIG
 from .llm_reasoning import classify_final_action, reconcile_actions
+from .monitoring import build_wait_monitoring_plan
 
 
 # Lightweight validation fixtures for the final BUY / WAIT / AVOID classifier.
@@ -177,6 +180,104 @@ def evaluate_reconciliation_fixtures() -> list[dict]:
                 "actual_action": outcome["reconciled_action"],
                 "pass": outcome["reconciled_action"] == fixture["expected_action"],
                 "alignment": outcome["action_alignment"],
+            }
+        )
+    return results
+
+
+def evaluate_wait_monitoring_fixtures() -> list[dict]:
+    fixtures = [
+        {
+            "name": "csco_like_wait_monitoring",
+            "row": SimpleNamespace(
+                final_action="WAIT",
+                current_price=79.25,
+                trend_state="pullback_in_uptrend",
+                market_regime="risk_off",
+                entry_requires_confirmation=True,
+                entry_distance_from_current_price_pct=0.8,
+                composite_score=5.89,
+                relative_strength_score=7.1,
+                atr=2.05,
+                moving_averages={"ema20": 79.41, "sma50": 78.94},
+                earnings={"days_to_earnings": 22},
+                support_zone_1={"lower": 78.75, "upper": 80.07, "source_tags": ["ema20"]},
+                support_zone_2={"lower": 78.28, "upper": 79.60, "source_tags": ["sma50"]},
+                resistance_zone_1={"lower": 79.39, "upper": 80.71, "source_tags": ["pivot_high"]},
+                resistance_zone_2={"lower": 79.83, "upper": 81.16, "source_tags": ["pivot_high", "fib_382"]},
+            ),
+            "expected_wait_type": "WAIT_CONFIRMATION",
+            "expected_watch_priority": "high",
+        },
+        {
+            "name": "intc_like_wait_monitoring",
+            "row": SimpleNamespace(
+                final_action="WAIT",
+                current_price=43.2,
+                trend_state="weak_breakdown_risk",
+                market_regime="risk_off",
+                entry_requires_confirmation=True,
+                entry_distance_from_current_price_pct=0.5,
+                composite_score=4.46,
+                relative_strength_score=6.1,
+                atr=1.84,
+                moving_averages={"ema20": 43.75, "sma50": 42.85},
+                earnings={"days_to_earnings": 18},
+                support_zone_1={"lower": 42.55, "upper": 43.25, "source_tags": ["pivot_low", "ema20"]},
+                support_zone_2={"lower": 41.75, "upper": 42.35, "source_tags": ["sma50"]},
+                resistance_zone_1={"lower": 43.95, "upper": 44.55, "source_tags": ["pivot_high"]},
+                resistance_zone_2={"lower": 44.85, "upper": 45.45, "source_tags": ["gap_fill"]},
+            ),
+            "expected_wait_type": "WAIT_STRUCTURE_REPAIR",
+            "expected_watch_priority": "medium",
+        },
+        {
+            "name": "nvda_like_avoid_no_monitoring",
+            "row": SimpleNamespace(
+                final_action="AVOID",
+                current_price=167.5,
+                trend_state="weak_breakdown_risk",
+                market_regime="risk_off",
+                entry_requires_confirmation=True,
+                entry_distance_from_current_price_pct=1.7,
+                composite_score=4.26,
+                relative_strength_score=4.1,
+                atr=5.8,
+                moving_averages={"ema20": 171.2},
+                earnings={"days_to_earnings": 35},
+                support_zone_1={"lower": 161.83, "upper": 166.2, "source_tags": ["pivot_low"]},
+                support_zone_2={"lower": 156.4, "upper": 160.0, "source_tags": ["sma50"]},
+                resistance_zone_1={"lower": 176.1, "upper": 178.3, "source_tags": ["pivot_high"]},
+                resistance_zone_2={"lower": 181.2, "upper": 184.8, "source_tags": ["gap_fill"]},
+            ),
+            "expected_wait_type": None,
+            "expected_watch_priority": None,
+        },
+    ]
+
+    results: list[dict] = []
+    for fixture in fixtures:
+        plan = build_wait_monitoring_plan(fixture["row"], config=DEFAULT_PLANNING_CONFIG)
+        results.append(
+            {
+                "name": fixture["name"],
+                "has_plan": bool(plan),
+                "wait_type": None if not plan else plan.get("wait_type"),
+                "watch_priority": None if not plan else plan.get("watch_priority"),
+                "has_upgrade_triggers": bool(plan and plan.get("upgrade_triggers")),
+                "has_failure_triggers": bool(plan and plan.get("failure_triggers")),
+                "has_support_summary": bool(plan and plan.get("support_zone_summary")),
+                "pass": bool(
+                    (
+                        not plan
+                        if fixture["expected_wait_type"] is None
+                        else (
+                            plan
+                            and plan.get("wait_type") == fixture["expected_wait_type"]
+                            and plan.get("watch_priority") == fixture["expected_watch_priority"]
+                        )
+                    )
+                ),
             }
         )
     return results

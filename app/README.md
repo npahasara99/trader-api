@@ -36,6 +36,13 @@ Backward compatibility:
   - `avoid_reason`
   - `buy_blockers`
   - `constructive_traits`
+- WAIT rows additionally expose a deterministic monitoring plan:
+  - monitor window and stale date
+  - trader-readable support / resistance zone displays
+  - upgrade triggers
+  - failure triggers
+  - next check focus
+  - `setup_monitoring_summary`
 
 Fallback behavior:
 - If live quote data is unavailable, planning still falls back to recent cached closes.
