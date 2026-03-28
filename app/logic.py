@@ -1,9 +1,12 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta, date
 import os
 import math
 import requests
 from typing import Callable
+
+from .config import DEFAULT_PLANNING_CONFIG
+from .planner import generate_structured_plan
 
 
 @dataclass
@@ -35,6 +38,57 @@ class PlanRow:
     take_profit_pct: float | None = None
     hold_days: int | None = None
     risk_tuning_reason: str | None = None
+    current_price: float | None = None
+    trend_state: str | None = None
+    support_zone_1: dict | None = None
+    support_zone_2: dict | None = None
+    resistance_zone_1: dict | None = None
+    resistance_zone_2: dict | None = None
+    atr: float | None = None
+    atr_pct: float | None = None
+    fib_levels: dict | None = None
+    moving_averages: dict | None = None
+    volume_context: dict | None = None
+    relative_strength: dict | None = None
+    earnings: dict | None = None
+    entry_candidates: list[dict] = field(default_factory=list)
+    preferred_entry: float | None = None
+    preferred_entry_type: str | None = None
+    entry_quality_score: float | None = None
+    entry_distance_from_current_price_pct: float | None = None
+    entry_confluence_score: float | None = None
+    entry_requires_confirmation: bool | None = None
+    confirmation_trigger: str | None = None
+    stop_loss: float | None = None
+    stop_basis: str | None = None
+    stop_distance_pct: float | None = None
+    stop_too_tight_flag: bool | None = None
+    take_profit_1: float | None = None
+    take_profit_2: float | None = None
+    take_profit_final: float | None = None
+    tp_basis: str | None = None
+    reward_risk: dict | None = None
+    tp_too_optimistic_flag: bool | None = None
+    max_hold_days: int | None = None
+    trend_quality_score: float | None = None
+    pullback_quality_score: float | None = None
+    support_quality_score: float | None = None
+    volatility_quality_score: float | None = None
+    relative_strength_score: float | None = None
+    volume_confirmation_score: float | None = None
+    earnings_risk_score: float | None = None
+    reward_risk_score: float | None = None
+    historical_analogue_score: float | None = None
+    llm_quality_score: float | None = None
+    composite_score: float | None = None
+    llm_review: dict | None = None
+    structure_flags: list[str] = field(default_factory=list)
+    breakout_level: float | None = None
+    prior_breakout_retest_zone: dict | None = None
+    consolidation_range: dict | None = None
+    gap_zone: dict | None = None
+    recent_swing_highs: list[dict] = field(default_factory=list)
+    recent_swing_lows: list[dict] = field(default_factory=list)
 
 
 # Static S&P 100-like liquid large-cap universe for API-side scanning.
@@ -239,6 +293,7 @@ def get_sp100_universe(
 
 
 DailyClosesLoader = Callable[[str, date, date], dict[date, float]]
+DailyBarsLoader = Callable[[str], list[dict]]
 
 def scan_swing_candidates_largecaps(universe: list[str], top_n: int = 8) -> list[str]:
     # TODO: replace with your existing scan logic
@@ -482,6 +537,46 @@ def _get_daily_closes(
             out[d] = float(close)
         except Exception:
             continue
+    return out
+
+
+def _get_daily_bars(
+    ticker: str,
+    *,
+    daily_bars_loader: DailyBarsLoader | None = None,
+    daily_closes_loader: DailyClosesLoader | None = None,
+) -> list[dict]:
+    """Load daily OHLCV bars, synthesizing from close-only history when needed."""
+    if daily_bars_loader is not None:
+        try:
+            rows = daily_bars_loader(ticker)
+            if rows:
+                return rows
+        except Exception:
+            pass
+
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=DEFAULT_PLANNING_CONFIG.history_lookback_days)
+    closes = _get_daily_closes(ticker, start, end, daily_closes_loader=daily_closes_loader)
+    if not closes:
+        return []
+
+    out: list[dict] = []
+    for bar_day in sorted(closes.keys()):
+        close_val = float(closes[bar_day])
+        out.append(
+            {
+                "symbol": ticker,
+                "bar_date": bar_day,
+                "open": close_val,
+                "high": close_val,
+                "low": close_val,
+                "close": close_val,
+                "volume": None,
+                "adjusted_close": close_val,
+                "source": "close_only_fallback",
+            }
+        )
     return out
 
 
@@ -739,9 +834,22 @@ def build_swing_plan(
     buy_threshold: int = 4,
     avoid_threshold: int = -4,
     daily_closes_loader: DailyClosesLoader | None = None,
+    daily_bars_loader: DailyBarsLoader | None = None,
+    history_stats_by_ticker: dict[str, dict] | None = None,
+    llm_provider: str | None = None,
+    llm_model: str | None = None,
+    llm_style: str | None = None,
 ) -> list[PlanRow]:
     rows: list[PlanRow] = []
     regime_val = regime or "neutral"
+    benchmark_bars: dict[str, list[dict]] = {}
+
+    for benchmark in DEFAULT_PLANNING_CONFIG.benchmark_symbols:
+        benchmark_bars[benchmark] = _get_daily_bars(
+            benchmark,
+            daily_bars_loader=daily_bars_loader,
+            daily_closes_loader=daily_closes_loader,
+        )
 
     for t in tickers:
         last = get_last_price_or_recent_close(t, daily_closes_loader=daily_closes_loader)
@@ -774,51 +882,89 @@ def build_swing_plan(
                     market_regime=regime_val,
                     buy_threshold=buy_threshold,
                     avoid_threshold=avoid_threshold,
+                    current_price=None,
                 )
             )
             continue
 
-        entry = float(last)
-        stop = entry * 0.97
-        take_profit = entry * 1.06
+        bars = _get_daily_bars(
+            t,
+            daily_bars_loader=daily_bars_loader,
+            daily_closes_loader=daily_closes_loader,
+        )
+
+        if not bars:
+            rows.append(
+                PlanRow(
+                    ticker=t,
+                    last=float(last),
+                    entry=None,
+                    stop=None,
+                    take_profit=None,
+                    strategy_action="NO DATA",
+                    strategy_reason="Historical bars unavailable for structured planning",
+                    max_hold_date=datetime.now(timezone.utc) + timedelta(days=20),
+                    news=news,
+                    news_score=news_score,
+                    earnings_score=earnings_score,
+                    earnings_context=earnings_context,
+                    signal_score=signal_score,
+                    market_regime=regime_val,
+                    current_price=float(last),
+                    buy_threshold=buy_threshold,
+                    avoid_threshold=avoid_threshold,
+                )
+            )
+            continue
+
+        structured = generate_structured_plan(
+            ticker=t,
+            current_price=float(last),
+            bars=bars,
+            news_score=news_score,
+            earnings_score=earnings_score,
+            earnings_context=earnings_context,
+            market_regime=regime_val,
+            buy_threshold=buy_threshold,
+            avoid_threshold=avoid_threshold,
+            history_stats=(history_stats_by_ticker or {}).get(t),
+            benchmark_bars=benchmark_bars,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            llm_style=llm_style,
+        )
 
         probs = estimate_trade_probabilities(
             signal_score=signal_score,
-            entry=entry,
-            stop=stop,
-            take_profit=take_profit,
+            entry=float(structured["preferred_entry"]),
+            stop=float(structured["stop_loss"]),
+            take_profit=float(structured["take_profit_1"]),
             regime=regime_val,
-            history_win_rate=None,
-            history_samples=0,
+            history_win_rate=((history_stats_by_ticker or {}).get(t, {}) or {}).get("win_rate"),
+            history_samples=int(((history_stats_by_ticker or {}).get(t, {}) or {}).get("samples", 0)),
         )
 
-        if signal_score >= buy_threshold:
-            strategy_action = "BUY"
-        elif signal_score <= avoid_threshold:
-            strategy_action = "WAIT / AVOID"
-        else:
-            strategy_action = "HOLD / WAIT"
-
+        llm_review = structured.get("llm_review") or {}
         reason = (
-            f"regime={regime_val}; signal={signal_score} (news={news_score}, earnings={earnings_score}); "
-            f"p_tp={probs['p_tp']:.2f}, p_sl={probs['p_sl']:.2f}, exp_ret={probs['expected_return']:.3f}; "
-            f"earnings move avg={earnings_context.get('avg_post_earnings_move_pct')}, "
-            f"up-rate={earnings_context.get('post_earnings_up_rate')}, "
-            f"52w-pos={earnings_context.get('price_position_52w')}, "
-            f"surprise% avg={earnings_context.get('avg_surprise_percent')}"
+            f"{structured['strategy_reason']}; news={news_score}; earnings={earnings_score}; "
+            f"entry_type={structured.get('preferred_entry_type')}; "
+            f"rr1={(structured.get('reward_risk') or {}).get('tp1')}; "
+            f"risk={llm_review.get('key_risk')}"
         )
 
         rows.append(
             PlanRow(
                 ticker=t,
-                last=entry,
-                entry=entry,
-                stop=stop,
-                take_profit=take_profit,
-                strategy_action=strategy_action,
+                last=float(last),
+                entry=float(structured["preferred_entry"]),
+                stop=float(structured["stop_loss"]),
+                take_profit=float(structured["take_profit_1"]),
+                strategy_action=str(structured["strategy_action"]),
                 strategy_reason=reason,
-                max_hold_date=datetime.now(timezone.utc) + timedelta(days=20),
+                max_hold_date=structured["max_hold_date"],
                 news=news,
+                llm_action=llm_review.get("llm_action"),
+                llm_rationale=" | ".join(llm_review.get("rationale") or []),
                 news_score=news_score,
                 earnings_score=earnings_score,
                 earnings_context=earnings_context,
@@ -831,6 +977,61 @@ def build_swing_plan(
                 confidence=probs["confidence"],
                 buy_threshold=buy_threshold,
                 avoid_threshold=avoid_threshold,
+                stop_loss_pct=(float(structured["preferred_entry"] - structured["stop_loss"]) / max(float(structured["preferred_entry"]), 1e-9)),
+                take_profit_pct=(float(structured["take_profit_1"] - structured["preferred_entry"]) / max(float(structured["preferred_entry"]), 1e-9)),
+                hold_days=structured["max_hold_days"],
+                risk_tuning_reason=structured["risk_tuning_reason"],
+                current_price=structured["current_price"],
+                trend_state=structured["trend_state"],
+                support_zone_1=structured["support_zone_1"],
+                support_zone_2=structured["support_zone_2"],
+                resistance_zone_1=structured["resistance_zone_1"],
+                resistance_zone_2=structured["resistance_zone_2"],
+                atr=structured["atr"],
+                atr_pct=structured["atr_pct"],
+                fib_levels=structured["fib_levels"],
+                moving_averages=structured["moving_averages"],
+                volume_context=structured["volume_context"],
+                relative_strength=structured["relative_strength"],
+                earnings=structured["earnings"],
+                entry_candidates=structured["entry_candidates"],
+                preferred_entry=structured["preferred_entry"],
+                preferred_entry_type=structured["preferred_entry_type"],
+                entry_quality_score=structured["entry_quality_score"],
+                entry_distance_from_current_price_pct=structured["entry_distance_from_current_price_pct"],
+                entry_confluence_score=structured["entry_confluence_score"],
+                entry_requires_confirmation=structured["entry_requires_confirmation"],
+                confirmation_trigger=structured["confirmation_trigger"],
+                stop_loss=structured["stop_loss"],
+                stop_basis=structured["stop_basis"],
+                stop_distance_pct=structured["stop_distance_pct"],
+                stop_too_tight_flag=structured["stop_too_tight_flag"],
+                take_profit_1=structured["take_profit_1"],
+                take_profit_2=structured["take_profit_2"],
+                take_profit_final=structured["take_profit_final"],
+                tp_basis=structured["tp_basis"],
+                reward_risk=structured["reward_risk"],
+                tp_too_optimistic_flag=structured["tp_too_optimistic_flag"],
+                max_hold_days=structured["max_hold_days"],
+                trend_quality_score=structured["trend_quality_score"],
+                pullback_quality_score=structured["pullback_quality_score"],
+                support_quality_score=structured["support_quality_score"],
+                volatility_quality_score=structured["volatility_quality_score"],
+                relative_strength_score=structured["relative_strength_score"],
+                volume_confirmation_score=structured["volume_confirmation_score"],
+                earnings_risk_score=structured["earnings_risk_score"],
+                reward_risk_score=structured["reward_risk_score"],
+                historical_analogue_score=structured["historical_analogue_score"],
+                llm_quality_score=structured["llm_quality_score"],
+                composite_score=structured["composite_score"],
+                llm_review=structured["llm_review"],
+                structure_flags=structured["structure_flags"],
+                breakout_level=structured["breakout_level"],
+                prior_breakout_retest_zone=structured["prior_breakout_retest_zone"],
+                consolidation_range=structured["consolidation_range"],
+                gap_zone=structured["gap_zone"],
+                recent_swing_highs=structured["recent_swing_highs"],
+                recent_swing_lows=structured["recent_swing_lows"],
             )
         )
 

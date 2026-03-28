@@ -28,6 +28,9 @@ from .market_data import (
 )
 
 
+DEFAULT_BAR_LOOKBACK_DAYS = 320
+
+
 def _ensure_runtime_columns() -> None:
     required_cols = {
         "news_score": "INTEGER",
@@ -140,6 +143,57 @@ class PlanRowOut(BaseModel):
     take_profit_pct: Optional[float] = None
     hold_days: Optional[int] = None
     risk_tuning_reason: Optional[str] = None
+    current_price: Optional[float] = None
+    trend_state: Optional[str] = None
+    support_zone_1: Optional[dict] = None
+    support_zone_2: Optional[dict] = None
+    resistance_zone_1: Optional[dict] = None
+    resistance_zone_2: Optional[dict] = None
+    atr: Optional[float] = None
+    atr_pct: Optional[float] = None
+    fib_levels: Optional[dict] = None
+    moving_averages: Optional[dict] = None
+    volume_context: Optional[dict] = None
+    relative_strength: Optional[dict] = None
+    earnings: Optional[dict] = None
+    entry_candidates: List[dict] = Field(default_factory=list)
+    preferred_entry: Optional[float] = None
+    preferred_entry_type: Optional[str] = None
+    entry_quality_score: Optional[float] = None
+    entry_distance_from_current_price_pct: Optional[float] = None
+    entry_confluence_score: Optional[float] = None
+    entry_requires_confirmation: Optional[bool] = None
+    confirmation_trigger: Optional[str] = None
+    stop_loss: Optional[float] = None
+    stop_basis: Optional[str] = None
+    stop_distance_pct: Optional[float] = None
+    stop_too_tight_flag: Optional[bool] = None
+    take_profit_1: Optional[float] = None
+    take_profit_2: Optional[float] = None
+    take_profit_final: Optional[float] = None
+    tp_basis: Optional[str] = None
+    reward_risk: Optional[dict] = None
+    tp_too_optimistic_flag: Optional[bool] = None
+    max_hold_days: Optional[int] = None
+    trend_quality_score: Optional[float] = None
+    pullback_quality_score: Optional[float] = None
+    support_quality_score: Optional[float] = None
+    volatility_quality_score: Optional[float] = None
+    relative_strength_score: Optional[float] = None
+    volume_confirmation_score: Optional[float] = None
+    earnings_risk_score: Optional[float] = None
+    reward_risk_score: Optional[float] = None
+    historical_analogue_score: Optional[float] = None
+    llm_quality_score: Optional[float] = None
+    composite_score: Optional[float] = None
+    llm_review: Optional[dict] = None
+    structure_flags: List[str] = Field(default_factory=list)
+    breakout_level: Optional[float] = None
+    prior_breakout_retest_zone: Optional[dict] = None
+    consolidation_range: Optional[dict] = None
+    gap_zone: Optional[dict] = None
+    recent_swing_highs: List[dict] = Field(default_factory=list)
+    recent_swing_lows: List[dict] = Field(default_factory=list)
 
     llm_action: Optional[str] = None
     llm_rationale: Optional[str] = None
@@ -301,6 +355,57 @@ def _to_plan_row_out(r) -> PlanRowOut:
         take_profit_pct=getattr(r, "take_profit_pct", None),
         hold_days=getattr(r, "hold_days", None),
         risk_tuning_reason=getattr(r, "risk_tuning_reason", None),
+        current_price=getattr(r, "current_price", None),
+        trend_state=getattr(r, "trend_state", None),
+        support_zone_1=getattr(r, "support_zone_1", None),
+        support_zone_2=getattr(r, "support_zone_2", None),
+        resistance_zone_1=getattr(r, "resistance_zone_1", None),
+        resistance_zone_2=getattr(r, "resistance_zone_2", None),
+        atr=getattr(r, "atr", None),
+        atr_pct=getattr(r, "atr_pct", None),
+        fib_levels=getattr(r, "fib_levels", None),
+        moving_averages=getattr(r, "moving_averages", None),
+        volume_context=getattr(r, "volume_context", None),
+        relative_strength=getattr(r, "relative_strength", None),
+        earnings=getattr(r, "earnings", None),
+        entry_candidates=list(getattr(r, "entry_candidates", []) or []),
+        preferred_entry=getattr(r, "preferred_entry", None),
+        preferred_entry_type=getattr(r, "preferred_entry_type", None),
+        entry_quality_score=getattr(r, "entry_quality_score", None),
+        entry_distance_from_current_price_pct=getattr(r, "entry_distance_from_current_price_pct", None),
+        entry_confluence_score=getattr(r, "entry_confluence_score", None),
+        entry_requires_confirmation=getattr(r, "entry_requires_confirmation", None),
+        confirmation_trigger=getattr(r, "confirmation_trigger", None),
+        stop_loss=getattr(r, "stop_loss", None),
+        stop_basis=getattr(r, "stop_basis", None),
+        stop_distance_pct=getattr(r, "stop_distance_pct", None),
+        stop_too_tight_flag=getattr(r, "stop_too_tight_flag", None),
+        take_profit_1=getattr(r, "take_profit_1", None),
+        take_profit_2=getattr(r, "take_profit_2", None),
+        take_profit_final=getattr(r, "take_profit_final", None),
+        tp_basis=getattr(r, "tp_basis", None),
+        reward_risk=getattr(r, "reward_risk", None),
+        tp_too_optimistic_flag=getattr(r, "tp_too_optimistic_flag", None),
+        max_hold_days=getattr(r, "max_hold_days", None),
+        trend_quality_score=getattr(r, "trend_quality_score", None),
+        pullback_quality_score=getattr(r, "pullback_quality_score", None),
+        support_quality_score=getattr(r, "support_quality_score", None),
+        volatility_quality_score=getattr(r, "volatility_quality_score", None),
+        relative_strength_score=getattr(r, "relative_strength_score", None),
+        volume_confirmation_score=getattr(r, "volume_confirmation_score", None),
+        earnings_risk_score=getattr(r, "earnings_risk_score", None),
+        reward_risk_score=getattr(r, "reward_risk_score", None),
+        historical_analogue_score=getattr(r, "historical_analogue_score", None),
+        llm_quality_score=getattr(r, "llm_quality_score", None),
+        composite_score=getattr(r, "composite_score", None),
+        llm_review=getattr(r, "llm_review", None),
+        structure_flags=list(getattr(r, "structure_flags", []) or []),
+        breakout_level=getattr(r, "breakout_level", None),
+        prior_breakout_retest_zone=getattr(r, "prior_breakout_retest_zone", None),
+        consolidation_range=getattr(r, "consolidation_range", None),
+        gap_zone=getattr(r, "gap_zone", None),
+        recent_swing_highs=list(getattr(r, "recent_swing_highs", []) or []),
+        recent_swing_lows=list(getattr(r, "recent_swing_lows", []) or []),
         news=[NewsItem(**n) for n in (getattr(r, "news", None) or [])],
     )
 
@@ -385,6 +490,48 @@ def _build_daily_closes_loader(db: Session):
         closes = ensure_cached_daily_closes(db, sym, frm, to, auto_fetch=True, commit=False)
         memo[key] = closes
         return closes
+
+    return _loader
+
+
+def _build_daily_bars_loader(db: Session):
+    memo: dict[str, list[dict]] = {}
+
+    def _loader(symbol: str) -> list[dict]:
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return []
+        if sym in memo:
+            return memo[sym]
+
+        end = datetime.now(timezone.utc).date()
+        start = end - timedelta(days=DEFAULT_BAR_LOOKBACK_DAYS)
+        ensure_cached_daily_closes(db, sym, start, end, auto_fetch=True, commit=False)
+        rows = (
+            db.query(DailyBar)
+            .filter(DailyBar.symbol == sym)
+            .filter(DailyBar.bar_date >= start)
+            .filter(DailyBar.bar_date <= end)
+            .order_by(DailyBar.bar_date.asc())
+            .all()
+        )
+        bars: list[dict] = []
+        for row in rows:
+            bars.append(
+                {
+                    "symbol": row.symbol,
+                    "bar_date": row.bar_date,
+                    "open": row.open,
+                    "high": row.high,
+                    "low": row.low,
+                    "close": row.close,
+                    "volume": row.volume,
+                    "adjusted_close": row.adjusted_close,
+                    "source": row.source,
+                }
+            )
+        memo[sym] = bars
+        return bars
 
     return _loader
 
@@ -725,14 +872,33 @@ def _apply_prob_and_action(
         history_samples=history_samples,
     )
 
-    buy_ok = signal_score >= buy_threshold and probs["p_tp"] >= 0.5 and probs["expected_return"] > 0
-    avoid_ok = signal_score <= avoid_threshold or probs["p_sl"] >= 0.47
+    review = getattr(row, "llm_review", None) or {}
+    review_action = str(review.get("llm_action") or getattr(row, "llm_action", "") or "").upper().strip()
+    entry_quality = float(getattr(row, "entry_quality_score", 0.0) or 0.0)
+    reward_risk = getattr(row, "reward_risk", None) or {}
+    rr1 = float(reward_risk.get("tp1", 0.0) or 0.0)
+    composite = float(getattr(row, "composite_score", 0.0) or 0.0)
+
+    buy_ok = (
+        signal_score >= buy_threshold
+        and probs["p_tp"] >= 0.47
+        and probs["expected_return"] > -0.002
+        and entry_quality >= 5.5
+        and rr1 >= 1.1
+        and review_action == "BUY"
+    )
+    avoid_ok = (
+        signal_score <= avoid_threshold
+        or probs["p_sl"] >= 0.47
+        or review_action == "AVOID"
+        or composite < 4.3
+    )
 
     if buy_ok:
         action = "BUY"
         strategy_action = "BUY"
     elif avoid_ok:
-        action = "AVOID"
+        action = "AVOID" if review_action == "AVOID" else "WAIT"
         strategy_action = "WAIT / AVOID"
     else:
         action = "WAIT"
@@ -748,12 +914,14 @@ def _apply_prob_and_action(
     row.buy_threshold = buy_threshold
     row.avoid_threshold = avoid_threshold
     row.strategy_action = strategy_action
-    row.llm_action = action
-    row.llm_rationale = (
+    row.llm_action = review_action or action
+    rationale_bits = list(review.get("rationale") or [])
+    rationale_bits.append(
         f"regime={regime}; signal={signal_score}; p_tp={probs['p_tp']:.2f}; "
         f"p_sl={probs['p_sl']:.2f}; exp_ret={probs['expected_return']:.3f}; "
         f"confidence={probs['confidence']:.2f}; history_samples={history_samples}"
     )
+    row.llm_rationale = " | ".join(rationale_bits)
 
     return {
         "p_tp": probs["p_tp"],
@@ -805,6 +973,7 @@ def plan_swing(req: PlanRequest, db: Session = Depends(get_db), _=Depends(requir
     planned_at = datetime.now(timezone.utc)
 
     daily_closes_loader = _build_daily_closes_loader(db)
+    daily_bars_loader = _build_daily_bars_loader(db)
     regime_snapshot = detect_market_regime(req.tickers, daily_closes_loader=daily_closes_loader)
     perf = _rolling_performance_snapshot(db, lookback_days=180)
     thresholds = _compute_dynamic_thresholds(regime_snapshot["regime"], perf)
@@ -817,6 +986,11 @@ def plan_swing(req: PlanRequest, db: Session = Depends(get_db), _=Depends(requir
             buy_threshold=thresholds["buy_threshold"],
             avoid_threshold=thresholds["avoid_threshold"],
             daily_closes_loader=daily_closes_loader,
+            daily_bars_loader=daily_bars_loader,
+            history_stats_by_ticker=ticker_hist,
+            llm_provider=req.llm_provider,
+            llm_model=req.llm_model,
+            llm_style=req.llm_style,
         )
     except Exception as e:
         out = [
@@ -853,13 +1027,6 @@ def plan_swing(req: PlanRequest, db: Session = Depends(get_db), _=Depends(requir
 
     for r in rows:
         h = ticker_hist.get(r.ticker, {})
-        _apply_adaptive_risk_controls(
-            r,
-            planned_at=planned_at,
-            regime=regime_snapshot["regime"],
-            ticker_stats=h,
-            perf=perf,
-        )
         _apply_prob_and_action(
             r,
             regime=regime_snapshot["regime"],
@@ -895,6 +1062,7 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
 
     universe = get_sp100_universe(top_scan, sector=req.sector, industry=req.industry)
     daily_closes_loader = _build_daily_closes_loader(db)
+    daily_bars_loader = _build_daily_bars_loader(db)
     if not universe:
         return Sp100WorkflowResponse(
             planned_at=planned_at,
@@ -918,6 +1086,7 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
     regime_snapshot = detect_market_regime(universe[:20], daily_closes_loader=daily_closes_loader)
     perf = _rolling_performance_snapshot(db, lookback_days=lookback_days)
     thresholds = _compute_dynamic_thresholds(regime_snapshot["regime"], perf)
+    history_stats = _history_stats_by_ticker(db, lookback_days=lookback_days)
 
     rows = build_swing_plan(
         universe,
@@ -925,8 +1094,12 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         buy_threshold=thresholds["buy_threshold"],
         avoid_threshold=thresholds["avoid_threshold"],
         daily_closes_loader=daily_closes_loader,
+        daily_bars_loader=daily_bars_loader,
+        history_stats_by_ticker=history_stats,
+        llm_provider=req.llm_provider,
+        llm_model=req.llm_model,
+        llm_style=req.llm_style,
     )
-    history_stats = _history_stats_by_ticker(db, lookback_days=lookback_days)
 
     ranked: list[dict] = []
     priced_candidates = 0
@@ -951,14 +1124,6 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
                 hist_raw = (history_avg_return * 100.0) * 0.35 + (history_win_rate - 0.5) * 4.0
                 history_boost = max(-3.0, min(3.0, hist_raw * confidence))
 
-        _apply_adaptive_risk_controls(
-            r,
-            planned_at=planned_at,
-            regime=regime_snapshot["regime"],
-            ticker_stats=(h or {}),
-            perf=perf,
-        )
-
         if not _row_fits_hold_window(r, max_hold_days):
             continue
         eligible_count += 1
@@ -973,12 +1138,21 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         )
 
         signal_score = int(getattr(r, "signal_score", 0))
+        composite = float(getattr(r, "composite_score", 0.0) or 0.0)
+        llm_quality = float(getattr(r, "llm_quality_score", 0.0) or 0.0)
+        entry_quality = float(getattr(r, "entry_quality_score", 0.0) or 0.0)
         exp_ret = float(decision["expected_return"] or 0.0)
         confidence = float(decision["confidence"] or 0.0)
         p_edge = float((decision["p_tp"] or 0.0) - (decision["p_sl"] or 0.0))
+        reward_risk = getattr(r, "reward_risk", None) or {}
+        rr1 = float(reward_risk.get("tp1", 0.0) or 0.0)
 
         score = (
-            float(signal_score)
+            composite * 1.8
+            + llm_quality * 0.6
+            + entry_quality * 0.45
+            + rr1 * 1.6
+            + float(signal_score) * 0.35
             + float(history_boost)
             + exp_ret * 120.0
             + p_edge * 2.5
