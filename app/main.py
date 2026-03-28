@@ -892,6 +892,9 @@ def _apply_prob_and_action(
 
     review = getattr(row, "llm_review", None) or {}
     review_action = str(review.get("llm_action") or getattr(row, "llm_action", "") or "").upper().strip()
+    # Final action uses probability-aware severity scoring so "not BUY" does not
+    # automatically collapse into AVOID. This keeps BUY selective while allowing
+    # constructive-but-unconfirmed setups to remain WAIT/watchlist candidates.
     classification = classify_final_action(
         payload={
             "trend_state": getattr(row, "trend_state", None),
