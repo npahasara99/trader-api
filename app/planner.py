@@ -195,6 +195,7 @@ def generate_structured_plan(
         "ticker": ticker,
         "trend_state": structure.trend_state,
         "market_regime": market_regime,
+        "buy_threshold": buy_threshold,
         "entry_quality_score": preferred["entry_quality_score"],
         "entry_requires_confirmation": preferred["entry_requires_confirmation"],
         "confirmation_trigger": preferred["confirmation_trigger"],
@@ -229,6 +230,10 @@ def generate_structured_plan(
 
     composite_payload = {
         **preliminary_payload,
+        "support_quality_score": scores["support_quality_score"],
+        "relative_strength_score": scores["relative_strength_score"],
+        "volume_confirmation_score": scores["volume_confirmation_score"],
+        "earnings_risk_score": scores["earnings_risk_score"],
         "composite_score": scores["composite_score"],
     }
     llm_review = review_setup(
@@ -254,17 +259,13 @@ def generate_structured_plan(
     )
 
     signal_score = int(news_score + earnings_score)
-    if llm_review["llm_action"] == "BUY":
-        strategy_action = "BUY" if signal_score >= buy_threshold or scores["composite_score"] >= 7.0 else "HOLD / WAIT"
-    elif llm_review["llm_action"] == "AVOID":
-        strategy_action = "WAIT / AVOID"
-    else:
-        strategy_action = "HOLD / WAIT"
-
-    if signal_score >= buy_threshold and llm_review["llm_action"] == "WAIT" and scores["composite_score"] >= 7.0:
-        strategy_action = "BUY"
-    if signal_score <= avoid_threshold:
-        strategy_action = "WAIT / AVOID"
+    strategy_action = (
+        "BUY"
+        if llm_review["llm_action"] == "BUY"
+        else "WAIT / AVOID"
+        if llm_review["llm_action"] == "AVOID"
+        else "HOLD / WAIT"
+    )
 
     plan = {
         "ticker": ticker,

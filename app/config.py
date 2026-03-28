@@ -16,6 +16,7 @@ class PlanningConfig:
     consolidation_range_atr_mult: float = 2.8
     min_reward_risk_for_buy: float = 1.35
     min_reward_risk_for_wait: float = 0.9
+    min_reward_risk_tp2_for_buy: float = 1.8
     max_entry_distance_pct: float = 0.045
     deep_entry_distance_pct: float = 0.12
     immediate_entry_atr_mult: float = 0.2
@@ -33,6 +34,27 @@ class PlanningConfig:
     volume_window: int = 20
     relative_strength_window: int = 40
     benchmark_symbols: tuple[str, ...] = ("SPY", "QQQ")
+    buy_min_entry_quality: float = 6.2
+    buy_min_relative_strength_score: float = 5.2
+    buy_min_support_quality_score: float = 5.2
+    buy_min_volume_confirmation_score: float = 4.8
+    wait_min_composite_score: float = 4.2
+    wait_min_entry_quality: float = 4.4
+    wait_min_relative_strength_score: float = 5.0
+    avoid_severity_threshold: float = 5.0
+    avoid_severity_threshold_risk_off: float = 4.8
+    avoid_bad_composite_gap: float = 1.7
+    avoid_negative_expectancy_penalty: float = 1.35
+    avoid_prob_penalty: float = 1.25
+    avoid_no_confirmation_penalty: float = 0.95
+    avoid_weak_bounce_penalty: float = 0.45
+    avoid_negative_rs_penalty: float = 1.45
+    avoid_poor_entry_penalty: float = 1.25
+    avoid_weak_support_penalty: float = 0.85
+    avoid_poor_rr_penalty: float = 0.95
+    avoid_risk_off_weak_trend_penalty: float = 0.55
+    avoid_downtrend_penalty: float = 2.6
+    avoid_weak_breakdown_penalty: float = 1.55
     score_weights: dict[str, float] = field(
         default_factory=lambda: {
             "trend_quality": 1.25,

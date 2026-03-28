@@ -82,6 +82,14 @@ class PlanRow:
     llm_quality_score: float | None = None
     composite_score: float | None = None
     llm_review: dict | None = None
+    final_action: str | None = None
+    action_reason_bucket: str | None = None
+    monitorable_setup: bool | None = None
+    avoid_severity_score: float | None = None
+    wait_reason: str | None = None
+    avoid_reason: str | None = None
+    buy_blockers: list[str] = field(default_factory=list)
+    constructive_traits: list[str] = field(default_factory=list)
     structure_flags: list[str] = field(default_factory=list)
     breakout_level: float | None = None
     prior_breakout_retest_zone: dict | None = None

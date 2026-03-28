@@ -4,6 +4,8 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 from datetime import datetime, timezone, timedelta, date
 from .logic import bucket_news, classify_assumption
+from .config import DEFAULT_PLANNING_CONFIG
+from .llm_reasoning import classify_final_action
 import json
 import os
 
@@ -187,6 +189,14 @@ class PlanRowOut(BaseModel):
     llm_quality_score: Optional[float] = None
     composite_score: Optional[float] = None
     llm_review: Optional[dict] = None
+    final_action: Optional[str] = None
+    action_reason_bucket: Optional[str] = None
+    monitorable_setup: Optional[bool] = None
+    avoid_severity_score: Optional[float] = None
+    wait_reason: Optional[str] = None
+    avoid_reason: Optional[str] = None
+    buy_blockers: List[str] = Field(default_factory=list)
+    constructive_traits: List[str] = Field(default_factory=list)
     structure_flags: List[str] = Field(default_factory=list)
     breakout_level: Optional[float] = None
     prior_breakout_retest_zone: Optional[dict] = None
@@ -399,6 +409,14 @@ def _to_plan_row_out(r) -> PlanRowOut:
         llm_quality_score=getattr(r, "llm_quality_score", None),
         composite_score=getattr(r, "composite_score", None),
         llm_review=getattr(r, "llm_review", None),
+        final_action=getattr(r, "final_action", None),
+        action_reason_bucket=getattr(r, "action_reason_bucket", None),
+        monitorable_setup=getattr(r, "monitorable_setup", None),
+        avoid_severity_score=getattr(r, "avoid_severity_score", None),
+        wait_reason=getattr(r, "wait_reason", None),
+        avoid_reason=getattr(r, "avoid_reason", None),
+        buy_blockers=list(getattr(r, "buy_blockers", []) or []),
+        constructive_traits=list(getattr(r, "constructive_traits", []) or []),
         structure_flags=list(getattr(r, "structure_flags", []) or []),
         breakout_level=getattr(r, "breakout_level", None),
         prior_breakout_retest_zone=getattr(r, "prior_breakout_retest_zone", None),
@@ -874,35 +892,30 @@ def _apply_prob_and_action(
 
     review = getattr(row, "llm_review", None) or {}
     review_action = str(review.get("llm_action") or getattr(row, "llm_action", "") or "").upper().strip()
-    entry_quality = float(getattr(row, "entry_quality_score", 0.0) or 0.0)
-    reward_risk = getattr(row, "reward_risk", None) or {}
-    rr1 = float(reward_risk.get("tp1", 0.0) or 0.0)
-    composite = float(getattr(row, "composite_score", 0.0) or 0.0)
-
-    buy_ok = (
-        signal_score >= buy_threshold
-        and probs["p_tp"] >= 0.47
-        and probs["expected_return"] > -0.002
-        and entry_quality >= 5.5
-        and rr1 >= 1.1
-        and review_action == "BUY"
+    classification = classify_final_action(
+        payload={
+            "trend_state": getattr(row, "trend_state", None),
+            "market_regime": regime,
+            "buy_threshold": buy_threshold,
+            "entry_quality_score": getattr(row, "entry_quality_score", None),
+            "entry_requires_confirmation": getattr(row, "entry_requires_confirmation", None),
+            "confirmation_trigger": getattr(row, "confirmation_trigger", None),
+            "support_quality_score": getattr(row, "support_quality_score", None),
+            "relative_strength_score": getattr(row, "relative_strength_score", None),
+            "volume_confirmation_score": getattr(row, "volume_confirmation_score", None),
+            "reward_risk": getattr(row, "reward_risk", None),
+            "earnings": getattr(row, "earnings", None),
+            "volume_context": getattr(row, "volume_context", None),
+            "composite_score": getattr(row, "composite_score", None),
+            "expected_return": probs["expected_return"],
+            "prob_tp": probs["p_tp"],
+            "prob_sl": probs["p_sl"],
+        },
+        config=DEFAULT_PLANNING_CONFIG,
     )
-    avoid_ok = (
-        signal_score <= avoid_threshold
-        or probs["p_sl"] >= 0.47
-        or review_action == "AVOID"
-        or composite < 4.3
-    )
 
-    if buy_ok:
-        action = "BUY"
-        strategy_action = "BUY"
-    elif avoid_ok:
-        action = "AVOID" if review_action == "AVOID" else "WAIT"
-        strategy_action = "WAIT / AVOID"
-    else:
-        action = "WAIT"
-        strategy_action = "HOLD / WAIT"
+    action = str(classification["final_action"])
+    strategy_action = "BUY" if action == "BUY" else "WAIT / AVOID" if action == "AVOID" else "HOLD / WAIT"
 
     row.signal_score = signal_score
     row.market_regime = regime
@@ -914,12 +927,21 @@ def _apply_prob_and_action(
     row.buy_threshold = buy_threshold
     row.avoid_threshold = avoid_threshold
     row.strategy_action = strategy_action
-    row.llm_action = review_action or action
+    row.llm_action = review_action or str(action)
+    row.final_action = action
+    row.action_reason_bucket = classification["action_reason_bucket"]
+    row.monitorable_setup = bool(classification["monitorable_setup"])
+    row.avoid_severity_score = float(classification["avoid_severity_score"])
+    row.wait_reason = classification["wait_reason"]
+    row.avoid_reason = classification["avoid_reason"]
+    row.buy_blockers = list(classification["buy_blockers"])
+    row.constructive_traits = list(classification["constructive_traits"])
     rationale_bits = list(review.get("rationale") or [])
     rationale_bits.append(
         f"regime={regime}; signal={signal_score}; p_tp={probs['p_tp']:.2f}; "
         f"p_sl={probs['p_sl']:.2f}; exp_ret={probs['expected_return']:.3f}; "
-        f"confidence={probs['confidence']:.2f}; history_samples={history_samples}"
+        f"confidence={probs['confidence']:.2f}; history_samples={history_samples}; "
+        f"final_action={action}; severity={classification['avoid_severity_score']:.2f}"
     )
     row.llm_rationale = " | ".join(rationale_bits)
 
@@ -930,6 +952,7 @@ def _apply_prob_and_action(
         "expected_return": probs["expected_return"],
         "confidence": probs["confidence"],
         "action": action,
+        "classification": classification,
     }
 
 
