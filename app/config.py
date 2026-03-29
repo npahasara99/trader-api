@@ -55,6 +55,10 @@ class PlanningConfig:
     suitability_high_threshold: float = 7.0
     suitability_medium_threshold: float = 5.2
     suitability_low_threshold: float = 3.6
+    watchlist_primary_min_suitability_score: float = 5.2
+    watchlist_secondary_min_suitability_score: float = 3.4
+    watchlist_primary_min_relative_strength_score: float = 5.8
+    watchlist_primary_min_composite_score: float = 5.0
     avoid_severity_threshold: float = 5.0
     avoid_severity_threshold_risk_off: float = 4.8
     avoid_bad_composite_gap: float = 1.7

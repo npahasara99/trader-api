@@ -116,6 +116,12 @@ class PlanRow:
     next_check_focus: list[str] = field(default_factory=list)
     setup_monitoring_summary: str | None = None
     swing_trade_suitability: dict | None = None
+    watchlist_tier: str | None = None
+    watchlist_bucket: str | None = None
+    watchlist_summary: str | None = None
+    watchlist_reason: str | None = None
+    is_primary_watchlist_candidate: bool | None = None
+    is_secondary_watchlist_candidate: bool | None = None
     structure_flags: list[str] = field(default_factory=list)
     breakout_level: float | None = None
     prior_breakout_retest_zone: dict | None = None

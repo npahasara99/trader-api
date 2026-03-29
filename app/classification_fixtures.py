@@ -6,6 +6,7 @@ from .config import DEFAULT_PLANNING_CONFIG
 from .llm_reasoning import classify_final_action, reconcile_actions
 from .monitoring import build_wait_monitoring_plan
 from .suitability import build_swing_trade_suitability
+from .watchlist import build_watchlist_profile
 
 
 # Lightweight validation fixtures for the final BUY / WAIT / AVOID classifier.
@@ -424,6 +425,101 @@ def evaluate_suitability_fixtures() -> list[dict]:
                 "pass": bool(
                     suitability["suitability_label"] in fixture["expected_labels"]
                     and suitability["suitable_for_watchlist_only"] == fixture["expected_watchlist"]
+                ),
+            }
+        )
+    return results
+
+
+def evaluate_watchlist_fixtures() -> list[dict]:
+    fixtures = [
+        {
+            "name": "constructive_wait_medium_suitability_primary",
+            "row": SimpleNamespace(
+                final_action="WAIT",
+                trend_state="pullback_in_uptrend",
+                market_regime="risk_off",
+                composite_score=5.89,
+                relative_strength_score=7.1,
+                monitorable_setup=True,
+                watch_priority="high",
+                constructive_traits=["pullback_in_uptrend", "relative_strength_supportive", "support_confluence_present"],
+                buy_blockers=["confirmation_missing"],
+                avoid_reason=None,
+                swing_trade_suitability={
+                    "suitability_score": 5.8,
+                    "suitability_label": "medium",
+                    "suitable_for_long_swing": True,
+                    "suitable_for_watchlist_only": True,
+                    "not_suitable_reason": None,
+                },
+            ),
+            "expected_tier": "primary",
+            "expected_bucket": "high_priority_watchlist",
+        },
+        {
+            "name": "weaker_wait_low_suitability_secondary",
+            "row": SimpleNamespace(
+                final_action="WAIT",
+                trend_state="weak_breakdown_risk",
+                market_regime="risk_off",
+                composite_score=4.46,
+                relative_strength_score=6.1,
+                monitorable_setup=True,
+                watch_priority="medium",
+                constructive_traits=["support_confluence_present", "positive_expectancy", "relative_strength_supportive"],
+                buy_blockers=["confirmation_missing", "structure_repair_needed"],
+                avoid_reason=None,
+                swing_trade_suitability={
+                    "suitability_score": 4.1,
+                    "suitability_label": "low",
+                    "suitable_for_long_swing": False,
+                    "suitable_for_watchlist_only": True,
+                    "not_suitable_reason": None,
+                },
+            ),
+            "expected_tier": "secondary",
+            "expected_bucket": "secondary_watchlist",
+        },
+        {
+            "name": "avoid_not_watchlist_worthy_none",
+            "row": SimpleNamespace(
+                final_action="AVOID",
+                trend_state="weak_breakdown_risk",
+                market_regime="risk_off",
+                composite_score=4.26,
+                relative_strength_score=4.1,
+                monitorable_setup=False,
+                watch_priority=None,
+                constructive_traits=["support_confluence_present"],
+                buy_blockers=["negative_expectancy", "no_confirmation"],
+                avoid_reason="Weak structure plus insufficient offsets.",
+                swing_trade_suitability={
+                    "suitability_score": 3.1,
+                    "suitability_label": "unsuitable",
+                    "suitable_for_long_swing": False,
+                    "suitable_for_watchlist_only": False,
+                    "not_suitable_reason": "The stock is not currently a practical swing-trade candidate.",
+                },
+            ),
+            "expected_tier": "none",
+            "expected_bucket": "avoid",
+        },
+    ]
+
+    results: list[dict] = []
+    for fixture in fixtures:
+        profile = build_watchlist_profile(fixture["row"], config=DEFAULT_PLANNING_CONFIG)
+        results.append(
+            {
+                "name": fixture["name"],
+                "tier": profile["watchlist_tier"],
+                "bucket": profile["watchlist_bucket"],
+                "primary": profile["is_primary_watchlist_candidate"],
+                "secondary": profile["is_secondary_watchlist_candidate"],
+                "pass": bool(
+                    profile["watchlist_tier"] == fixture["expected_tier"]
+                    and profile["watchlist_bucket"] == fixture["expected_bucket"]
                 ),
             }
         )

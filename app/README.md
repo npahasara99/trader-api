@@ -53,6 +53,13 @@ Backward compatibility:
   - `suitable_for_long_swing`
   - `suitable_for_watchlist_only`
   - `not_suitable_reason`
+- Final API rows also expose a mutually exclusive watchlist prioritization layer:
+  - `watchlist_tier` = `primary | secondary | none`
+  - `watchlist_bucket` = `high_priority_watchlist | secondary_watchlist | avoid`
+  - `watchlist_summary`
+  - `watchlist_reason`
+  - `is_primary_watchlist_candidate`
+  - `is_secondary_watchlist_candidate`
 
 Fallback behavior:
 - If live quote data is unavailable, planning still falls back to recent cached closes.

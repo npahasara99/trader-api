@@ -8,6 +8,7 @@ from .config import DEFAULT_PLANNING_CONFIG
 from .llm_reasoning import classify_final_action, reconcile_actions
 from .monitoring import build_wait_monitoring_plan
 from .suitability import build_swing_trade_suitability
+from .watchlist import build_watchlist_profile
 import json
 import os
 
@@ -225,6 +226,12 @@ class PlanRowOut(BaseModel):
     next_check_focus: List[str] = Field(default_factory=list)
     setup_monitoring_summary: Optional[str] = None
     swing_trade_suitability: Optional[dict] = None
+    watchlist_tier: Optional[str] = None
+    watchlist_bucket: Optional[str] = None
+    watchlist_summary: Optional[str] = None
+    watchlist_reason: Optional[str] = None
+    is_primary_watchlist_candidate: Optional[bool] = None
+    is_secondary_watchlist_candidate: Optional[bool] = None
     structure_flags: List[str] = Field(default_factory=list)
     breakout_level: Optional[float] = None
     prior_breakout_retest_zone: Optional[dict] = None
@@ -471,6 +478,12 @@ def _to_plan_row_out(r) -> PlanRowOut:
         next_check_focus=list(getattr(r, "next_check_focus", []) or []),
         setup_monitoring_summary=getattr(r, "setup_monitoring_summary", None),
         swing_trade_suitability=getattr(r, "swing_trade_suitability", None),
+        watchlist_tier=getattr(r, "watchlist_tier", None),
+        watchlist_bucket=getattr(r, "watchlist_bucket", None),
+        watchlist_summary=getattr(r, "watchlist_summary", None),
+        watchlist_reason=getattr(r, "watchlist_reason", None),
+        is_primary_watchlist_candidate=getattr(r, "is_primary_watchlist_candidate", None),
+        is_secondary_watchlist_candidate=getattr(r, "is_secondary_watchlist_candidate", None),
         structure_flags=list(getattr(r, "structure_flags", []) or []),
         breakout_level=getattr(r, "breakout_level", None),
         prior_breakout_retest_zone=getattr(r, "prior_breakout_retest_zone", None),
@@ -1036,6 +1049,13 @@ def _apply_prob_and_action(
         row.next_check_focus = list(monitoring_plan["next_check_focus"])
         row.setup_monitoring_summary = monitoring_plan["setup_monitoring_summary"]
     row.swing_trade_suitability = build_swing_trade_suitability(row, config=DEFAULT_PLANNING_CONFIG)
+    watchlist_profile = build_watchlist_profile(row, config=DEFAULT_PLANNING_CONFIG)
+    row.watchlist_tier = watchlist_profile["watchlist_tier"]
+    row.watchlist_bucket = watchlist_profile["watchlist_bucket"]
+    row.watchlist_summary = watchlist_profile["watchlist_summary"]
+    row.watchlist_reason = watchlist_profile["watchlist_reason"]
+    row.is_primary_watchlist_candidate = watchlist_profile["is_primary_watchlist_candidate"]
+    row.is_secondary_watchlist_candidate = watchlist_profile["is_secondary_watchlist_candidate"]
     rationale_bits = list(review.get("rationale") or [])
     rationale_bits.append(
         f"regime={regime}; signal={signal_score}; p_tp={probs['p_tp']:.2f}; "
