@@ -43,6 +43,16 @@ Backward compatibility:
   - failure triggers
   - next check focus
   - `setup_monitoring_summary`
+- Final API rows now also expose a separate swing-trade suitability assessment:
+  - `swing_trade_suitability.suitability_score`
+  - `swing_trade_suitability.suitability_label`
+  - suitability subscores for trend / structure / entry / reward-risk / volatility / volume / relative strength / event risk / timing
+  - `key_strengths`
+  - `key_weaknesses`
+  - `disqualifiers`
+  - `suitable_for_long_swing`
+  - `suitable_for_watchlist_only`
+  - `not_suitable_reason`
 
 Fallback behavior:
 - If live quote data is unavailable, planning still falls back to recent cached closes.

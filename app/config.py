@@ -52,6 +52,9 @@ class PlanningConfig:
     wait_monitor_days_max: int = 7
     wait_watch_priority_high_composite: float = 5.6
     wait_watch_priority_medium_composite: float = 4.6
+    suitability_high_threshold: float = 7.0
+    suitability_medium_threshold: float = 5.2
+    suitability_low_threshold: float = 3.6
     avoid_severity_threshold: float = 5.0
     avoid_severity_threshold_risk_off: float = 4.8
     avoid_bad_composite_gap: float = 1.7

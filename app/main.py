@@ -7,6 +7,7 @@ from .logic import bucket_news, classify_assumption
 from .config import DEFAULT_PLANNING_CONFIG
 from .llm_reasoning import classify_final_action, reconcile_actions
 from .monitoring import build_wait_monitoring_plan
+from .suitability import build_swing_trade_suitability
 import json
 import os
 
@@ -223,6 +224,7 @@ class PlanRowOut(BaseModel):
     failure_triggers: List[str] = Field(default_factory=list)
     next_check_focus: List[str] = Field(default_factory=list)
     setup_monitoring_summary: Optional[str] = None
+    swing_trade_suitability: Optional[dict] = None
     structure_flags: List[str] = Field(default_factory=list)
     breakout_level: Optional[float] = None
     prior_breakout_retest_zone: Optional[dict] = None
@@ -468,6 +470,7 @@ def _to_plan_row_out(r) -> PlanRowOut:
         failure_triggers=list(getattr(r, "failure_triggers", []) or []),
         next_check_focus=list(getattr(r, "next_check_focus", []) or []),
         setup_monitoring_summary=getattr(r, "setup_monitoring_summary", None),
+        swing_trade_suitability=getattr(r, "swing_trade_suitability", None),
         structure_flags=list(getattr(r, "structure_flags", []) or []),
         breakout_level=getattr(r, "breakout_level", None),
         prior_breakout_retest_zone=getattr(r, "prior_breakout_retest_zone", None),
@@ -1032,6 +1035,7 @@ def _apply_prob_and_action(
         row.failure_triggers = list(monitoring_plan["failure_triggers"])
         row.next_check_focus = list(monitoring_plan["next_check_focus"])
         row.setup_monitoring_summary = monitoring_plan["setup_monitoring_summary"]
+    row.swing_trade_suitability = build_swing_trade_suitability(row, config=DEFAULT_PLANNING_CONFIG)
     rationale_bits = list(review.get("rationale") or [])
     rationale_bits.append(
         f"regime={regime}; signal={signal_score}; p_tp={probs['p_tp']:.2f}; "

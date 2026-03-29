@@ -115,6 +115,7 @@ class PlanRow:
     failure_triggers: list[str] = field(default_factory=list)
     next_check_focus: list[str] = field(default_factory=list)
     setup_monitoring_summary: str | None = None
+    swing_trade_suitability: dict | None = None
     structure_flags: list[str] = field(default_factory=list)
     breakout_level: float | None = None
     prior_breakout_retest_zone: dict | None = None
