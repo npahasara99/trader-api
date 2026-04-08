@@ -108,6 +108,12 @@ class ScanResponse(BaseModel):
     tickers: List[str]
 
 
+class Sp100ScanRequest(BaseModel):
+    top_n: int = 100
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+
+
 class PlanRequest(BaseModel):
     tickers: List[str]
     mode: str = "manual"  # manual/scan
@@ -1108,6 +1114,19 @@ def scan_sp100(
     _=Depends(require_bearer_token),
 ):
     return {"tickers": get_sp100_universe(top_n, sector=sector, industry=industry)}
+
+
+@app.post("/scan/sp100", response_model=ScanResponse)
+def scan_sp100_post(req: Sp100ScanRequest, _=Depends(require_bearer_token)):
+    """POST variant of SP100 scan for Action clients that behave better with bodies."""
+
+    return {
+        "tickers": get_sp100_universe(
+            req.top_n,
+            sector=req.sector,
+            industry=req.industry,
+        )
+    }
 
 
 @app.post("/scan/swing", response_model=ScanResponse)
