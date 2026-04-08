@@ -7,6 +7,8 @@ from .logic import bucket_news, classify_assumption
 from .config import DEFAULT_PLANNING_CONFIG
 from .llm_reasoning import classify_final_action, reconcile_actions
 from .monitoring import build_wait_monitoring_plan
+from .ranking import build_ranking_profile
+from .scanner import build_pre_scan_profile, sector_benchmark_symbol_for_meta
 from .suitability import build_swing_trade_suitability
 from .watchlist import build_watchlist_profile
 import json
@@ -18,13 +20,15 @@ from sqlalchemy import text, func
 from .db import Base, engine, get_db
 from .models import SwingDecision, DailyBar
 from .logic import (
-    scan_swing_candidates_largecaps,
     build_swing_plan,
     get_last_price,
     evaluate_plan_row,
     get_sp100_universe,
     detect_market_regime,
     estimate_trade_probabilities,
+    SP100_CLASSIFICATION,
+    compute_earnings_signal,
+    get_last_price_or_recent_close,
 )
 from .market_data import (
     ensure_cached_daily_closes,
@@ -238,6 +242,15 @@ class PlanRowOut(BaseModel):
     watchlist_reason: Optional[str] = None
     is_primary_watchlist_candidate: Optional[bool] = None
     is_secondary_watchlist_candidate: Optional[bool] = None
+    pre_scan_score: Optional[float] = None
+    pre_scan_reason_tags: List[str] = Field(default_factory=list)
+    sector_relative_strength: Optional[float] = None
+    scanner_rank_score: Optional[float] = None
+    immediate_rank_score: Optional[float] = None
+    watchlist_rank_score: Optional[float] = None
+    ranking_bucket: Optional[str] = None
+    scan_shortlisted: Optional[bool] = None
+    scan_rejection_reason: Optional[str] = None
     structure_flags: List[str] = Field(default_factory=list)
     breakout_level: Optional[float] = None
     prior_breakout_retest_zone: Optional[dict] = None
@@ -293,6 +306,7 @@ class SwingPlanLogWorkflowResponse(BaseModel):
 class Sp100WorkflowRequest(BaseModel):
     top_scan: int = 100
     top_plan: int = 10
+    pre_scan_shortlist: Optional[int] = None
     lookback_days: int = 180
     min_history_samples: int = 3
     sector: Optional[str] = None
@@ -327,12 +341,17 @@ class Sp100WorkflowResponse(BaseModel):
     max_hold_days: Optional[int] = None
     requested_max_hold_date: Optional[datetime] = None
     scanned_universe_size: int
+    pre_scanned_count: int
+    pre_scan_shortlist_count: int
     candidates_with_price: int
     eligible_count: int = 0
     selected_count: int
     rows_logged: int
     selection_message: Optional[str] = None
     rows: List[RankedPlanOut]
+    best_immediate_setups: List[RankedPlanOut] = Field(default_factory=list)
+    best_watchlist_setups: List[RankedPlanOut] = Field(default_factory=list)
+    rejected_or_low_priority: List[RankedPlanOut] = Field(default_factory=list)
 
 class DailyBarsBackfillRequest(BaseModel):
     symbols: Optional[List[str]] = None
@@ -490,6 +509,15 @@ def _to_plan_row_out(r) -> PlanRowOut:
         watchlist_reason=getattr(r, "watchlist_reason", None),
         is_primary_watchlist_candidate=getattr(r, "is_primary_watchlist_candidate", None),
         is_secondary_watchlist_candidate=getattr(r, "is_secondary_watchlist_candidate", None),
+        pre_scan_score=getattr(r, "pre_scan_score", None),
+        pre_scan_reason_tags=list(getattr(r, "pre_scan_reason_tags", []) or []),
+        sector_relative_strength=getattr(r, "sector_relative_strength", None),
+        scanner_rank_score=getattr(r, "scanner_rank_score", None),
+        immediate_rank_score=getattr(r, "immediate_rank_score", None),
+        watchlist_rank_score=getattr(r, "watchlist_rank_score", None),
+        ranking_bucket=getattr(r, "ranking_bucket", None),
+        scan_shortlisted=getattr(r, "scan_shortlisted", None),
+        scan_rejection_reason=getattr(r, "scan_rejection_reason", None),
         structure_flags=list(getattr(r, "structure_flags", []) or []),
         breakout_level=getattr(r, "breakout_level", None),
         prior_breakout_retest_zone=getattr(r, "prior_breakout_retest_zone", None),
@@ -625,6 +653,51 @@ def _build_daily_bars_loader(db: Session):
         return bars
 
     return _loader
+
+
+def _rank_pre_scan_universe(
+    symbols: List[str],
+    *,
+    daily_closes_loader,
+    daily_bars_loader,
+) -> List[dict]:
+    """Cheap swing pre-scan used to shortlist names before full planning."""
+
+    ranked: List[dict] = []
+    benchmark_symbols = {"SPY", "QQQ"}
+    sector_symbols: set[str] = set()
+    for sym in symbols:
+        sector_symbol = sector_benchmark_symbol_for_meta(SP100_CLASSIFICATION.get(sym))
+        if sector_symbol:
+            sector_symbols.add(sector_symbol)
+
+    benchmark_bars = {
+        symbol: daily_bars_loader(symbol)
+        for symbol in sorted(benchmark_symbols | sector_symbols)
+    }
+
+    for sym in symbols:
+        last = get_last_price_or_recent_close(sym, daily_closes_loader=daily_closes_loader)
+        earnings_score, earnings_context = compute_earnings_signal(
+            sym,
+            last,
+            daily_closes_loader=daily_closes_loader,
+        )
+        _ = earnings_score
+        bars = daily_bars_loader(sym)
+        profile = build_pre_scan_profile(
+            ticker=sym,
+            current_price=last,
+            bars=bars,
+            benchmark_bars=benchmark_bars,
+            sector_benchmark_symbol=sector_benchmark_symbol_for_meta(SP100_CLASSIFICATION.get(sym)),
+            earnings_context=earnings_context,
+            config=DEFAULT_PLANNING_CONFIG,
+        )
+        ranked.append(profile)
+
+    ranked.sort(key=lambda item: float(item.get("pre_scan_score", 0.0)), reverse=True)
+    return ranked
 
 
 def _daily_bars_status_rows(db: Session, symbols: List[str]) -> List[DailyBarsStatusRow]:
@@ -1062,6 +1135,11 @@ def _apply_prob_and_action(
     row.watchlist_reason = watchlist_profile["watchlist_reason"]
     row.is_primary_watchlist_candidate = watchlist_profile["is_primary_watchlist_candidate"]
     row.is_secondary_watchlist_candidate = watchlist_profile["is_secondary_watchlist_candidate"]
+    ranking_profile = build_ranking_profile(row, config=DEFAULT_PLANNING_CONFIG)
+    row.immediate_rank_score = ranking_profile["immediate_rank_score"]
+    row.watchlist_rank_score = ranking_profile["watchlist_rank_score"]
+    row.scanner_rank_score = ranking_profile["scanner_rank_score"]
+    row.ranking_bucket = ranking_profile["ranking_bucket"]
     rationale_bits = list(review.get("rationale") or [])
     rationale_bits.append(
         f"regime={regime}; signal={signal_score}; p_tp={probs['p_tp']:.2f}; "
@@ -1111,28 +1189,42 @@ def scan_sp100(
     top_n: int = 100,
     sector: Optional[str] = None,
     industry: Optional[str] = None,
+    db: Session = Depends(get_db),
     _=Depends(require_bearer_token),
 ):
-    return {"tickers": get_sp100_universe(top_n, sector=sector, industry=industry)}
+    universe = get_sp100_universe(None, sector=sector, industry=industry)
+    ranked = _rank_pre_scan_universe(
+        universe,
+        daily_closes_loader=_build_daily_closes_loader(db),
+        daily_bars_loader=_build_daily_bars_loader(db),
+    )
+    n = max(1, min(int(top_n), len(ranked))) if ranked else 0
+    return {"tickers": [row["ticker"] for row in ranked[:n]]}
 
 
 @app.post("/scan/sp100", response_model=ScanResponse)
-def scan_sp100_post(req: Sp100ScanRequest, _=Depends(require_bearer_token)):
+def scan_sp100_post(req: Sp100ScanRequest, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
     """POST variant of SP100 scan for Action clients that behave better with bodies."""
 
-    return {
-        "tickers": get_sp100_universe(
-            req.top_n,
-            sector=req.sector,
-            industry=req.industry,
-        )
-    }
+    universe = get_sp100_universe(None, sector=req.sector, industry=req.industry)
+    ranked = _rank_pre_scan_universe(
+        universe,
+        daily_closes_loader=_build_daily_closes_loader(db),
+        daily_bars_loader=_build_daily_bars_loader(db),
+    )
+    n = max(1, min(int(req.top_n), len(ranked))) if ranked else 0
+    return {"tickers": [row["ticker"] for row in ranked[:n]]}
 
 
 @app.post("/scan/swing", response_model=ScanResponse)
-def scan_swing(req: ScanRequest, _=Depends(require_bearer_token)):
-    picks = scan_swing_candidates_largecaps(req.universe, top_n=req.top_n)
-    return {"tickers": picks}
+def scan_swing(req: ScanRequest, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
+    ranked = _rank_pre_scan_universe(
+        _normalize_symbols(req.universe),
+        daily_closes_loader=_build_daily_closes_loader(db),
+        daily_bars_loader=_build_daily_bars_loader(db),
+    )
+    n = max(1, min(int(req.top_n), len(ranked))) if ranked else 0
+    return {"tickers": [row["ticker"] for row in ranked[:n]]}
 
 
 @app.post("/plan/swing", response_model=PlanResponse)
@@ -1219,6 +1311,7 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
     planned_at = datetime.now(timezone.utc)
     top_scan = max(10, min(int(req.top_scan), 100))
     top_plan = max(1, min(int(req.top_plan), 20))
+    pre_scan_shortlist = max(top_plan, min(int(req.pre_scan_shortlist or DEFAULT_PLANNING_CONFIG.pre_scan_shortlist_size), 60))
     lookback_days = max(30, min(int(req.lookback_days), 720))
     min_history_samples = max(1, min(int(req.min_history_samples), 20))
     max_hold_days, requested_max_hold_date = _resolve_requested_hold_window(
@@ -1227,10 +1320,10 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         max_hold_date=req.max_hold_date,
     )
 
-    universe = get_sp100_universe(top_scan, sector=req.sector, industry=req.industry)
+    base_universe = get_sp100_universe(None, sector=req.sector, industry=req.industry)
     daily_closes_loader = _build_daily_closes_loader(db)
     daily_bars_loader = _build_daily_bars_loader(db)
-    if not universe:
+    if not base_universe:
         return Sp100WorkflowResponse(
             planned_at=planned_at,
             market_regime="neutral",
@@ -1242,6 +1335,8 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
             max_hold_days=max_hold_days,
             requested_max_hold_date=requested_max_hold_date,
             scanned_universe_size=0,
+            pre_scanned_count=0,
+            pre_scan_shortlist_count=0,
             candidates_with_price=0,
             eligible_count=0,
             selected_count=0,
@@ -1249,6 +1344,23 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
             selection_message="No SP100 stocks matched the requested sector/industry filter.",
             rows=[],
         )
+
+    ranked_prescan = _rank_pre_scan_universe(
+        base_universe,
+        daily_closes_loader=daily_closes_loader,
+        daily_bars_loader=daily_bars_loader,
+    )
+    pre_scanned = ranked_prescan[:top_scan]
+    shortlist = pre_scanned[: min(pre_scan_shortlist, len(pre_scanned))]
+    universe = [item["ticker"] for item in shortlist]
+    pre_scan_by_ticker = {
+        item["ticker"]: {
+            **item,
+            "scan_shortlisted": True,
+            "scan_rejection_reason": None,
+        }
+        for item in shortlist
+    }
 
     regime_snapshot = detect_market_regime(universe[:20], daily_closes_loader=daily_closes_loader)
     perf = _rolling_performance_snapshot(db, lookback_days=lookback_days)
@@ -1263,6 +1375,7 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         daily_closes_loader=daily_closes_loader,
         daily_bars_loader=daily_bars_loader,
         history_stats_by_ticker=history_stats,
+        pre_scan_by_ticker=pre_scan_by_ticker,
         llm_provider=req.llm_provider,
         llm_model=req.llm_model,
         llm_style=req.llm_style,
@@ -1305,26 +1418,7 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         )
 
         signal_score = int(getattr(r, "signal_score", 0))
-        composite = float(getattr(r, "composite_score", 0.0) or 0.0)
-        llm_quality = float(getattr(r, "llm_quality_score", 0.0) or 0.0)
-        entry_quality = float(getattr(r, "entry_quality_score", 0.0) or 0.0)
-        exp_ret = float(decision["expected_return"] or 0.0)
-        confidence = float(decision["confidence"] or 0.0)
-        p_edge = float((decision["p_tp"] or 0.0) - (decision["p_sl"] or 0.0))
-        reward_risk = getattr(r, "reward_risk", None) or {}
-        rr1 = float(reward_risk.get("tp1", 0.0) or 0.0)
-
-        score = (
-            composite * 1.8
-            + llm_quality * 0.6
-            + entry_quality * 0.45
-            + rr1 * 1.6
-            + float(signal_score) * 0.35
-            + float(history_boost)
-            + exp_ret * 120.0
-            + p_edge * 2.5
-            + confidence * 1.5
-        )
+        score = float(getattr(r, "scanner_rank_score", 0.0) or 0.0) + float(history_boost)
 
         ranked.append(
             {
@@ -1348,7 +1442,7 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
             regime=regime_snapshot["regime"],
         )
         if max_hold_days is not None
-        else None
+        else f"Pre-scanned {len(pre_scanned)} names and fully planned {len(shortlist)} shortlisted candidates."
     )
 
     out_rows: list[RankedPlanOut] = []
@@ -1366,6 +1460,31 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
                 row=row_out,
             )
         )
+
+    immediate_items = [item for item in ranked if getattr(item["row"], "ranking_bucket", None) == "best_immediate_setups"]
+    watchlist_items = [item for item in ranked if getattr(item["row"], "ranking_bucket", None) == "best_watchlist_setups"]
+    rejected_items = [item for item in ranked if getattr(item["row"], "ranking_bucket", None) == "rejected_or_low_priority"]
+
+    def _ranked_rows_for(items: list[dict], limit: int) -> list[RankedPlanOut]:
+        out: list[RankedPlanOut] = []
+        for idx, item in enumerate(items[:limit], start=1):
+            out.append(
+                RankedPlanOut(
+                    rank=idx,
+                    score=float(round(item["score"], 4)),
+                    signal_score=int(item["signal_score"]),
+                    history_boost=float(round(item["history_boost"], 4)),
+                    history_samples=int(item["history_samples"]),
+                    history_win_rate=item["history_win_rate"],
+                    history_avg_return=item["history_avg_return"],
+                    row=_to_plan_row_out(item["row"]),
+                )
+            )
+        return out
+
+    best_immediate_setups = _ranked_rows_for(immediate_items, top_plan)
+    best_watchlist_setups = _ranked_rows_for(watchlist_items, top_plan)
+    rejected_or_low_priority = _ranked_rows_for(rejected_items, top_plan)
 
     meta = {
         "llm_used": True,
@@ -1398,13 +1517,18 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         industry=req.industry,
         max_hold_days=max_hold_days,
         requested_max_hold_date=requested_max_hold_date,
-        scanned_universe_size=len(universe),
+        scanned_universe_size=len(base_universe),
+        pre_scanned_count=len(pre_scanned),
+        pre_scan_shortlist_count=len(shortlist),
         candidates_with_price=priced_candidates,
         eligible_count=eligible_count,
         selected_count=len(out_rows),
         rows_logged=rows_logged,
         selection_message=selection_message,
         rows=out_rows,
+        best_immediate_setups=best_immediate_setups,
+        best_watchlist_setups=best_watchlist_setups,
+        rejected_or_low_priority=rejected_or_low_priority,
     )
 
 

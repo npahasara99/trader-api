@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from .config import DEFAULT_PLANNING_CONFIG
 from .llm_reasoning import classify_final_action, reconcile_actions
 from .monitoring import build_wait_monitoring_plan
+from .ranking import build_ranking_profile
+from .scanner import build_pre_scan_profile
 from .suitability import build_swing_trade_suitability
 from .watchlist import build_watchlist_profile
 
@@ -521,6 +523,181 @@ def evaluate_watchlist_fixtures() -> list[dict]:
                     profile["watchlist_tier"] == fixture["expected_tier"]
                     and profile["watchlist_bucket"] == fixture["expected_bucket"]
                 ),
+            }
+        )
+    return results
+
+
+def _bars_from_closes(closes: list[float], *, base_volume: float = 1_000_000.0) -> list[dict]:
+    bars: list[dict] = []
+    for idx, close in enumerate(closes):
+        prev = closes[idx - 1] if idx > 0 else close
+        bars.append(
+            {
+                "date": f"2025-01-{(idx % 28) + 1:02d}",
+                "open": prev,
+                "high": max(prev, close) * 1.01,
+                "low": min(prev, close) * 0.99,
+                "close": close,
+                "volume": base_volume * (1.0 + (0.08 if idx % 7 == 0 else 0.0)),
+            }
+        )
+    return bars
+
+
+def evaluate_pre_scan_fixtures() -> list[dict]:
+    constructive = [100 + (i * 0.55) for i in range(65)] + [134.5, 133.8, 133.1, 132.6, 132.9, 133.4, 134.2, 135.0]
+    weak = [140 - (i * 0.42) for i in range(73)]
+
+    strong_profile = build_pre_scan_profile(
+        ticker="GOOD",
+        current_price=135.0,
+        bars=_bars_from_closes(constructive, base_volume=2_400_000),
+        benchmark_bars={
+            "SPY": _bars_from_closes([100 + (i * 0.18) for i in range(len(constructive))]),
+            "QQQ": _bars_from_closes([100 + (i * 0.22) for i in range(len(constructive))]),
+            "XLK": _bars_from_closes([100 + (i * 0.20) for i in range(len(constructive))]),
+        },
+        sector_benchmark_symbol="XLK",
+        earnings_context={"days_to_earnings": 22},
+        config=DEFAULT_PLANNING_CONFIG,
+    )
+    weak_profile = build_pre_scan_profile(
+        ticker="WEAK",
+        current_price=109.34,
+        bars=_bars_from_closes(weak, base_volume=700_000),
+        benchmark_bars={
+            "SPY": _bars_from_closes([100 + (i * 0.12) for i in range(len(weak))]),
+            "QQQ": _bars_from_closes([100 + (i * 0.16) for i in range(len(weak))]),
+            "XLK": _bars_from_closes([100 + (i * 0.15) for i in range(len(weak))]),
+        },
+        sector_benchmark_symbol="XLK",
+        earnings_context={"days_to_earnings": 4},
+        config=DEFAULT_PLANNING_CONFIG,
+    )
+
+    sector_good = build_pre_scan_profile(
+        ticker="SECTOR_GOOD",
+        current_price=135.0,
+        bars=_bars_from_closes(constructive, base_volume=2_000_000),
+        benchmark_bars={
+            "SPY": _bars_from_closes([100 + (i * 0.18) for i in range(len(constructive))]),
+            "QQQ": _bars_from_closes([100 + (i * 0.22) for i in range(len(constructive))]),
+            "XLK": _bars_from_closes([100 + (i * 0.08) for i in range(len(constructive))]),
+        },
+        sector_benchmark_symbol="XLK",
+        earnings_context={"days_to_earnings": 25},
+        config=DEFAULT_PLANNING_CONFIG,
+    )
+    sector_bad = build_pre_scan_profile(
+        ticker="SECTOR_BAD",
+        current_price=135.0,
+        bars=_bars_from_closes(constructive, base_volume=2_000_000),
+        benchmark_bars={
+            "SPY": _bars_from_closes([100 + (i * 0.18) for i in range(len(constructive))]),
+            "QQQ": _bars_from_closes([100 + (i * 0.22) for i in range(len(constructive))]),
+            "XLK": _bars_from_closes([100 + (i * 0.42) for i in range(len(constructive))]),
+        },
+        sector_benchmark_symbol="XLK",
+        earnings_context={"days_to_earnings": 25},
+        config=DEFAULT_PLANNING_CONFIG,
+    )
+
+    return [
+        {
+            "name": "constructive_pullback_scores_strong",
+            "score": strong_profile["pre_scan_score"],
+            "pass": strong_profile["pre_scan_score"] > weak_profile["pre_scan_score"],
+            "tags": strong_profile["pre_scan_reason_tags"][:4],
+        },
+        {
+            "name": "weak_breakdown_scores_lower",
+            "score": weak_profile["pre_scan_score"],
+            "pass": weak_profile["pre_scan_score"] < 5.0,
+            "tags": weak_profile["pre_scan_reason_tags"][:4],
+        },
+        {
+            "name": "sector_relative_strength_changes_score",
+            "good_score": sector_good["pre_scan_score"],
+            "bad_score": sector_bad["pre_scan_score"],
+            "pass": sector_good["pre_scan_score"] > sector_bad["pre_scan_score"],
+        },
+    ]
+
+
+def evaluate_split_ranking_fixtures() -> list[dict]:
+    fixtures = [
+        {
+            "name": "buy_ready_name_lands_immediate",
+            "row": SimpleNamespace(
+                final_action="BUY",
+                watchlist_tier="primary",
+                market_regime="neutral",
+                trend_state="pullback_in_uptrend",
+                composite_score=7.0,
+                entry_quality_score=7.2,
+                reward_risk={"tp1": 1.6},
+                expected_return=0.018,
+                prob_tp=0.55,
+                prob_sl=0.27,
+                confidence=0.72,
+                pre_scan_score=7.4,
+                sector_relative_strength=0.05,
+                swing_trade_suitability={"suitability_score": 7.1},
+            ),
+            "expected_bucket": "best_immediate_setups",
+        },
+        {
+            "name": "watchlist_wait_name_lands_watchlist",
+            "row": SimpleNamespace(
+                final_action="WAIT",
+                watchlist_tier="primary",
+                market_regime="risk_off",
+                trend_state="pullback_in_uptrend",
+                composite_score=5.9,
+                entry_quality_score=5.8,
+                reward_risk={"tp1": 1.12},
+                expected_return=0.008,
+                prob_tp=0.42,
+                prob_sl=0.36,
+                confidence=0.6,
+                pre_scan_score=6.5,
+                sector_relative_strength=0.03,
+                swing_trade_suitability={"suitability_score": 5.8},
+            ),
+            "expected_bucket": "best_watchlist_setups",
+        },
+        {
+            "name": "weak_avoid_name_lands_rejected",
+            "row": SimpleNamespace(
+                final_action="AVOID",
+                watchlist_tier="none",
+                market_regime="risk_off",
+                trend_state="weak_breakdown_risk",
+                composite_score=3.8,
+                entry_quality_score=4.0,
+                reward_risk={"tp1": 0.85},
+                expected_return=-0.004,
+                prob_tp=0.31,
+                prob_sl=0.43,
+                confidence=0.57,
+                pre_scan_score=3.7,
+                sector_relative_strength=-0.05,
+                swing_trade_suitability={"suitability_score": 3.1},
+            ),
+            "expected_bucket": "rejected_or_low_priority",
+        },
+    ]
+
+    results: list[dict] = []
+    for fixture in fixtures:
+        profile = build_ranking_profile(fixture["row"], config=DEFAULT_PLANNING_CONFIG)
+        results.append(
+            {
+                "name": fixture["name"],
+                "bucket": profile["ranking_bucket"],
+                "scanner_rank_score": profile["scanner_rank_score"],
+                "pass": profile["ranking_bucket"] == fixture["expected_bucket"],
             }
         )
     return results

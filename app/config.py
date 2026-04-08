@@ -34,6 +34,9 @@ class PlanningConfig:
     volume_window: int = 20
     relative_strength_window: int = 40
     benchmark_symbols: tuple[str, ...] = ("SPY", "QQQ")
+    pre_scan_shortlist_size: int = 30
+    pre_scan_min_history_bars: int = 60
+    pre_scan_min_avg_dollar_volume: float = 20_000_000.0
     buy_min_entry_quality: float = 6.2
     buy_min_relative_strength_score: float = 5.2
     buy_min_support_quality_score: float = 5.2
@@ -73,6 +76,44 @@ class PlanningConfig:
     avoid_risk_off_weak_trend_penalty: float = 0.55
     avoid_downtrend_penalty: float = 2.6
     avoid_weak_breakdown_penalty: float = 1.55
+    pre_scan_weights: dict[str, float] = field(
+        default_factory=lambda: {
+            "trend": 1.2,
+            "relative_strength": 1.2,
+            "sector_relative": 0.8,
+            "pullback": 1.0,
+            "volatility": 0.7,
+            "volume": 0.55,
+            "earnings": 0.75,
+            "liquidity": 0.7,
+        }
+    )
+    immediate_rank_weights: dict[str, float] = field(
+        default_factory=lambda: {
+            "composite": 1.7,
+            "entry_quality": 0.45,
+            "reward_risk_tp1": 1.4,
+            "expected_return": 110.0,
+            "probability_edge": 2.4,
+            "confidence": 1.2,
+            "suitability": 1.0,
+            "pre_scan": 0.55,
+            "sector_relative": 28.0,
+        }
+    )
+    watchlist_rank_weights: dict[str, float] = field(
+        default_factory=lambda: {
+            "composite": 1.25,
+            "entry_quality": 0.3,
+            "reward_risk_tp1": 0.8,
+            "expected_return": 70.0,
+            "probability_edge": 1.25,
+            "confidence": 0.7,
+            "suitability": 1.45,
+            "pre_scan": 0.8,
+            "sector_relative": 24.0,
+        }
+    )
     score_weights: dict[str, float] = field(
         default_factory=lambda: {
             "trend_quality": 1.25,

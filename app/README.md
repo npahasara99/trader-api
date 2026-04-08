@@ -5,6 +5,8 @@
 The swing planner no longer derives `entry`, `stop`, and `take_profit` from naive fixed percentages.
 
 Current planning flow:
+- `app/scanner.py` adds a cheap Stage-1 swing pre-scan so SP100/generic scans rank a broad universe before full planning.
+- The workflow now pre-scans the broad universe, shortlists the strongest swing candidates, and only then runs the full structured planner.
 - `app/planner.py` orchestrates deterministic market-structure analysis.
 - `app/indicators.py` computes ATR, moving averages, returns, and volume context inputs.
 - `app/structure.py` classifies trend state and recent pivots/breakout context.
@@ -60,6 +62,20 @@ Backward compatibility:
   - `watchlist_reason`
   - `is_primary_watchlist_candidate`
   - `is_secondary_watchlist_candidate`
+- Final API rows now also expose scanner/ranking diagnostics:
+  - `pre_scan_score`
+  - `pre_scan_reason_tags`
+  - `sector_relative_strength`
+  - `scanner_rank_score`
+  - `immediate_rank_score`
+  - `watchlist_rank_score`
+  - `ranking_bucket`
+  - `scan_shortlisted`
+  - `scan_rejection_reason`
+- SP100 workflow responses now split ranked outputs into:
+  - `best_immediate_setups`
+  - `best_watchlist_setups`
+  - `rejected_or_low_priority`
 
 Fallback behavior:
 - If live quote data is unavailable, planning still falls back to recent cached closes.

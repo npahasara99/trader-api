@@ -122,6 +122,15 @@ class PlanRow:
     watchlist_reason: str | None = None
     is_primary_watchlist_candidate: bool | None = None
     is_secondary_watchlist_candidate: bool | None = None
+    pre_scan_score: float | None = None
+    pre_scan_reason_tags: list[str] = field(default_factory=list)
+    sector_relative_strength: float | None = None
+    scanner_rank_score: float | None = None
+    immediate_rank_score: float | None = None
+    watchlist_rank_score: float | None = None
+    ranking_bucket: str | None = None
+    scan_shortlisted: bool | None = None
+    scan_rejection_reason: str | None = None
     structure_flags: list[str] = field(default_factory=list)
     breakout_level: float | None = None
     prior_breakout_retest_zone: dict | None = None
@@ -876,6 +885,7 @@ def build_swing_plan(
     daily_closes_loader: DailyClosesLoader | None = None,
     daily_bars_loader: DailyBarsLoader | None = None,
     history_stats_by_ticker: dict[str, dict] | None = None,
+    pre_scan_by_ticker: dict[str, dict] | None = None,
     llm_provider: str | None = None,
     llm_model: str | None = None,
     llm_style: str | None = None,
@@ -892,6 +902,7 @@ def build_swing_plan(
         )
 
     for t in tickers:
+        pre_scan = (pre_scan_by_ticker or {}).get(t, {}) or {}
         last = get_last_price_or_recent_close(t, daily_closes_loader=daily_closes_loader)
         news = get_company_news_summary(t, days=7, limit=5)
         news_score = compute_news_score(news)
@@ -923,6 +934,11 @@ def build_swing_plan(
                     buy_threshold=buy_threshold,
                     avoid_threshold=avoid_threshold,
                     current_price=None,
+                    pre_scan_score=pre_scan.get("pre_scan_score"),
+                    pre_scan_reason_tags=list(pre_scan.get("pre_scan_reason_tags") or []),
+                    sector_relative_strength=pre_scan.get("sector_relative_strength"),
+                    scan_shortlisted=pre_scan.get("scan_shortlisted"),
+                    scan_rejection_reason=pre_scan.get("scan_rejection_reason"),
                 )
             )
             continue
@@ -953,6 +969,11 @@ def build_swing_plan(
                     current_price=float(last),
                     buy_threshold=buy_threshold,
                     avoid_threshold=avoid_threshold,
+                    pre_scan_score=pre_scan.get("pre_scan_score"),
+                    pre_scan_reason_tags=list(pre_scan.get("pre_scan_reason_tags") or []),
+                    sector_relative_strength=pre_scan.get("sector_relative_strength"),
+                    scan_shortlisted=pre_scan.get("scan_shortlisted"),
+                    scan_rejection_reason=pre_scan.get("scan_rejection_reason"),
                 )
             )
             continue
@@ -1065,6 +1086,11 @@ def build_swing_plan(
                 llm_quality_score=structured["llm_quality_score"],
                 composite_score=structured["composite_score"],
                 llm_review=structured["llm_review"],
+                pre_scan_score=pre_scan.get("pre_scan_score"),
+                pre_scan_reason_tags=list(pre_scan.get("pre_scan_reason_tags") or []),
+                sector_relative_strength=pre_scan.get("sector_relative_strength"),
+                scan_shortlisted=pre_scan.get("scan_shortlisted"),
+                scan_rejection_reason=pre_scan.get("scan_rejection_reason"),
                 structure_flags=structured["structure_flags"],
                 breakout_level=structured["breakout_level"],
                 prior_breakout_retest_zone=structured["prior_breakout_retest_zone"],
