@@ -1235,23 +1235,38 @@ def scan_swing(req: ScanRequest, db: Session = Depends(get_db), _=Depends(requir
 @app.post("/plan/swing", response_model=PlanResponse)
 def plan_swing(req: PlanRequest, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
     planned_at = datetime.now(timezone.utc)
+    tickers = _normalize_symbols(req.tickers)
 
     daily_closes_loader = _build_daily_closes_loader(db)
     daily_bars_loader = _build_daily_bars_loader(db)
-    regime_snapshot = detect_market_regime(req.tickers, daily_closes_loader=daily_closes_loader)
+    regime_snapshot = detect_market_regime(tickers, daily_closes_loader=daily_closes_loader)
     perf = _rolling_performance_snapshot(db, lookback_days=180)
     thresholds = _compute_dynamic_thresholds(regime_snapshot["regime"], perf)
     ticker_hist = _history_stats_by_ticker(db, lookback_days=180)
+    ranked_prescan = _rank_pre_scan_universe(
+        tickers,
+        daily_closes_loader=daily_closes_loader,
+        daily_bars_loader=daily_bars_loader,
+    )
+    pre_scan_by_ticker = {
+        item["ticker"]: {
+            **item,
+            "scan_shortlisted": True,
+            "scan_rejection_reason": None,
+        }
+        for item in ranked_prescan
+    }
 
     try:
         rows = build_swing_plan(
-            req.tickers,
+            tickers,
             regime=regime_snapshot["regime"],
             buy_threshold=thresholds["buy_threshold"],
             avoid_threshold=thresholds["avoid_threshold"],
             daily_closes_loader=daily_closes_loader,
             daily_bars_loader=daily_bars_loader,
             history_stats_by_ticker=ticker_hist,
+            pre_scan_by_ticker=pre_scan_by_ticker,
             llm_provider=req.llm_provider,
             llm_model=req.llm_model,
             llm_style=req.llm_style,
@@ -1275,10 +1290,15 @@ def plan_swing(req: PlanRequest, db: Session = Depends(get_db), _=Depends(requir
                 market_regime=regime_snapshot["regime"],
                 buy_threshold=thresholds["buy_threshold"],
                 avoid_threshold=thresholds["avoid_threshold"],
+                pre_scan_score=(pre_scan_by_ticker.get(t, {}) or {}).get("pre_scan_score"),
+                pre_scan_reason_tags=list((pre_scan_by_ticker.get(t, {}) or {}).get("pre_scan_reason_tags") or []),
+                sector_relative_strength=(pre_scan_by_ticker.get(t, {}) or {}).get("sector_relative_strength"),
+                scan_shortlisted=True,
+                scan_rejection_reason="planner_crashed",
                 llm_action="WAIT",
                 llm_rationale="no-data",
             )
-            for t in req.tickers
+            for t in tickers
         ]
         return {
             "planned_at": planned_at,
