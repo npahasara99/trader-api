@@ -317,6 +317,7 @@ class Sp100WorkflowRequest(BaseModel):
     llm_provider: Optional[str] = "chatgpt-actions"
     llm_model: Optional[str] = None
     llm_style: Optional[str] = "sp100_ranker_v1"
+    compact_response: bool = False
 
 
 class RankedPlanOut(BaseModel):
@@ -348,7 +349,11 @@ class Sp100WorkflowResponse(BaseModel):
     selected_count: int
     rows_logged: int
     selection_message: Optional[str] = None
-    rows: List[RankedPlanOut]
+    selected_tickers: List[str] = Field(default_factory=list)
+    best_immediate_tickers: List[str] = Field(default_factory=list)
+    best_watchlist_tickers: List[str] = Field(default_factory=list)
+    rejected_or_low_priority_tickers: List[str] = Field(default_factory=list)
+    rows: List[RankedPlanOut] = Field(default_factory=list)
     best_immediate_setups: List[RankedPlanOut] = Field(default_factory=list)
     best_watchlist_setups: List[RankedPlanOut] = Field(default_factory=list)
     rejected_or_low_priority: List[RankedPlanOut] = Field(default_factory=list)
@@ -1342,6 +1347,10 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
             selected_count=0,
             rows_logged=0,
             selection_message="No SP100 stocks matched the requested sector/industry filter.",
+            selected_tickers=[],
+            best_immediate_tickers=[],
+            best_watchlist_tickers=[],
+            rejected_or_low_priority_tickers=[],
             rows=[],
         )
 
@@ -1485,6 +1494,10 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
     best_immediate_setups = _ranked_rows_for(immediate_items, top_plan)
     best_watchlist_setups = _ranked_rows_for(watchlist_items, top_plan)
     rejected_or_low_priority = _ranked_rows_for(rejected_items, top_plan)
+    selected_tickers = [item["row"].ticker for item in selected]
+    best_immediate_tickers = [item["row"].ticker for item in immediate_items[:top_plan]]
+    best_watchlist_tickers = [item["row"].ticker for item in watchlist_items[:top_plan]]
+    rejected_or_low_priority_tickers = [item["row"].ticker for item in rejected_items[:top_plan]]
 
     meta = {
         "llm_used": True,
@@ -1525,10 +1538,14 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         selected_count=len(out_rows),
         rows_logged=rows_logged,
         selection_message=selection_message,
-        rows=out_rows,
-        best_immediate_setups=best_immediate_setups,
-        best_watchlist_setups=best_watchlist_setups,
-        rejected_or_low_priority=rejected_or_low_priority,
+        selected_tickers=selected_tickers,
+        best_immediate_tickers=best_immediate_tickers,
+        best_watchlist_tickers=best_watchlist_tickers,
+        rejected_or_low_priority_tickers=rejected_or_low_priority_tickers,
+        rows=[] if req.compact_response else out_rows,
+        best_immediate_setups=[] if req.compact_response else best_immediate_setups,
+        best_watchlist_setups=[] if req.compact_response else best_watchlist_setups,
+        rejected_or_low_priority=[] if req.compact_response else rejected_or_low_priority,
     )
 
 
