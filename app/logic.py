@@ -116,6 +116,7 @@ class PlanRow:
     next_check_focus: list[str] = field(default_factory=list)
     setup_monitoring_summary: str | None = None
     chart_execution_view: dict | None = None
+    what_to_watch: dict | None = None
     swing_trade_suitability: dict | None = None
     actionability_soon: dict | None = None
     watchlist_tier: str | None = None

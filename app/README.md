@@ -98,6 +98,16 @@ Backward compatibility:
   - `chart_execution_view.distance_to_local_high_pct`
   - `chart_execution_view.distance_to_local_low_pct`
   - `chart_execution_view.chart_execution_summary`
+- BUY and WAIT rows also expose a what-to-watch translation layer:
+  - `what_to_watch.bullish_hold_zone`
+  - `what_to_watch.bullish_hold_reason`
+  - `what_to_watch.deeper_reset_trigger_zone`
+  - `what_to_watch.deeper_reset_reason`
+  - `what_to_watch.deeper_reset_target_zone`
+  - `what_to_watch.continuation_trigger_zone`
+  - `what_to_watch.continuation_reason`
+  - `what_to_watch.watch_summary`
+  - `what_to_watch.watch_summary_short`
 - Final API rows now also expose scanner/ranking diagnostics:
   - `pre_scan_score`
   - `pre_scan_reason_tags`

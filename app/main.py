@@ -12,6 +12,7 @@ from .monitoring import build_wait_monitoring_plan
 from .ranking import build_ranking_profile
 from .scanner import build_pre_scan_profile, sector_benchmark_symbol_for_meta
 from .suitability import build_swing_trade_suitability
+from .what_to_watch import build_what_to_watch
 from .watchlist import build_watchlist_profile
 import json
 import os
@@ -238,6 +239,7 @@ class PlanRowOut(BaseModel):
     next_check_focus: List[str] = Field(default_factory=list)
     setup_monitoring_summary: Optional[str] = None
     chart_execution_view: Optional[dict] = None
+    what_to_watch: Optional[dict] = None
     swing_trade_suitability: Optional[dict] = None
     actionability_soon: Optional[dict] = None
     watchlist_tier: Optional[str] = None
@@ -512,6 +514,7 @@ def _to_plan_row_out(r) -> PlanRowOut:
         next_check_focus=list(getattr(r, "next_check_focus", []) or []),
         setup_monitoring_summary=getattr(r, "setup_monitoring_summary", None),
         chart_execution_view=getattr(r, "chart_execution_view", None),
+        what_to_watch=getattr(r, "what_to_watch", None),
         swing_trade_suitability=getattr(r, "swing_trade_suitability", None),
         actionability_soon=getattr(r, "actionability_soon", None),
         watchlist_tier=getattr(r, "watchlist_tier", None),
@@ -1139,6 +1142,7 @@ def _apply_prob_and_action(
         row.next_check_focus = list(monitoring_plan["next_check_focus"])
         row.setup_monitoring_summary = monitoring_plan["setup_monitoring_summary"]
     row.chart_execution_view = build_chart_execution_view(row, config=DEFAULT_PLANNING_CONFIG)
+    row.what_to_watch = build_what_to_watch(row, config=DEFAULT_PLANNING_CONFIG)
     row.swing_trade_suitability = build_swing_trade_suitability(row, config=DEFAULT_PLANNING_CONFIG)
     watchlist_profile = build_watchlist_profile(row, config=DEFAULT_PLANNING_CONFIG)
     row.watchlist_tier = watchlist_profile["watchlist_tier"]
