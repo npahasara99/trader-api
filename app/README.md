@@ -67,6 +67,10 @@ Backward compatibility:
   - `chart_execution_view.enter_now`
   - `chart_execution_view.breakout_point`
   - `chart_execution_view.breakout_point_type`
+  - `chart_execution_view.prior_trigger_anchor`
+  - `chart_execution_view.prior_trigger_anchor_status`
+  - `chart_execution_view.current_execution_anchor`
+  - `chart_execution_view.current_execution_anchor_type`
   - `chart_execution_view.pullback_entry_zone`
   - `chart_execution_view.deeper_pullback_zone`
   - `chart_execution_view.deeper_pullback_available`

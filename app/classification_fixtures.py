@@ -725,12 +725,17 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
                 support_zone_2={"lower": 473.44, "upper": 500.34, "source_tags": ["sma50"]},
                 resistance_zone_1={"lower": 490.37, "upper": 500.51, "source_tags": ["pivot_high"]},
                 resistance_zone_2={"lower": 499.8, "upper": 504.1, "source_tags": ["range_high"]},
+                breakout_level=500.2,
+                prior_breakout_retest_zone={"lower": 494.4, "upper": 500.2, "source_tags": ["breakout_retest"]},
+                consolidation_range={"lower": 489.8, "upper": 504.1, "source_tags": ["consolidation"]},
             ),
-            "expected_shape": {"breakout_or_pullback", "near_resistance_wait"},
+            "expected_shape": {"continuation_pullback_preferred", "near_resistance_wait", "breakout_or_pullback"},
             "expected_enter": {"no", "only_on_confirmation"},
-            "expected_location": {"near_resistance"},
-            "expected_bias": "avoid_chasing",
-            "expected_breakout_type": "breakout_trigger",
+            "expected_location": {"continuation_near_range_high", "near_resistance"},
+            "expected_bias": {"pullback_preferred", "avoid_chasing"},
+            "expected_breakout_type": {"reclaim_trigger", "breakout_trigger"},
+            "expected_prior_status": {"context_only"},
+            "expected_current_anchor_type": {"continuation_support", "pullback_support"},
         },
         {
             "name": "constructive_support_retest_pullback_candidate",
@@ -751,12 +756,15 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
                 support_zone_2={"lower": 78.28, "upper": 79.60, "source_tags": ["sma50"]},
                 resistance_zone_1={"lower": 82.0, "upper": 83.2, "source_tags": ["pivot_high"]},
                 resistance_zone_2={"lower": 84.0, "upper": 85.4, "source_tags": ["pivot_high"]},
+                breakout_level=83.0,
             ),
             "expected_shape": "pullback_candidate",
             "expected_enter": {"yes", "only_on_confirmation"},
             "expected_location": {"near_support"},
-            "expected_bias": "pullback_preferred",
-            "expected_breakout_type": "breakout_trigger",
+            "expected_bias": {"pullback_preferred"},
+            "expected_breakout_type": {"breakout_trigger"},
+            "expected_prior_status": {"active", None},
+            "expected_current_anchor_type": {"pullback_support"},
         },
         {
             "name": "weak_structure_repair_needed",
@@ -777,12 +785,16 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
                 support_zone_2={"lower": 41.75, "upper": 42.35, "source_tags": ["sma50"]},
                 resistance_zone_1={"lower": 43.95, "upper": 44.55, "source_tags": ["pivot_high"]},
                 resistance_zone_2={"lower": 44.85, "upper": 45.45, "source_tags": ["gap_fill"]},
+                prior_breakout_retest_zone={"lower": 42.8, "upper": 43.7, "source_tags": ["breakout_retest"]},
+                breakout_level=43.7,
             ),
             "expected_shape": "structure_repair_needed",
             "expected_enter": {"no"},
             "expected_location": {"near_support", "structure_below_trigger"},
-            "expected_bias": "wait_for_repair",
-            "expected_breakout_type": "repair_trigger",
+            "expected_bias": {"wait_for_repair"},
+            "expected_breakout_type": {"repair_trigger"},
+            "expected_prior_status": {"active", "context_only"},
+            "expected_current_anchor_type": {"repair_band"},
         },
         {
             "name": "post_trigger_case_uses_non_generic_label",
@@ -803,12 +815,17 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
                 support_zone_2={"lower": 206.4, "upper": 210.9, "source_tags": ["sma50"]},
                 resistance_zone_1={"lower": 217.0, "upper": 219.5, "source_tags": ["pivot_high"]},
                 resistance_zone_2={"lower": 219.9, "upper": 223.0, "source_tags": ["range_high"]},
+                breakout_level=219.4,
+                prior_breakout_retest_zone={"lower": 214.4, "upper": 219.4, "source_tags": ["breakout_retest"]},
+                consolidation_range={"lower": 213.0, "upper": 223.0, "source_tags": ["consolidation"]},
             ),
             "expected_shape": {"post_breakout_retest", "continuation_pullback_preferred"},
             "expected_enter": {"only_on_confirmation"},
-            "expected_location": {"above_first_trigger_not_confirmed"},
-            "expected_bias": "pullback_preferred",
-            "expected_breakout_type": "reclaim_trigger",
+            "expected_location": {"above_first_trigger_not_confirmed", "continuation_near_range_high", "post_breakout_retest"},
+            "expected_bias": {"pullback_preferred"},
+            "expected_breakout_type": {"reclaim_trigger"},
+            "expected_prior_status": {"context_only"},
+            "expected_current_anchor_type": {"continuation_support"},
         },
         {
             "name": "deeper_pullback_can_be_null_when_not_distinct",
@@ -828,12 +845,16 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
                 support_zone_2={"lower": 174.0, "upper": 177.0, "source_tags": ["sma50"]},
                 resistance_zone_1={"lower": 179.2, "upper": 181.1, "source_tags": ["pivot_high"]},
                 resistance_zone_2={"lower": 182.0, "upper": 184.0, "source_tags": ["gap_fill"]},
+                prior_breakout_retest_zone={"lower": 171.8, "upper": 175.4, "source_tags": ["breakout_retest"]},
+                breakout_level=175.4,
             ),
             "expected_shape": "structure_repair_needed",
             "expected_enter": {"no"},
             "expected_location": {"near_support"},
-            "expected_bias": "wait_for_repair",
-            "expected_breakout_type": "repair_trigger",
+            "expected_bias": {"wait_for_repair"},
+            "expected_breakout_type": {"repair_trigger"},
+            "expected_prior_status": {"context_only", "active"},
+            "expected_current_anchor_type": {"repair_band"},
             "expect_deeper_null": True,
         },
     ]
@@ -867,6 +888,9 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
                 "execution_zone_quality": None if not view else view.get("execution_zone_quality"),
                 "range_position_pct": None if not view else view.get("range_position_pct"),
                 "deeper_pullback_available": None if not view else view.get("deeper_pullback_available"),
+                "prior_trigger_anchor_status": None if not view else view.get("prior_trigger_anchor_status"),
+                "current_execution_anchor_type": None if not view else view.get("current_execution_anchor_type"),
+                "has_current_execution_anchor": bool(view and view.get("current_execution_anchor")),
                 "has_breakout": bool(view and view.get("breakout_point")),
                 "has_pullback": bool(view and view.get("pullback_entry_zone")),
                 "has_summary": bool(view and view.get("chart_execution_summary")),
@@ -880,8 +904,10 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
                     )
                     and view.get("enter_now") in fixture["expected_enter"]
                     and view.get("current_price_location") in fixture["expected_location"]
-                    and view.get("execution_bias") == fixture["expected_bias"]
-                    and view.get("breakout_point_type") == fixture["expected_breakout_type"]
+                    and view.get("execution_bias") in fixture["expected_bias"]
+                    and view.get("breakout_point_type") in fixture["expected_breakout_type"]
+                    and view.get("prior_trigger_anchor_status") in fixture["expected_prior_status"]
+                    and view.get("current_execution_anchor_type") in fixture["expected_current_anchor_type"]
                     and view.get("current_price_location") != "above_breakout"
                     and (view.get("range_position_pct") is None or 0.0 <= float(view.get("range_position_pct")) <= 1.25)
                     and (breakout_width_pct is None or breakout_width_pct <= DEFAULT_PLANNING_CONFIG.execution_zone_max_width_pct + 0.002)
@@ -891,6 +917,7 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
                         or fixture["expect_deeper_null"] is False
                         or not view.get("deeper_pullback_available")
                     )
+                    and bool(view.get("current_execution_anchor"))
                     and bool(view.get("chart_execution_summary"))
                 ),
             }

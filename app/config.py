@@ -77,6 +77,8 @@ class PlanningConfig:
     execution_deeper_zone_max_width_pct: float = 0.018
     execution_deeper_zone_min_gap_pct: float = 0.005
     execution_deeper_zone_drop_overlap_pct: float = 0.72
+    execution_reanchor_above_prior_trigger_pct: float = 0.014
+    execution_reanchor_above_range_pct: float = 0.018
     avoid_severity_threshold: float = 5.0
     avoid_severity_threshold_risk_off: float = 4.8
     avoid_bad_composite_gap: float = 1.7
