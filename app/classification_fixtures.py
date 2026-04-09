@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from .config import DEFAULT_PLANNING_CONFIG
+from .actionability import build_actionability_soon
 from .execution_view import build_chart_execution_view
 from .llm_reasoning import classify_final_action, reconcile_actions
 from .monitoring import build_wait_monitoring_plan
@@ -523,6 +524,188 @@ def evaluate_watchlist_fixtures() -> list[dict]:
                 "pass": bool(
                     profile["watchlist_tier"] == fixture["expected_tier"]
                     and profile["watchlist_bucket"] == fixture["expected_bucket"]
+                ),
+            }
+        )
+    return results
+
+
+def evaluate_actionability_fixtures() -> list[dict]:
+    fixtures = [
+        {
+            "name": "constructive_primary_wait_near_execution_area",
+            "row": SimpleNamespace(
+                final_action="WAIT",
+                monitorable_setup=True,
+                trend_state="pullback_in_uptrend",
+                market_regime="neutral",
+                current_price=503.0,
+                preferred_entry=497.8,
+                preferred_entry_type="pullback",
+                entry_quality_score=6.1,
+                entry_requires_confirmation=True,
+                confirmation_trigger="Need continuation confirmation above the current range",
+                composite_score=6.4,
+                relative_strength_score=6.7,
+                support_quality_score=6.3,
+                volume_confirmation_score=5.1,
+                reward_risk={"tp1": 1.08, "tp2": 1.74},
+                atr=6.2,
+                watch_priority="high",
+                wait_type="WAIT_CONFIRMATION",
+                monitor_window_days=5,
+                max_hold_days=10,
+                support_zone_1={"lower": 494.4, "upper": 499.3, "source_tags": ["ema20"]},
+                support_zone_2={"lower": 486.0, "upper": 491.2, "source_tags": ["sma50"]},
+                resistance_zone_1={"lower": 503.2, "upper": 505.0, "source_tags": ["pivot_high"]},
+                resistance_zone_2={"lower": 505.2, "upper": 507.3, "source_tags": ["range_high"]},
+                consolidation_range={"lower": 492.5, "upper": 505.4, "source_tags": ["consolidation"]},
+                breakout_level=505.0,
+                volume_context={"reversal_volume_state": "weak_bounce"},
+                relative_strength={"vs_spy": 0.06, "vs_qqq": 0.04},
+            ),
+            "expected_label": "ready_soon",
+            "expected_active_watch": True,
+            "expected_urgency": "high",
+        },
+        {
+            "name": "valid_wait_needing_reset",
+            "row": SimpleNamespace(
+                final_action="WAIT",
+                monitorable_setup=True,
+                trend_state="range",
+                market_regime="neutral",
+                current_price=221.4,
+                preferred_entry=214.2,
+                preferred_entry_type="pullback",
+                entry_quality_score=5.8,
+                entry_requires_confirmation=True,
+                confirmation_trigger="Need follow-through after the recent advance",
+                composite_score=5.7,
+                relative_strength_score=6.1,
+                support_quality_score=5.5,
+                volume_confirmation_score=4.8,
+                reward_risk={"tp1": 1.12, "tp2": 1.64},
+                atr=5.4,
+                watch_priority="medium",
+                wait_type="WAIT_BETTER_ENTRY",
+                monitor_window_days=4,
+                max_hold_days=9,
+                support_zone_1={"lower": 212.8, "upper": 216.6, "source_tags": ["ema20", "pivot_low"]},
+                support_zone_2={"lower": 206.4, "upper": 210.9, "source_tags": ["sma50"]},
+                resistance_zone_1={"lower": 217.0, "upper": 219.5, "source_tags": ["pivot_high"]},
+                resistance_zone_2={"lower": 219.9, "upper": 223.0, "source_tags": ["range_high"]},
+                prior_breakout_retest_zone={"lower": 214.4, "upper": 219.4, "source_tags": ["breakout_retest"]},
+                consolidation_range={"lower": 213.0, "upper": 223.0, "source_tags": ["consolidation"]},
+                breakout_level=219.4,
+                volume_context={"reversal_volume_state": "weak_bounce"},
+                relative_strength={"vs_spy": 0.04, "vs_qqq": 0.03},
+            ),
+            "expected_label": "monitor",
+            "expected_active_watch": True,
+            "expected_urgency": "medium",
+        },
+        {
+            "name": "weak_repair_wait_background",
+            "row": SimpleNamespace(
+                final_action="WAIT",
+                monitorable_setup=True,
+                trend_state="weak_breakdown_risk",
+                market_regime="risk_off",
+                current_price=176.2,
+                preferred_entry=174.9,
+                preferred_entry_type="pullback",
+                entry_quality_score=5.0,
+                entry_requires_confirmation=True,
+                confirmation_trigger="Need reclaim and structure repair",
+                composite_score=4.4,
+                relative_strength_score=4.6,
+                support_quality_score=4.9,
+                volume_confirmation_score=4.2,
+                reward_risk={"tp1": 1.03, "tp2": 1.35},
+                atr=4.4,
+                watch_priority="low",
+                wait_type="WAIT_STRUCTURE_REPAIR",
+                monitor_window_days=4,
+                max_hold_days=7,
+                support_zone_1={"lower": 174.6, "upper": 177.4, "source_tags": ["pivot_low", "ema20"]},
+                support_zone_2={"lower": 174.0, "upper": 177.0, "source_tags": ["sma50"]},
+                resistance_zone_1={"lower": 179.2, "upper": 181.1, "source_tags": ["pivot_high"]},
+                resistance_zone_2={"lower": 182.0, "upper": 184.0, "source_tags": ["gap_fill"]},
+                prior_breakout_retest_zone={"lower": 171.8, "upper": 175.4, "source_tags": ["breakout_retest"]},
+                breakout_level=175.4,
+                volume_context={"reversal_volume_state": "weak_bounce"},
+                relative_strength={"vs_spy": -0.03, "vs_qqq": -0.04},
+            ),
+            "expected_label": "background",
+            "expected_active_watch": False,
+            "expected_urgency": "low",
+        },
+        {
+            "name": "non_wait_setup_does_not_receive_wait_semantics",
+            "row": SimpleNamespace(
+                final_action="BUY",
+                monitorable_setup=True,
+                trend_state="pullback_in_uptrend",
+                market_regime="neutral",
+                current_price=78.9,
+                preferred_entry=78.8,
+                preferred_entry_type="pullback",
+                entry_quality_score=7.1,
+                entry_requires_confirmation=False,
+                composite_score=7.2,
+                relative_strength_score=6.5,
+                support_quality_score=6.2,
+                volume_confirmation_score=6.0,
+                reward_risk={"tp1": 1.45, "tp2": 2.1},
+                atr=1.6,
+                support_zone_1={"lower": 78.75, "upper": 80.07, "source_tags": ["ema20"]},
+                resistance_zone_1={"lower": 82.0, "upper": 83.2, "source_tags": ["pivot_high"]},
+                breakout_level=83.0,
+                volume_context={"reversal_volume_state": "confirmed_bounce"},
+            ),
+            "expect_none": True,
+        },
+    ]
+
+    results: list[dict] = []
+    for fixture in fixtures:
+        row = fixture["row"]
+        row.chart_execution_view = build_chart_execution_view(row, config=DEFAULT_PLANNING_CONFIG)
+        row.swing_trade_suitability = build_swing_trade_suitability(row, config=DEFAULT_PLANNING_CONFIG)
+        watchlist_profile = build_watchlist_profile(row, config=DEFAULT_PLANNING_CONFIG)
+        row.watchlist_tier = watchlist_profile["watchlist_tier"]
+        row.watchlist_bucket = watchlist_profile["watchlist_bucket"]
+        row.watchlist_summary = watchlist_profile["watchlist_summary"]
+        row.watchlist_reason = watchlist_profile["watchlist_reason"]
+        row.is_primary_watchlist_candidate = watchlist_profile["is_primary_watchlist_candidate"]
+        row.is_secondary_watchlist_candidate = watchlist_profile["is_secondary_watchlist_candidate"]
+        profile = build_actionability_soon(row, config=DEFAULT_PLANNING_CONFIG)
+        if fixture.get("expect_none"):
+            results.append(
+                {
+                    "name": fixture["name"],
+                    "actionability": profile,
+                    "pass": profile is None,
+                }
+            )
+            continue
+        results.append(
+            {
+                "name": fixture["name"],
+                "actionability_label": None if not profile else profile.get("actionability_label"),
+                "active_watch": None if not profile else profile.get("active_watch"),
+                "watch_urgency": None if not profile else profile.get("watch_urgency"),
+                "days_to_action_estimate": None if not profile else profile.get("days_to_action_estimate"),
+                "closest_trigger_type": None if not profile else profile.get("closest_trigger_type"),
+                "has_summary": bool(profile and profile.get("actionability_summary")),
+                "pass": bool(
+                    profile
+                    and profile.get("actionability_label") == fixture["expected_label"]
+                    and bool(profile.get("active_watch")) == fixture["expected_active_watch"]
+                    and profile.get("watch_urgency") == fixture["expected_urgency"]
+                    and float(profile.get("actionability_score") or 0.0) >= 0.0
+                    and bool(profile.get("actionability_summary"))
                 ),
             }
         )

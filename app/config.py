@@ -62,6 +62,11 @@ class PlanningConfig:
     watchlist_secondary_min_suitability_score: float = 3.4
     watchlist_primary_min_relative_strength_score: float = 5.8
     watchlist_primary_min_composite_score: float = 5.0
+    actionability_ready_soon_threshold: float = 6.6
+    actionability_monitor_threshold: float = 4.6
+    actionability_ready_soon_min_trigger: float = 6.0
+    actionability_ready_soon_min_timing: float = 5.6
+    actionability_ready_soon_min_structure: float = 6.0
     execution_zone_max_width_pct: float = 0.028
     execution_zone_min_width_pct: float = 0.0045
     execution_breakout_zone_fraction: float = 0.38

@@ -62,6 +62,21 @@ Backward compatibility:
   - `watchlist_reason`
   - `is_primary_watchlist_candidate`
   - `is_secondary_watchlist_candidate`
+- WAIT rows also expose an actionability-soon layer to reduce watch overload:
+  - `actionability_soon.actionability_score`
+  - `actionability_soon.actionability_label` = `ready_soon | monitor | background`
+  - `actionability_soon.active_watch`
+  - `actionability_soon.watch_urgency`
+  - `actionability_soon.days_to_action_estimate`
+  - `actionability_soon.closest_trigger_type`
+  - `actionability_soon.closest_trigger_distance_pct`
+  - `actionability_soon.trigger_proximity_score`
+  - `actionability_soon.timing_readiness_score`
+  - `actionability_soon.confirmation_readiness_score`
+  - `actionability_soon.structure_readiness_score`
+  - `actionability_soon.key_reasons`
+  - `actionability_soon.not_ready_reasons`
+  - `actionability_soon.actionability_summary`
 - Final API rows now also expose a chart execution view:
   - `chart_execution_view.trade_shape`
   - `chart_execution_view.enter_now`

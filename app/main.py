@@ -5,6 +5,7 @@ from typing import List, Optional
 from datetime import datetime, timezone, timedelta, date
 from .logic import bucket_news, classify_assumption
 from .config import DEFAULT_PLANNING_CONFIG
+from .actionability import build_actionability_soon
 from .execution_view import build_chart_execution_view
 from .llm_reasoning import classify_final_action, reconcile_actions
 from .monitoring import build_wait_monitoring_plan
@@ -238,6 +239,7 @@ class PlanRowOut(BaseModel):
     setup_monitoring_summary: Optional[str] = None
     chart_execution_view: Optional[dict] = None
     swing_trade_suitability: Optional[dict] = None
+    actionability_soon: Optional[dict] = None
     watchlist_tier: Optional[str] = None
     watchlist_bucket: Optional[str] = None
     watchlist_summary: Optional[str] = None
@@ -511,6 +513,7 @@ def _to_plan_row_out(r) -> PlanRowOut:
         setup_monitoring_summary=getattr(r, "setup_monitoring_summary", None),
         chart_execution_view=getattr(r, "chart_execution_view", None),
         swing_trade_suitability=getattr(r, "swing_trade_suitability", None),
+        actionability_soon=getattr(r, "actionability_soon", None),
         watchlist_tier=getattr(r, "watchlist_tier", None),
         watchlist_bucket=getattr(r, "watchlist_bucket", None),
         watchlist_summary=getattr(r, "watchlist_summary", None),
@@ -1144,6 +1147,7 @@ def _apply_prob_and_action(
     row.watchlist_reason = watchlist_profile["watchlist_reason"]
     row.is_primary_watchlist_candidate = watchlist_profile["is_primary_watchlist_candidate"]
     row.is_secondary_watchlist_candidate = watchlist_profile["is_secondary_watchlist_candidate"]
+    row.actionability_soon = build_actionability_soon(row, config=DEFAULT_PLANNING_CONFIG)
     ranking_profile = build_ranking_profile(row, config=DEFAULT_PLANNING_CONFIG)
     row.immediate_rank_score = ranking_profile["immediate_rank_score"]
     row.watchlist_rank_score = ranking_profile["watchlist_rank_score"]

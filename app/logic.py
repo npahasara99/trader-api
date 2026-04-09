@@ -117,6 +117,7 @@ class PlanRow:
     setup_monitoring_summary: str | None = None
     chart_execution_view: dict | None = None
     swing_trade_suitability: dict | None = None
+    actionability_soon: dict | None = None
     watchlist_tier: str | None = None
     watchlist_bucket: str | None = None
     watchlist_summary: str | None = None
