@@ -62,6 +62,15 @@ Backward compatibility:
   - `watchlist_reason`
   - `is_primary_watchlist_candidate`
   - `is_secondary_watchlist_candidate`
+- Final API rows now also expose a chart execution view:
+  - `chart_execution_view.trade_shape`
+  - `chart_execution_view.enter_now`
+  - `chart_execution_view.breakout_point`
+  - `chart_execution_view.pullback_entry_zone`
+  - `chart_execution_view.deeper_pullback_zone`
+  - `chart_execution_view.current_price_location`
+  - `chart_execution_view.execution_bias`
+  - `chart_execution_view.chart_execution_summary`
 - Final API rows now also expose scanner/ranking diagnostics:
   - `pre_scan_score`
   - `pre_scan_reason_tags`

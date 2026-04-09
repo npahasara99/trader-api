@@ -115,6 +115,7 @@ class PlanRow:
     failure_triggers: list[str] = field(default_factory=list)
     next_check_focus: list[str] = field(default_factory=list)
     setup_monitoring_summary: str | None = None
+    chart_execution_view: dict | None = None
     swing_trade_suitability: dict | None = None
     watchlist_tier: str | None = None
     watchlist_bucket: str | None = None

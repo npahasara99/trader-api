@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from .config import DEFAULT_PLANNING_CONFIG
+from .execution_view import build_chart_execution_view
 from .llm_reasoning import classify_final_action, reconcile_actions
 from .monitoring import build_wait_monitoring_plan
 from .ranking import build_ranking_profile
@@ -698,6 +699,97 @@ def evaluate_split_ranking_fixtures() -> list[dict]:
                 "bucket": profile["ranking_bucket"],
                 "scanner_rank_score": profile["scanner_rank_score"],
                 "pass": profile["ranking_bucket"] == fixture["expected_bucket"],
+            }
+        )
+    return results
+
+
+def evaluate_chart_execution_fixtures() -> list[dict]:
+    fixtures = [
+        {
+            "name": "constructive_wait_near_resistance_breakout_or_pullback",
+            "row": SimpleNamespace(
+                final_action="WAIT",
+                current_price=503.0,
+                trend_state="pullback_in_uptrend",
+                preferred_entry=497.8,
+                preferred_entry_type="pullback",
+                entry_quality_score=6.1,
+                entry_requires_confirmation=True,
+                confirmation_trigger="Wait for breakout close above the recent range high",
+                reward_risk={"tp1": 1.08},
+                moving_averages={"ema20": 498.4, "sma50": 494.1},
+                volume_context={"reversal_volume_state": "weak_bounce"},
+                support_zone_1={"lower": 496.5, "upper": 498.5, "source_tags": ["ema20"]},
+                support_zone_2={"lower": 492.0, "upper": 494.5, "source_tags": ["sma50"]},
+                resistance_zone_1={"lower": 500.5, "upper": 503.0, "source_tags": ["pivot_high"]},
+                resistance_zone_2={"lower": 504.5, "upper": 507.0, "source_tags": ["range_high"]},
+            ),
+            "expected_shape": "breakout_or_pullback",
+            "expected_enter": {"no", "only_on_confirmation"},
+        },
+        {
+            "name": "constructive_support_retest_pullback_candidate",
+            "row": SimpleNamespace(
+                final_action="BUY",
+                current_price=78.9,
+                trend_state="pullback_in_uptrend",
+                preferred_entry=78.8,
+                preferred_entry_type="pullback",
+                entry_quality_score=7.1,
+                entry_requires_confirmation=False,
+                confirmation_trigger="Optional hold above support",
+                reward_risk={"tp1": 1.45},
+                moving_averages={"ema20": 79.1, "sma50": 78.4},
+                volume_context={"reversal_volume_state": "confirmed_bounce"},
+                support_zone_1={"lower": 78.75, "upper": 80.07, "source_tags": ["ema20"]},
+                support_zone_2={"lower": 78.28, "upper": 79.60, "source_tags": ["sma50"]},
+                resistance_zone_1={"lower": 82.0, "upper": 83.2, "source_tags": ["pivot_high"]},
+                resistance_zone_2={"lower": 84.0, "upper": 85.4, "source_tags": ["pivot_high"]},
+            ),
+            "expected_shape": "pullback_candidate",
+            "expected_enter": {"yes", "only_on_confirmation"},
+        },
+        {
+            "name": "weak_structure_repair_needed",
+            "row": SimpleNamespace(
+                final_action="WAIT",
+                current_price=43.2,
+                trend_state="weak_breakdown_risk",
+                preferred_entry=42.9,
+                preferred_entry_type="pullback",
+                entry_quality_score=5.0,
+                entry_requires_confirmation=True,
+                confirmation_trigger="Need stabilization and reclaim of resistance",
+                reward_risk={"tp1": 1.0},
+                moving_averages={"ema20": 43.75, "sma50": 42.85},
+                volume_context={"reversal_volume_state": "weak_bounce"},
+                support_zone_1={"lower": 42.55, "upper": 43.25, "source_tags": ["pivot_low", "ema20"]},
+                support_zone_2={"lower": 41.75, "upper": 42.35, "source_tags": ["sma50"]},
+                resistance_zone_1={"lower": 43.95, "upper": 44.55, "source_tags": ["pivot_high"]},
+                resistance_zone_2={"lower": 44.85, "upper": 45.45, "source_tags": ["gap_fill"]},
+            ),
+            "expected_shape": "structure_repair_needed",
+            "expected_enter": {"no"},
+        },
+    ]
+
+    results: list[dict] = []
+    for fixture in fixtures:
+        view = build_chart_execution_view(fixture["row"], config=DEFAULT_PLANNING_CONFIG)
+        results.append(
+            {
+                "name": fixture["name"],
+                "trade_shape": None if not view else view.get("trade_shape"),
+                "enter_now": None if not view else view.get("enter_now"),
+                "has_breakout": bool(view and view.get("breakout_point")),
+                "has_pullback": bool(view and view.get("pullback_entry_zone")),
+                "has_summary": bool(view and view.get("chart_execution_summary")),
+                "pass": bool(
+                    view
+                    and view.get("trade_shape") == fixture["expected_shape"]
+                    and view.get("enter_now") in fixture["expected_enter"]
+                ),
             }
         )
     return results

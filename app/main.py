@@ -5,6 +5,7 @@ from typing import List, Optional
 from datetime import datetime, timezone, timedelta, date
 from .logic import bucket_news, classify_assumption
 from .config import DEFAULT_PLANNING_CONFIG
+from .execution_view import build_chart_execution_view
 from .llm_reasoning import classify_final_action, reconcile_actions
 from .monitoring import build_wait_monitoring_plan
 from .ranking import build_ranking_profile
@@ -235,6 +236,7 @@ class PlanRowOut(BaseModel):
     failure_triggers: List[str] = Field(default_factory=list)
     next_check_focus: List[str] = Field(default_factory=list)
     setup_monitoring_summary: Optional[str] = None
+    chart_execution_view: Optional[dict] = None
     swing_trade_suitability: Optional[dict] = None
     watchlist_tier: Optional[str] = None
     watchlist_bucket: Optional[str] = None
@@ -507,6 +509,7 @@ def _to_plan_row_out(r) -> PlanRowOut:
         failure_triggers=list(getattr(r, "failure_triggers", []) or []),
         next_check_focus=list(getattr(r, "next_check_focus", []) or []),
         setup_monitoring_summary=getattr(r, "setup_monitoring_summary", None),
+        chart_execution_view=getattr(r, "chart_execution_view", None),
         swing_trade_suitability=getattr(r, "swing_trade_suitability", None),
         watchlist_tier=getattr(r, "watchlist_tier", None),
         watchlist_bucket=getattr(r, "watchlist_bucket", None),
@@ -1132,6 +1135,7 @@ def _apply_prob_and_action(
         row.failure_triggers = list(monitoring_plan["failure_triggers"])
         row.next_check_focus = list(monitoring_plan["next_check_focus"])
         row.setup_monitoring_summary = monitoring_plan["setup_monitoring_summary"]
+    row.chart_execution_view = build_chart_execution_view(row, config=DEFAULT_PLANNING_CONFIG)
     row.swing_trade_suitability = build_swing_trade_suitability(row, config=DEFAULT_PLANNING_CONFIG)
     watchlist_profile = build_watchlist_profile(row, config=DEFAULT_PLANNING_CONFIG)
     row.watchlist_tier = watchlist_profile["watchlist_tier"]
