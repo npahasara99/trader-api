@@ -601,11 +601,17 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
         config=config,
         range_metrics=range_metrics,
     )
-    if prior_trigger_status == "context_only":
-        if weak_structure:
+    repair_anchor_buffer = max(current_price * config.execution_zone_min_width_pct, atr * 0.18, 0.02)
+    if weak_structure:
+        if prior_trigger_status == "context_only":
             location = "repair_reclaimed_but_not_clean"
-        elif location in {"post_breakout_retest", "above_first_trigger_not_confirmed"}:
-            location = "continuation_above_old_trigger" if not range_metrics.get("is_near_recent_high") else "continuation_near_range_high"
+        elif prior_trigger_status == "active" and current_execution_anchor_raw:
+            anchor_lower = _safe_float(current_execution_anchor_raw.get("lower"))
+            anchor_upper = _safe_float(current_execution_anchor_raw.get("upper"))
+            if anchor_lower - repair_anchor_buffer <= current_price <= anchor_upper + repair_anchor_buffer:
+                location = "repair_band_still_active"
+    elif prior_trigger_status == "context_only" and location in {"post_breakout_retest", "above_first_trigger_not_confirmed"}:
+        location = "continuation_above_old_trigger" if not range_metrics.get("is_near_recent_high") else "continuation_near_range_high"
 
     if weak_structure:
         trade_shape = "structure_repair_needed"
@@ -659,7 +665,7 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
         enter_now = "yes"
     elif weak_structure or final_action == "AVOID":
         enter_now = "no"
-    elif location in {"near_resistance", "post_breakout_retest", "above_first_trigger_not_confirmed", "extended_above_trigger", "continuation_above_old_trigger", "continuation_near_range_high", "repair_reclaimed_but_not_clean"} or entry_requires_confirmation:
+    elif location in {"near_resistance", "post_breakout_retest", "above_first_trigger_not_confirmed", "extended_above_trigger", "continuation_above_old_trigger", "continuation_near_range_high", "repair_reclaimed_but_not_clean", "repair_band_still_active"} or entry_requires_confirmation:
         enter_now = "only_on_confirmation"
     else:
         enter_now = "no"
@@ -682,6 +688,8 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
             enter_now_reason = "Price already ran through an earlier trigger, so confirmation or a cleaner reset is still needed."
         elif trade_shape == "structure_repair_needed" and prior_trigger_status == "context_only":
             enter_now_reason = "The earlier repair trigger has already been reclaimed, but the current structure is still not clean enough for immediate entry."
+        elif trade_shape == "structure_repair_needed" and location == "repair_band_still_active":
+            enter_now_reason = "Price is still trading around the active repair band, so this remains a repair-monitoring setup rather than a normal continuation entry."
         else:
             enter_now_reason = f"Current price needs confirmation before it becomes attractive. {confirmation_trigger}".strip()
     else:
@@ -739,6 +747,8 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
             summary_parts.append("Price is sitting in the middle of the active range")
         elif location == "near_support":
             summary_parts.append("Price is closer to support than resistance")
+        elif location == "repair_band_still_active":
+            summary_parts.append("Price is still trading around the active repair band")
         elif location == "repair_reclaimed_but_not_clean":
             summary_parts.append("The earlier repair trigger has been reclaimed, but the setup still is not clean")
 
@@ -763,7 +773,10 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
             else:
                 summary_parts.append(f"preferred pullback support is {current_execution_anchor['display']}")
         elif current_execution_anchor_type in {"repair_band", "reclaim_band"}:
-            summary_parts.append(f"watch the current execution area around {current_execution_anchor['display']}")
+            if location == "repair_band_still_active":
+                summary_parts.append(f"watch the active repair band around {current_execution_anchor['display']}")
+            else:
+                summary_parts.append(f"watch the current execution area around {current_execution_anchor['display']}")
     elif pullback_entry_zone:
         summary_parts.append(f"preferred pullback support is {pullback_entry_zone['display']}")
     if deeper_pullback_zone:
