@@ -605,13 +605,17 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
     if weak_structure:
         if prior_trigger_status == "context_only":
             location = "repair_reclaimed_but_not_clean"
-        elif prior_trigger_status == "active" and current_execution_anchor_raw:
-            anchor_lower = _safe_float(current_execution_anchor_raw.get("lower"))
-            anchor_upper = _safe_float(current_execution_anchor_raw.get("upper"))
-            if anchor_lower - repair_anchor_buffer <= current_price <= anchor_upper + repair_anchor_buffer:
-                location = "repair_band_still_active"
+        else:
+            location = "repair_band_still_active"
+            if current_execution_anchor_raw:
+                anchor_lower = _safe_float(current_execution_anchor_raw.get("lower"))
+                anchor_upper = _safe_float(current_execution_anchor_raw.get("upper"))
+                if not (anchor_lower - repair_anchor_buffer <= current_price <= anchor_upper + repair_anchor_buffer):
+                    location = "repair_band_still_active"
     elif prior_trigger_status == "context_only" and location in {"post_breakout_retest", "above_first_trigger_not_confirmed"}:
         location = "continuation_above_old_trigger" if not range_metrics.get("is_near_recent_high") else "continuation_near_range_high"
+    elif constructive_trend and location == "above_first_trigger_not_confirmed":
+        location = "continuation_near_range_high" if range_metrics.get("is_near_recent_high") else "near_resistance"
 
     if weak_structure:
         trade_shape = "structure_repair_needed"
