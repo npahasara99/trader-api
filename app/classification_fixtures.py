@@ -736,6 +736,7 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
             "expected_breakout_type": {"reclaim_trigger", "breakout_trigger"},
             "expected_prior_status": {"context_only"},
             "expected_current_anchor_type": {"continuation_support", "pullback_support"},
+            "require_breakout_not_below_prior": True,
         },
         {
             "name": "constructive_support_retest_pullback_candidate",
@@ -790,9 +791,9 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
             ),
             "expected_shape": "structure_repair_needed",
             "expected_enter": {"no"},
-            "expected_location": {"near_support", "structure_below_trigger"},
+            "expected_location": {"near_support", "structure_below_trigger", "repair_reclaimed_but_not_clean"},
             "expected_bias": {"wait_for_repair"},
-            "expected_breakout_type": {"repair_trigger"},
+            "expected_breakout_type": {"repair_trigger", "none"},
             "expected_prior_status": {"active", "context_only"},
             "expected_current_anchor_type": {"repair_band"},
         },
@@ -821,11 +822,12 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
             ),
             "expected_shape": {"post_breakout_retest", "continuation_pullback_preferred"},
             "expected_enter": {"only_on_confirmation"},
-            "expected_location": {"above_first_trigger_not_confirmed", "continuation_near_range_high", "post_breakout_retest"},
+            "expected_location": {"above_first_trigger_not_confirmed", "continuation_near_range_high", "post_breakout_retest", "continuation_above_old_trigger"},
             "expected_bias": {"pullback_preferred"},
-            "expected_breakout_type": {"reclaim_trigger"},
+            "expected_breakout_type": {"reclaim_trigger", "none"},
             "expected_prior_status": {"context_only"},
             "expected_current_anchor_type": {"continuation_support"},
+            "require_breakout_not_below_prior": True,
         },
         {
             "name": "deeper_pullback_can_be_null_when_not_distinct",
@@ -850,7 +852,7 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
             ),
             "expected_shape": "structure_repair_needed",
             "expected_enter": {"no"},
-            "expected_location": {"near_support"},
+            "expected_location": {"near_support", "repair_reclaimed_but_not_clean"},
             "expected_bias": {"wait_for_repair"},
             "expected_breakout_type": {"repair_trigger"},
             "expected_prior_status": {"context_only", "active"},
@@ -865,6 +867,8 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
         breakout = None if not view else view.get("breakout_point")
         pullback = None if not view else view.get("pullback_entry_zone")
         deeper = None if not view else view.get("deeper_pullback_zone")
+        prior_anchor = None if not view else view.get("prior_trigger_anchor")
+        current_anchor = None if not view else view.get("current_execution_anchor")
         breakout_width_pct = (
             None
             if not breakout
@@ -877,6 +881,11 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
             overlap_width = max(0.0, overlap_upper - overlap_lower)
             overlap_base = min(float(pullback["upper"]) - float(pullback["lower"]), float(deeper["upper"]) - float(deeper["lower"]))
             overlap_ratio = 0.0 if overlap_base <= 0 else overlap_width / overlap_base
+        breakout_not_below_prior = True
+        if view and fixture.get("require_breakout_not_below_prior") and view.get("prior_trigger_anchor_status") == "context_only":
+            prior_upper = None if not prior_anchor else float(prior_anchor["upper"])
+            breakout_lower = None if not breakout else float(breakout["lower"])
+            breakout_not_below_prior = breakout is None or prior_upper is None or breakout_lower >= prior_upper - 0.05
         results.append(
             {
                 "name": fixture["name"],
@@ -891,6 +900,7 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
                 "prior_trigger_anchor_status": None if not view else view.get("prior_trigger_anchor_status"),
                 "current_execution_anchor_type": None if not view else view.get("current_execution_anchor_type"),
                 "has_current_execution_anchor": bool(view and view.get("current_execution_anchor")),
+                "breakout_not_below_prior": breakout_not_below_prior,
                 "has_breakout": bool(view and view.get("breakout_point")),
                 "has_pullback": bool(view and view.get("pullback_entry_zone")),
                 "has_summary": bool(view and view.get("chart_execution_summary")),
@@ -917,6 +927,7 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
                         or fixture["expect_deeper_null"] is False
                         or not view.get("deeper_pullback_available")
                     )
+                    and breakout_not_below_prior
                     and bool(view.get("current_execution_anchor"))
                     and bool(view.get("chart_execution_summary"))
                 ),

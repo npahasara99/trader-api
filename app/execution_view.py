@@ -63,6 +63,12 @@ def _level_zone(level: float | None, *, current_price: float, atr: float, config
     }
 
 
+def _zone_mid(zone: dict | None) -> float | None:
+    if not zone:
+        return None
+    return (_safe_float(zone.get("lower")) + _safe_float(zone.get("upper"))) / 2.0
+
+
 def _zone_quality(zone: dict | None, *, current_price: float, config: PlanningConfig) -> str:
     if not zone:
         return "messy"
@@ -323,6 +329,75 @@ def _current_price_location(
     return "mid_range"
 
 
+def _select_active_breakout_zone(
+    *,
+    current_price: float,
+    atr: float,
+    config: PlanningConfig,
+    prior_trigger_status: str | None,
+    prior_trigger_raw: dict | None,
+    current_execution_anchor_raw: dict | None,
+    breakout_point_raw: dict | None,
+    resistance_zone_2: dict | None,
+    consolidation_range: dict | None,
+    range_metrics: dict,
+    weak_structure: bool,
+) -> tuple[dict | None, str]:
+    if prior_trigger_status != "context_only":
+        return breakout_point_raw, "existing_regime"
+
+    current_anchor_upper = _safe_float(current_execution_anchor_raw.get("upper")) if current_execution_anchor_raw else current_price
+    prior_upper = _safe_float(prior_trigger_raw.get("upper")) if prior_trigger_raw else 0.0
+    min_trigger_floor = max(current_anchor_upper, current_price * (1.0 + config.execution_near_trigger_buffer_pct), prior_upper)
+
+    candidates: list[tuple[float, dict, str]] = []
+
+    if resistance_zone_2:
+        candidate = _tighten_zone(
+            resistance_zone_2,
+            current_price=current_price,
+            atr=atr,
+            config=config,
+            focus="breakout",
+            anchor=_safe_float(resistance_zone_2.get("upper")),
+        )
+        if candidate and _safe_float(candidate.get("upper")) > min_trigger_floor:
+            candidates.append((_safe_float(candidate.get("lower")), candidate, "resistance_zone_2"))
+
+    if consolidation_range:
+        consolidation_high = _safe_float(consolidation_range.get("upper"))
+        if consolidation_high > min_trigger_floor:
+            candidate = _level_zone(
+                consolidation_high,
+                current_price=current_price,
+                atr=atr,
+                config=config,
+                tags=list(consolidation_range.get("source_tags", [])) + ["active_range_high"],
+            )
+            if candidate:
+                candidates.append((_safe_float(candidate.get("lower")), candidate, "active_range_high"))
+
+    active_range_high = _safe_float(range_metrics.get("active_range_high"))
+    if active_range_high > min_trigger_floor:
+        candidate = _level_zone(
+            active_range_high,
+            current_price=current_price,
+            atr=atr,
+            config=config,
+            tags=["active_range_high"],
+        )
+        if candidate:
+            candidates.append((_safe_float(candidate.get("lower")), candidate, "active_range_high"))
+
+    if candidates:
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1], candidates[0][2]
+
+    if weak_structure:
+        return None, "no_clean_repair_trigger"
+    return None, "no_clean_active_trigger"
+
+
 def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
     """Frame the current setup in trader execution terms using existing zones."""
 
@@ -419,12 +494,11 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
         config=config,
     )
 
-    breakout_point = _build_display_payload(breakout_point_raw, current_price=current_price, label="Breakout Point")
     pullback_entry_zone = _build_display_payload(pullback_zone_raw, current_price=current_price, label="Pullback Entry Zone")
     deeper_pullback_zone = _build_display_payload(deeper_pullback_raw, current_price=current_price, label="Deeper Pullback Zone")
     deeper_pullback_available = deeper_pullback_zone is not None
 
-    location = _current_price_location(
+    initial_location = _current_price_location(
         current_price=current_price,
         pullback_zone=pullback_zone_raw,
         first_trigger_zone=first_trigger_raw,
@@ -464,7 +538,7 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
     if prior_trigger_raw:
         if weak_structure:
             prior_trigger_type = "repair_trigger"
-        elif above_first_resistance or location in {"post_breakout_retest", "above_first_trigger_not_confirmed", "continuation_near_range_high", "extended_above_trigger"}:
+        elif above_first_resistance or initial_location in {"post_breakout_retest", "above_first_trigger_not_confirmed", "continuation_near_range_high", "extended_above_trigger"}:
             prior_trigger_type = "reclaim_trigger"
         else:
             prior_trigger_type = "breakout_trigger"
@@ -483,13 +557,63 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
         else:
             prior_trigger_status = "active"
 
+    current_execution_anchor_raw = None
+    current_execution_anchor_type = None
+    if weak_structure and pullback_zone_raw:
+        current_execution_anchor_raw = pullback_zone_raw
+        current_execution_anchor_type = "repair_band"
+    elif weak_structure and breakout_point_raw:
+        current_execution_anchor_raw = breakout_point_raw
+        current_execution_anchor_type = "repair_band"
+    elif prior_trigger_status == "context_only" and pullback_zone_raw:
+        current_execution_anchor_raw = pullback_zone_raw
+        current_execution_anchor_type = "continuation_support"
+    elif preferred_entry_type in {"pullback", "deeper_pullback", "immediate"} and pullback_zone_raw:
+        current_execution_anchor_raw = pullback_zone_raw
+        current_execution_anchor_type = "pullback_support"
+    elif breakout_point_raw:
+        current_execution_anchor_raw = breakout_point_raw
+        current_execution_anchor_type = "resistance_trigger"
+
+    breakout_point_raw, active_breakout_source = _select_active_breakout_zone(
+        current_price=current_price,
+        atr=atr,
+        config=config,
+        prior_trigger_status=prior_trigger_status,
+        prior_trigger_raw=prior_trigger_raw,
+        current_execution_anchor_raw=current_execution_anchor_raw,
+        breakout_point_raw=breakout_point_raw,
+        resistance_zone_2=resistance_zone_2,
+        consolidation_range=consolidation_range,
+        range_metrics=range_metrics,
+        weak_structure=weak_structure,
+    )
+    breakout_point = _build_display_payload(breakout_point_raw, current_price=current_price, label="Breakout Point")
+
+    location = _current_price_location(
+        current_price=current_price,
+        pullback_zone=pullback_zone_raw,
+        first_trigger_zone=first_trigger_raw,
+        breakout_point=breakout_point_raw,
+        trend_state=trend_state,
+        entry_requires_confirmation=entry_requires_confirmation,
+        atr=atr,
+        config=config,
+        range_metrics=range_metrics,
+    )
+    if prior_trigger_status == "context_only":
+        if weak_structure:
+            location = "repair_reclaimed_but_not_clean"
+        elif location in {"post_breakout_retest", "above_first_trigger_not_confirmed"}:
+            location = "continuation_above_old_trigger" if not range_metrics.get("is_near_recent_high") else "continuation_near_range_high"
+
     if weak_structure:
         trade_shape = "structure_repair_needed"
     elif location in {"post_breakout_retest", "above_first_trigger_not_confirmed"}:
         trade_shape = "post_breakout_retest" if not weak_reversal else "continuation_pullback_preferred"
     elif location == "extended_above_trigger":
         trade_shape = "extended_after_breakout"
-    elif location == "continuation_near_range_high":
+    elif location in {"continuation_near_range_high", "continuation_above_old_trigger"}:
         trade_shape = "continuation_pullback_preferred"
     elif location == "near_resistance" and constructive_trend and pullback_entry_zone and breakout_point:
         trade_shape = "continuation_pullback_preferred" if prior_trigger_status == "context_only" else "breakout_or_pullback"
@@ -502,32 +626,25 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
     else:
         trade_shape = "no_clear_setup"
 
-    if weak_structure:
+    if not breakout_point_raw:
+        breakout_point_type = "none"
+    elif weak_structure:
         breakout_point_type = "repair_trigger"
-    elif location in {"post_breakout_retest", "above_first_trigger_not_confirmed", "extended_above_trigger"}:
+    elif prior_trigger_status == "context_only" or location in {"post_breakout_retest", "above_first_trigger_not_confirmed", "extended_above_trigger", "continuation_above_old_trigger"}:
         breakout_point_type = "reclaim_trigger"
     else:
         breakout_point_type = "breakout_trigger"
 
-    current_execution_anchor_raw = None
-    current_execution_anchor_type = None
-    if trade_shape in {"continuation_pullback_preferred", "post_breakout_retest", "extended_after_breakout", "near_resistance_wait", "breakout_or_pullback"} and pullback_zone_raw:
-        current_execution_anchor_raw = pullback_zone_raw
-        current_execution_anchor_type = "continuation_support" if prior_trigger_status == "context_only" or trade_shape in {"continuation_pullback_preferred", "post_breakout_retest", "extended_after_breakout"} else "pullback_support"
+    if trade_shape == "fresh_breakout_candidate" and breakout_point_raw:
+        current_execution_anchor_raw = breakout_point_raw
+        current_execution_anchor_type = "resistance_trigger"
     elif trade_shape == "pullback_candidate" and pullback_zone_raw:
         current_execution_anchor_raw = pullback_zone_raw
         current_execution_anchor_type = "pullback_support"
-    elif trade_shape == "fresh_breakout_candidate" and breakout_point_raw:
-        current_execution_anchor_raw = breakout_point_raw
-        current_execution_anchor_type = "resistance_trigger"
-    elif trade_shape == "structure_repair_needed":
-        if pullback_zone_raw:
-            current_execution_anchor_raw = pullback_zone_raw
-            current_execution_anchor_type = "repair_band"
-        elif breakout_point_raw:
-            current_execution_anchor_raw = breakout_point_raw
-            current_execution_anchor_type = "repair_band"
-    elif breakout_point_raw:
+    elif trade_shape in {"continuation_pullback_preferred", "post_breakout_retest", "extended_after_breakout", "near_resistance_wait", "breakout_or_pullback"} and pullback_zone_raw:
+        current_execution_anchor_raw = pullback_zone_raw
+        current_execution_anchor_type = "continuation_support" if prior_trigger_status == "context_only" or trade_shape in {"continuation_pullback_preferred", "post_breakout_retest", "extended_after_breakout"} else "pullback_support"
+    elif not current_execution_anchor_raw and breakout_point_raw:
         current_execution_anchor_raw = breakout_point_raw
         current_execution_anchor_type = "reclaim_band"
 
@@ -542,7 +659,7 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
         enter_now = "yes"
     elif weak_structure or final_action == "AVOID":
         enter_now = "no"
-    elif location in {"near_resistance", "post_breakout_retest", "above_first_trigger_not_confirmed", "extended_above_trigger"} or entry_requires_confirmation:
+    elif location in {"near_resistance", "post_breakout_retest", "above_first_trigger_not_confirmed", "extended_above_trigger", "continuation_above_old_trigger", "continuation_near_range_high", "repair_reclaimed_but_not_clean"} or entry_requires_confirmation:
         enter_now = "only_on_confirmation"
     else:
         enter_now = "no"
@@ -563,6 +680,8 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
     elif enter_now == "only_on_confirmation":
         if trade_shape in {"post_breakout_retest", "continuation_pullback_preferred", "extended_after_breakout"}:
             enter_now_reason = "Price already ran through an earlier trigger, so confirmation or a cleaner reset is still needed."
+        elif trade_shape == "structure_repair_needed" and prior_trigger_status == "context_only":
+            enter_now_reason = "The earlier repair trigger has already been reclaimed, but the current structure is still not clean enough for immediate entry."
         else:
             enter_now_reason = f"Current price needs confirmation before it becomes attractive. {confirmation_trigger}".strip()
     else:
@@ -576,13 +695,15 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
     breakout_reason = None
     breakout_point_source = None
     if breakout_point:
-        breakout_point_source = ",".join(breakout_point.get("source_tags", [])) or "resistance_cluster"
+        breakout_point_source = active_breakout_source or ",".join(breakout_point.get("source_tags", [])) or "resistance_cluster"
         if breakout_point_type == "repair_trigger":
             breakout_reason = "This is the reclaim area that would signal structure repair rather than a normal breakout."
         elif breakout_point_type == "reclaim_trigger":
             breakout_reason = "This is the next reclaim or continuation band after price already moved through an earlier trigger."
         else:
             breakout_reason = "This is the tightest nearby breakout band that would confirm a fresh move through resistance."
+    elif prior_trigger_status == "context_only":
+        breakout_reason = "The earlier trigger is now context only, and there is no clean current breakout or continuation trigger in the active regime."
 
     prior_trigger_anchor = _build_display_payload(prior_trigger_raw, current_price=current_price, label="Prior Trigger Anchor")
     current_execution_anchor = _build_display_payload(current_execution_anchor_raw, current_price=current_price, label="Current Execution Anchor")
@@ -618,6 +739,8 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
             summary_parts.append("Price is sitting in the middle of the active range")
         elif location == "near_support":
             summary_parts.append("Price is closer to support than resistance")
+        elif location == "repair_reclaimed_but_not_clean":
+            summary_parts.append("The earlier repair trigger has been reclaimed, but the setup still is not clean")
 
     if prior_trigger_anchor and prior_trigger_status == "context_only":
         summary_parts.append(f"the earlier trigger at {prior_trigger_anchor['display']} is now context only")
@@ -631,6 +754,8 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
             summary_parts.append(f"prefer confirmed breakout above {breakout_point['display']}")
         elif trade_shape in {"post_breakout_retest", "continuation_pullback_preferred", "extended_after_breakout"}:
             summary_parts.append(f"treat {breakout_point['display']} as the continuation/reclaim band")
+    elif prior_trigger_status == "context_only":
+        summary_parts.append("there is no clean fresh breakout trigger in the active regime right now")
     if current_execution_anchor:
         if current_execution_anchor_type in {"continuation_support", "pullback_support"}:
             if trade_shape in {"post_breakout_retest", "continuation_pullback_preferred", "extended_after_breakout"}:
@@ -652,7 +777,7 @@ def build_chart_execution_view(row, *, config: PlanningConfig) -> dict | None:
         "enter_now": enter_now,
         "enter_now_reason": enter_now_reason,
         "breakout_point": breakout_point,
-        "breakout_point_type": breakout_point_type if breakout_point else None,
+        "breakout_point_type": breakout_point_type,
         "breakout_point_source": breakout_point_source,
         "breakout_reason": breakout_reason,
         "prior_trigger_anchor": prior_trigger_anchor,
