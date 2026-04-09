@@ -70,6 +70,13 @@ class PlanningConfig:
     execution_zone_overlap_max_pct: float = 0.5
     execution_near_trigger_buffer_pct: float = 0.006
     execution_extended_above_trigger_pct: float = 0.022
+    execution_range_near_high_pct: float = 0.16
+    execution_range_near_low_pct: float = 0.18
+    execution_breakout_zone_max_width_pct: float = 0.018
+    execution_pullback_zone_max_width_pct: float = 0.024
+    execution_deeper_zone_max_width_pct: float = 0.018
+    execution_deeper_zone_min_gap_pct: float = 0.005
+    execution_deeper_zone_drop_overlap_pct: float = 0.72
     avoid_severity_threshold: float = 5.0
     avoid_severity_threshold_risk_off: float = 4.8
     avoid_bad_composite_gap: float = 1.7

@@ -69,9 +69,15 @@ Backward compatibility:
   - `chart_execution_view.breakout_point_type`
   - `chart_execution_view.pullback_entry_zone`
   - `chart_execution_view.deeper_pullback_zone`
+  - `chart_execution_view.deeper_pullback_available`
   - `chart_execution_view.current_price_location`
   - `chart_execution_view.execution_bias`
   - `chart_execution_view.execution_zone_quality`
+  - `chart_execution_view.active_range_high`
+  - `chart_execution_view.active_range_low`
+  - `chart_execution_view.range_position_pct`
+  - `chart_execution_view.distance_to_local_high_pct`
+  - `chart_execution_view.distance_to_local_low_pct`
   - `chart_execution_view.chart_execution_summary`
 - Final API rows now also expose scanner/ranking diagnostics:
   - `pre_scan_score`
