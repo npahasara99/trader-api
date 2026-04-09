@@ -62,6 +62,14 @@ class PlanningConfig:
     watchlist_secondary_min_suitability_score: float = 3.4
     watchlist_primary_min_relative_strength_score: float = 5.8
     watchlist_primary_min_composite_score: float = 5.0
+    execution_zone_max_width_pct: float = 0.028
+    execution_zone_min_width_pct: float = 0.0045
+    execution_breakout_zone_fraction: float = 0.38
+    execution_pullback_zone_fraction: float = 0.44
+    execution_deeper_zone_fraction: float = 0.34
+    execution_zone_overlap_max_pct: float = 0.5
+    execution_near_trigger_buffer_pct: float = 0.006
+    execution_extended_above_trigger_pct: float = 0.022
     avoid_severity_threshold: float = 5.0
     avoid_severity_threshold_risk_off: float = 4.8
     avoid_bad_composite_gap: float = 1.7

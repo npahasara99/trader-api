@@ -718,15 +718,19 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
                 entry_requires_confirmation=True,
                 confirmation_trigger="Wait for breakout close above the recent range high",
                 reward_risk={"tp1": 1.08},
+                atr=6.2,
                 moving_averages={"ema20": 498.4, "sma50": 494.1},
                 volume_context={"reversal_volume_state": "weak_bounce"},
-                support_zone_1={"lower": 496.5, "upper": 498.5, "source_tags": ["ema20"]},
-                support_zone_2={"lower": 492.0, "upper": 494.5, "source_tags": ["sma50"]},
-                resistance_zone_1={"lower": 500.5, "upper": 503.0, "source_tags": ["pivot_high"]},
-                resistance_zone_2={"lower": 504.5, "upper": 507.0, "source_tags": ["range_high"]},
+                support_zone_1={"lower": 489.0, "upper": 498.8, "source_tags": ["ema20"]},
+                support_zone_2={"lower": 473.44, "upper": 500.34, "source_tags": ["sma50"]},
+                resistance_zone_1={"lower": 490.37, "upper": 500.51, "source_tags": ["pivot_high"]},
+                resistance_zone_2={"lower": 499.8, "upper": 504.1, "source_tags": ["range_high"]},
             ),
             "expected_shape": "breakout_or_pullback",
             "expected_enter": {"no", "only_on_confirmation"},
+            "expected_location": {"near_resistance"},
+            "expected_bias": "avoid_chasing",
+            "expected_breakout_type": "breakout_trigger",
         },
         {
             "name": "constructive_support_retest_pullback_candidate",
@@ -740,6 +744,7 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
                 entry_requires_confirmation=False,
                 confirmation_trigger="Optional hold above support",
                 reward_risk={"tp1": 1.45},
+                atr=1.6,
                 moving_averages={"ema20": 79.1, "sma50": 78.4},
                 volume_context={"reversal_volume_state": "confirmed_bounce"},
                 support_zone_1={"lower": 78.75, "upper": 80.07, "source_tags": ["ema20"]},
@@ -749,6 +754,9 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
             ),
             "expected_shape": "pullback_candidate",
             "expected_enter": {"yes", "only_on_confirmation"},
+            "expected_location": {"near_support"},
+            "expected_bias": "pullback_preferred",
+            "expected_breakout_type": "breakout_trigger",
         },
         {
             "name": "weak_structure_repair_needed",
@@ -762,6 +770,7 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
                 entry_requires_confirmation=True,
                 confirmation_trigger="Need stabilization and reclaim of resistance",
                 reward_risk={"tp1": 1.0},
+                atr=1.1,
                 moving_averages={"ema20": 43.75, "sma50": 42.85},
                 volume_context={"reversal_volume_state": "weak_bounce"},
                 support_zone_1={"lower": 42.55, "upper": 43.25, "source_tags": ["pivot_low", "ema20"]},
@@ -771,24 +780,81 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
             ),
             "expected_shape": "structure_repair_needed",
             "expected_enter": {"no"},
+            "expected_location": {"near_support", "structure_below_trigger"},
+            "expected_bias": "wait_for_repair",
+            "expected_breakout_type": "repair_trigger",
+        },
+        {
+            "name": "post_trigger_case_uses_non_generic_label",
+            "row": SimpleNamespace(
+                final_action="WAIT",
+                current_price=221.4,
+                trend_state="range",
+                preferred_entry=214.2,
+                preferred_entry_type="pullback",
+                entry_quality_score=5.8,
+                entry_requires_confirmation=True,
+                confirmation_trigger="Need follow-through above the reclaimed range high",
+                reward_risk={"tp1": 1.12},
+                atr=5.4,
+                moving_averages={"ema20": 216.8, "sma50": 212.1},
+                volume_context={"reversal_volume_state": "weak_bounce"},
+                support_zone_1={"lower": 212.8, "upper": 216.6, "source_tags": ["ema20", "pivot_low"]},
+                support_zone_2={"lower": 206.4, "upper": 210.9, "source_tags": ["sma50"]},
+                resistance_zone_1={"lower": 217.0, "upper": 219.5, "source_tags": ["pivot_high"]},
+                resistance_zone_2={"lower": 219.9, "upper": 223.0, "source_tags": ["range_high"]},
+            ),
+            "expected_shape": "breakout_or_pullback",
+            "expected_enter": {"only_on_confirmation"},
+            "expected_location": {"above_first_trigger_not_confirmed"},
+            "expected_bias": "avoid_chasing",
+            "expected_breakout_type": "reclaim_trigger",
         },
     ]
 
     results: list[dict] = []
     for fixture in fixtures:
         view = build_chart_execution_view(fixture["row"], config=DEFAULT_PLANNING_CONFIG)
+        breakout = None if not view else view.get("breakout_point")
+        pullback = None if not view else view.get("pullback_entry_zone")
+        deeper = None if not view else view.get("deeper_pullback_zone")
+        breakout_width_pct = (
+            None
+            if not breakout
+            else round((float(breakout["upper"]) - float(breakout["lower"])) / max(float(fixture["row"].current_price), 0.01), 4)
+        )
+        overlap_ratio = 0.0
+        if pullback and deeper:
+            overlap_lower = max(float(pullback["lower"]), float(deeper["lower"]))
+            overlap_upper = min(float(pullback["upper"]), float(deeper["upper"]))
+            overlap_width = max(0.0, overlap_upper - overlap_lower)
+            overlap_base = min(float(pullback["upper"]) - float(pullback["lower"]), float(deeper["upper"]) - float(deeper["lower"]))
+            overlap_ratio = 0.0 if overlap_base <= 0 else overlap_width / overlap_base
         results.append(
             {
                 "name": fixture["name"],
                 "trade_shape": None if not view else view.get("trade_shape"),
                 "enter_now": None if not view else view.get("enter_now"),
+                "current_price_location": None if not view else view.get("current_price_location"),
+                "execution_bias": None if not view else view.get("execution_bias"),
+                "breakout_point_type": None if not view else view.get("breakout_point_type"),
+                "execution_zone_quality": None if not view else view.get("execution_zone_quality"),
                 "has_breakout": bool(view and view.get("breakout_point")),
                 "has_pullback": bool(view and view.get("pullback_entry_zone")),
                 "has_summary": bool(view and view.get("chart_execution_summary")),
+                "breakout_width_pct": breakout_width_pct,
+                "deeper_overlap_ratio": round(overlap_ratio, 4),
                 "pass": bool(
                     view
                     and view.get("trade_shape") == fixture["expected_shape"]
                     and view.get("enter_now") in fixture["expected_enter"]
+                    and view.get("current_price_location") in fixture["expected_location"]
+                    and view.get("execution_bias") == fixture["expected_bias"]
+                    and view.get("breakout_point_type") == fixture["expected_breakout_type"]
+                    and view.get("current_price_location") != "above_breakout"
+                    and (breakout_width_pct is None or breakout_width_pct <= DEFAULT_PLANNING_CONFIG.execution_zone_max_width_pct + 0.002)
+                    and (not deeper or not pullback or overlap_ratio <= DEFAULT_PLANNING_CONFIG.execution_zone_overlap_max_pct + 0.05)
+                    and bool(view.get("chart_execution_summary"))
                 ),
             }
         )
