@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from functools import lru_cache
 from typing import Any
 
@@ -71,6 +72,16 @@ def _filtered_values(table: Table, payload: dict[str, Any]) -> dict[str, Any]:
     return values
 
 
+def _ensure_uuid_pk(table: Table, payload: dict[str, Any]) -> dict[str, Any]:
+    cols = _column_names(table)
+    if "id" not in cols or payload.get("id") is not None:
+        return payload
+    type_name = table.columns["id"].type.__class__.__name__.lower()
+    if "uuid" in type_name:
+        payload["id"] = str(uuid.uuid4())
+    return payload
+
+
 def _set_first_present(payload: dict[str, Any], table: Table, column_names: list[str], value: Any) -> None:
     cols = _column_names(table)
     for name in column_names:
@@ -110,6 +121,7 @@ def save_supabase_scan_run(
     payload = _filtered_values(
         table,
         {
+            "created_at": planned_at,
             "workflow_type": workflow_type,
             "planned_at": planned_at,
             "market_regime": getattr(workflow_response, "market_regime", None),
@@ -125,13 +137,14 @@ def save_supabase_scan_run(
             "response_json": response_payload,
         },
     )
+    payload = _ensure_uuid_pk(table, payload)
     pk_columns = list(table.primary_key.columns)
     returning_column = pk_columns[0] if pk_columns else table.c.id
     result = session.execute(table.insert().returning(returning_column), payload)
     return result.scalar_one()
 
 
-def save_supabase_ticker_results(session, *, scan_run_id, ranked_rows: list) -> None:
+def save_supabase_ticker_results(session, *, scan_run_id, ranked_rows: list, created_at) -> None:
     components = _get_supabase_components()
     if not components or not ranked_rows:
         return
@@ -143,6 +156,7 @@ def save_supabase_ticker_results(session, *, scan_run_id, ranked_rows: list) -> 
         actionability_label, actionability_score = _extract_actionability(row)
         suitability_label, suitability_score = _extract_suitability(row)
         raw_payload = {
+            "created_at": created_at,
             "ticker": row.ticker,
             "rank": ranked.rank,
             "final_action": row.final_action,
@@ -174,6 +188,7 @@ def save_supabase_ticker_results(session, *, scan_run_id, ranked_rows: list) -> 
         }
         _set_first_present(raw_payload, table, ["run_id", "scan_run_id", "source_run_id"], scan_run_id)
         payload = _filtered_values(table, raw_payload)
+        payload = _ensure_uuid_pk(table, payload)
         values.append(payload)
 
     if values:
@@ -254,7 +269,12 @@ def persist_sp100_workflow_to_supabase(
             response_payload=response_payload,
             workflow_response=workflow_response,
         )
-        save_supabase_ticker_results(session, scan_run_id=scan_run_id, ranked_rows=selected_rows)
+        save_supabase_ticker_results(
+            session,
+            scan_run_id=scan_run_id,
+            ranked_rows=selected_rows,
+            created_at=workflow_response.planned_at,
+        )
         upsert_supabase_watchlist_snapshots(
             session,
             scan_run_id=scan_run_id,
