@@ -12,6 +12,7 @@ from .monitoring import build_wait_monitoring_plan
 from .ranking import build_ranking_profile
 from .scanner import build_pre_scan_profile, sector_benchmark_symbol_for_meta
 from .suitability import build_swing_trade_suitability
+from .supabase_reporting import persist_sp100_workflow_to_supabase
 from .what_to_watch import build_what_to_watch
 from .watchlist import build_watchlist_profile
 import json
@@ -1552,7 +1553,7 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         db.rollback()
         raise HTTPException(status_code=500, detail=f"SP100 workflow logging failed: {e}")
 
-    return Sp100WorkflowResponse(
+    response = Sp100WorkflowResponse(
         planned_at=planned_at,
         market_regime=regime_snapshot["regime"],
         regime_score=float(regime_snapshot["score"]),
@@ -1579,6 +1580,12 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         best_watchlist_setups=[] if req.compact_response else best_watchlist_setups,
         rejected_or_low_priority=[] if req.compact_response else rejected_or_low_priority,
     )
+    persist_sp100_workflow_to_supabase(
+        workflow_request=req,
+        workflow_response=response,
+        selected_rows=out_rows,
+    )
+    return response
 
 
 @app.post("/workflow/swing-plan-log", response_model=SwingPlanLogWorkflowResponse)
