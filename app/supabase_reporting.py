@@ -71,6 +71,14 @@ def _filtered_values(table: Table, payload: dict[str, Any]) -> dict[str, Any]:
     return values
 
 
+def _set_first_present(payload: dict[str, Any], table: Table, column_names: list[str], value: Any) -> None:
+    cols = _column_names(table)
+    for name in column_names:
+        if name in cols:
+            payload[name] = value
+            return
+
+
 def _extract_actionability(row) -> tuple[str | None, float | None]:
     actionability = getattr(row, "actionability_soon", None) or {}
     label = actionability.get("actionability_label")
@@ -134,40 +142,38 @@ def save_supabase_ticker_results(session, *, scan_run_id, ranked_rows: list) -> 
         row = ranked.row
         actionability_label, actionability_score = _extract_actionability(row)
         suitability_label, suitability_score = _extract_suitability(row)
-        payload = _filtered_values(
-            table,
-            {
-                "scan_run_id": scan_run_id,
-                "ticker": row.ticker,
-                "rank": ranked.rank,
-                "final_action": row.final_action,
-                "quant_action": row.quant_action,
-                "llm_action": row.llm_action,
-                "watchlist_tier": row.watchlist_tier,
-                "watch_priority": row.watch_priority,
-                "actionability_label": actionability_label,
-                "actionability_score": actionability_score,
-                "suitability_label": suitability_label,
-                "suitability_score": suitability_score,
-                "trend_state": row.trend_state,
-                "preferred_entry": row.preferred_entry,
-                "stop_loss": row.stop_loss,
-                "take_profit_1": row.take_profit_1,
-                "max_hold_date": row.max_hold_date,
-                "pre_scan_score": row.pre_scan_score,
-                "scanner_rank_score": row.scanner_rank_score,
-                "immediate_rank_score": row.immediate_rank_score,
-                "watchlist_rank_score": row.watchlist_rank_score,
-                "sector_relative_strength": row.sector_relative_strength,
-                "expected_return": row.expected_return,
-                "prob_tp": row.prob_tp,
-                "prob_sl": row.prob_sl,
-                "chart_execution_view_json": row.chart_execution_view,
-                "what_to_watch_json": getattr(row, "what_to_watch", None),
-                "actionability_soon_json": getattr(row, "actionability_soon", None),
-                "raw_result_json": row.model_dump(mode="json"),
-            },
-        )
+        raw_payload = {
+            "ticker": row.ticker,
+            "rank": ranked.rank,
+            "final_action": row.final_action,
+            "quant_action": row.quant_action,
+            "llm_action": row.llm_action,
+            "watchlist_tier": row.watchlist_tier,
+            "watch_priority": row.watch_priority,
+            "actionability_label": actionability_label,
+            "actionability_score": actionability_score,
+            "suitability_label": suitability_label,
+            "suitability_score": suitability_score,
+            "trend_state": row.trend_state,
+            "preferred_entry": row.preferred_entry,
+            "stop_loss": row.stop_loss,
+            "take_profit_1": row.take_profit_1,
+            "max_hold_date": row.max_hold_date,
+            "pre_scan_score": row.pre_scan_score,
+            "scanner_rank_score": row.scanner_rank_score,
+            "immediate_rank_score": row.immediate_rank_score,
+            "watchlist_rank_score": row.watchlist_rank_score,
+            "sector_relative_strength": row.sector_relative_strength,
+            "expected_return": row.expected_return,
+            "prob_tp": row.prob_tp,
+            "prob_sl": row.prob_sl,
+            "chart_execution_view_json": row.chart_execution_view,
+            "what_to_watch_json": getattr(row, "what_to_watch", None),
+            "actionability_soon_json": getattr(row, "actionability_soon", None),
+            "raw_result_json": row.model_dump(mode="json"),
+        }
+        _set_first_present(raw_payload, table, ["run_id", "scan_run_id", "source_run_id"], scan_run_id)
+        payload = _filtered_values(table, raw_payload)
         values.append(payload)
 
     if values:
