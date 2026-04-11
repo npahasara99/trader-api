@@ -19,6 +19,29 @@ with latest_run as (
     from public.scan_runs
     order by created_at desc
     limit 1
+),
+active_snapshots as (
+    select distinct on (ticker)
+        ticker,
+        updated_at,
+        source_run_id,
+        final_action,
+        watchlist_tier,
+        watch_priority,
+        actionability_label,
+        actionability_score,
+        suitability_label,
+        suitability_score,
+        trend_state,
+        preferred_entry,
+        stop_loss,
+        take_profit_1,
+        max_hold_date,
+        short_summary,
+        raw_result_json
+    from public.watchlist_snapshots
+    where max_hold_date is null or max_hold_date >= now()
+    order by ticker asc, updated_at desc
 )
 select
     lr.id,
@@ -33,14 +56,14 @@ select
     lr.selected_count,
     lr.rows_logged,
     lr.selection_message,
-    coalesce(sum(case when tr.actionability_label = 'ready_soon' then 1 else 0 end), 0) as ready_soon_count,
-    coalesce(sum(case when tr.actionability_label = 'monitor' then 1 else 0 end), 0) as monitor_count,
-    coalesce(sum(case when tr.actionability_label = 'background' then 1 else 0 end), 0) as background_count,
-    coalesce(sum(case when tr.watchlist_tier = 'primary' then 1 else 0 end), 0) as primary_watchlist_count,
-    coalesce(sum(case when tr.watchlist_tier = 'secondary' then 1 else 0 end), 0) as secondary_watchlist_count
+    coalesce(sum(case when s.actionability_label = 'ready_soon' then 1 else 0 end), 0) as ready_soon_count,
+    coalesce(sum(case when s.actionability_label = 'monitor' then 1 else 0 end), 0) as monitor_count,
+    coalesce(sum(case when s.actionability_label = 'background' then 1 else 0 end), 0) as background_count,
+    coalesce(sum(case when s.watchlist_tier = 'primary' then 1 else 0 end), 0) as primary_watchlist_count,
+    coalesce(sum(case when s.watchlist_tier = 'secondary' then 1 else 0 end), 0) as secondary_watchlist_count
 from latest_run lr
-left join public.scan_ticker_results tr
-    on tr.run_id = lr.id
+left join active_snapshots s
+    on true
 group by
     lr.id,
     lr.created_at,
@@ -75,7 +98,7 @@ limit %(limit)s
 
 
 LATEST_SNAPSHOTS_SQL = """
-select
+select distinct on (ticker)
     ticker,
     updated_at,
     source_run_id,
@@ -94,6 +117,8 @@ select
     short_summary,
     raw_result_json
 from public.watchlist_snapshots
+where max_hold_date is null or max_hold_date >= now()
+order by ticker asc, updated_at desc
 """
 
 
@@ -136,15 +161,12 @@ order by rank asc, ticker asc
 """
 
 
-LATEST_TICKER_RESULT_SQL = """
+LATEST_TICKER_SNAPSHOT_SQL = """
 select
-    created_at,
-    run_id,
+    updated_at,
+    source_run_id,
     ticker,
-    rank,
     final_action,
-    quant_action,
-    llm_action,
     watchlist_tier,
     watch_priority,
     actionability_label,
@@ -156,13 +178,12 @@ select
     stop_loss,
     take_profit_1,
     max_hold_date,
-    chart_execution_view_json,
-    what_to_watch_json,
-    actionability_soon_json,
+    short_summary,
     raw_result_json
-from public.scan_ticker_results
+from public.watchlist_snapshots
 where ticker = %(ticker)s
-order by created_at desc
+  and (max_hold_date is null or max_hold_date >= now())
+order by updated_at desc
 limit 1
 """
 
@@ -199,6 +220,29 @@ limit 1
 
 
 TOP_WATCH_SQL = """
+with active_snapshots as (
+    select distinct on (ticker)
+        ticker,
+        updated_at,
+        source_run_id,
+        final_action,
+        watchlist_tier,
+        watch_priority,
+        actionability_label,
+        actionability_score,
+        suitability_label,
+        suitability_score,
+        trend_state,
+        preferred_entry,
+        stop_loss,
+        take_profit_1,
+        max_hold_date,
+        short_summary,
+        raw_result_json
+    from public.watchlist_snapshots
+    where (max_hold_date is null or max_hold_date >= now())
+    order by ticker asc, updated_at desc
+)
 select
     ticker,
     final_action,
@@ -215,7 +259,7 @@ select
     max_hold_date,
     short_summary,
     raw_result_json
-from public.watchlist_snapshots
+from active_snapshots
 where final_action in ('WAIT', 'BUY')
 order by
     case actionability_label
@@ -283,12 +327,9 @@ def fetch_run_results(run_id: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_latest_ticker_result(ticker: str) -> pd.DataFrame:
-    df = pd.read_sql_query(LATEST_TICKER_RESULT_SQL, get_engine(), params={"ticker": ticker})
-    return _normalize_df_json(
-        df,
-        ["chart_execution_view_json", "what_to_watch_json", "actionability_soon_json", "raw_result_json"],
-    )
+def fetch_latest_ticker_snapshot(ticker: str) -> pd.DataFrame:
+    df = pd.read_sql_query(LATEST_TICKER_SNAPSHOT_SQL, get_engine(), params={"ticker": ticker})
+    return _normalize_df_json(df, ["raw_result_json"])
 
 
 @st.cache_data(ttl=60, show_spinner=False)

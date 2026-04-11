@@ -21,10 +21,9 @@ from components import (
 from queries import (
     fetch_latest_run_summary,
     fetch_latest_snapshots,
-    fetch_latest_ticker_result,
+    fetch_latest_ticker_snapshot,
     fetch_run_history,
     fetch_run_results,
-    fetch_run_ticker_result,
     fetch_top_watch,
 )
 from styles import inject_styles
@@ -42,6 +41,15 @@ st.set_page_config(
     layout="wide",
 )
 inject_styles()
+
+
+def _snapshot_payload(snapshot_row, key: str):
+    if snapshot_row is None:
+        return None
+    raw_payload = snapshot_row.get("raw_result_json") or {}
+    if isinstance(raw_payload, dict):
+        return raw_payload.get(key)
+    return None
 
 
 def _load_dashboard_data():
@@ -160,33 +168,19 @@ else:
             render_top_watch_card(row)
 
 st.markdown("### Selected Ticker")
-st.caption("Use tabs for detail. Debug payloads stay at the back so the trading view stays clean.")
-detail_cols = st.columns([2, 1])
+st.caption("Active ticker detail comes from the latest non-expired snapshot only. Historical per-run results stay in the history section below.")
 available_tickers = filtered_snapshots_df["ticker"].dropna().astype(str).tolist() or sorted_snapshots_df["ticker"].dropna().astype(str).tolist()
 if not available_tickers:
     st.caption("No ticker snapshots available yet.")
 else:
-    selected_ticker = detail_cols[0].selectbox("Ticker", options=available_tickers, index=0)
-    selected_run_label = detail_cols[1].selectbox(
-        "Run Context",
-        options=["Latest snapshot"] + [
-            f"{format_ts(row.created_at)} | {row.workflow_type} | {row.id}"
-            for row in run_history_df.itertuples(index=False)
-        ],
-    )
-
-    selected_run_id = None
-    if selected_run_label != "Latest snapshot":
-        selected_run_id = selected_run_label.split("|")[-1].strip()
-
-    detail_df = (
-        fetch_run_ticker_result(selected_run_id, selected_ticker)
-        if selected_run_id and selected_ticker
-        else fetch_latest_ticker_result(selected_ticker)
-    )
+    selected_ticker = st.selectbox("Ticker", options=available_tickers, index=0)
+    detail_df = fetch_latest_ticker_snapshot(selected_ticker)
     snapshot_detail = sorted_snapshots_df[sorted_snapshots_df["ticker"] == selected_ticker]
     snapshot_row = snapshot_detail.iloc[0] if not snapshot_detail.empty else None
     detail_row = detail_df.iloc[0] if not detail_df.empty else None
+    chart_execution_payload = _snapshot_payload(detail_row, "chart_execution_view")
+    what_to_watch_payload = _snapshot_payload(detail_row, "what_to_watch")
+    actionability_payload = _snapshot_payload(detail_row, "actionability_soon")
 
     if snapshot_row is not None:
         render_badge_row(snapshot_row)
@@ -219,28 +213,28 @@ else:
         if detail_row is None:
             st.caption("No execution data available.")
         else:
-            render_chart_execution_view(detail_row.get("chart_execution_view_json"))
+            render_chart_execution_view(chart_execution_payload)
 
     with watch_tab:
         if detail_row is None:
             st.caption("No watch data available.")
         else:
-            render_what_to_watch(detail_row.get("what_to_watch_json"))
+            render_what_to_watch(what_to_watch_payload)
 
     with actionability_tab:
         if detail_row is None:
             st.caption("No actionability data available.")
         else:
-            render_actionability(detail_row.get("actionability_soon_json"))
+            render_actionability(actionability_payload)
 
     with debug_tab:
         if detail_row is None:
             st.caption("No debug data available.")
         else:
             render_raw_json_block("Raw Result JSON", detail_row.get("raw_result_json"))
-            render_raw_json_block("Raw JSON: Chart Execution View", detail_row.get("chart_execution_view_json"))
-            render_raw_json_block("Raw JSON: What To Watch", detail_row.get("what_to_watch_json"))
-            render_raw_json_block("Raw JSON: Actionability Soon", detail_row.get("actionability_soon_json"))
+            render_raw_json_block("Raw JSON: Chart Execution View", chart_execution_payload)
+            render_raw_json_block("Raw JSON: What To Watch", what_to_watch_payload)
+            render_raw_json_block("Raw JSON: Actionability Soon", actionability_payload)
 
 with st.expander("Scan Run History", expanded=False):
     st.caption("Lower-priority audit trail for recent workflow runs and their selected tickers.")

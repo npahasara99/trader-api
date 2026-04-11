@@ -9,7 +9,7 @@ import uuid
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import MetaData, Table, create_engine, select
+from sqlalchemy import MetaData, Table, create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 
@@ -205,6 +205,10 @@ def upsert_supabase_watchlist_snapshots(session, *, scan_run_id, ranked_rows: li
     rows_by_ticker = {ranked.row.ticker: ranked.row for ranked in ranked_rows}
 
     for ticker, row in rows_by_ticker.items():
+        if getattr(row, "max_hold_date", None) is not None and row.max_hold_date < planned_at:
+            session.execute(delete(table).where(ticker_column == ticker))
+            continue
+
         actionability_label, actionability_score = _extract_actionability(row)
         suitability_label, suitability_score = _extract_suitability(row)
         short_summary = None
@@ -244,6 +248,14 @@ def upsert_supabase_watchlist_snapshots(session, *, scan_run_id, ranked_rows: li
             session.execute(table.update().where(ticker_column == ticker).values(**payload))
         else:
             session.execute(table.insert().values(**payload))
+
+    if "max_hold_date" in _column_names(table):
+        session.execute(
+            delete(table).where(
+                table.c.max_hold_date.is_not(None),
+                table.c.max_hold_date < planned_at,
+            )
+        )
 
 
 def persist_sp100_workflow_to_supabase(
