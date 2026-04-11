@@ -228,6 +228,7 @@ def _render_runner_workflow_result(result: dict) -> None:
     with metric_cols[4]:
         render_kpi_card("Rows Logged", int(result.get("rows_logged") or 0), small=True)
 
+    st.markdown('<div class="runner-result-gap"></div>', unsafe_allow_html=True)
     bucket_cols = st.columns(3)
     with bucket_cols[0]:
         with st.container(border=True):
@@ -249,8 +250,6 @@ def _render_runner_workflow_result(result: dict) -> None:
     rows = result.get("rows") or []
     if rows:
         st.dataframe(format_runner_plan_rows(rows), use_container_width=True, hide_index=True)
-    else:
-        render_runner_note("No detailed row table was returned for this workflow response.")
 
 
 def _render_runner_plan_result(rows: list[dict], *, planned_at: str | None = None, market_regime: str | None = None) -> None:
@@ -263,7 +262,6 @@ def _render_runner_plan_result(rows: list[dict], *, planned_at: str | None = Non
         render_kpi_card("Planned At", format_ts(planned_at), small=True)
 
     if not rows:
-        render_runner_note("No detailed plan rows were returned.")
         return
 
     st.dataframe(format_runner_plan_rows(rows), use_container_width=True, hide_index=True)

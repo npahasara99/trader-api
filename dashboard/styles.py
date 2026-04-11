@@ -178,10 +178,13 @@ def inject_styles() -> None:
             padding: 0.75rem 0.85rem;
             min-height: 108px;
         }
+        .runner-bucket-inner {
+            padding: 0.2rem 0.15rem 0.3rem 0.15rem;
+        }
         .runner-bucket-title {
             color: #cbd5e1;
             font-weight: 700;
-            margin-bottom: 0.55rem;
+            margin-bottom: 0.75rem;
         }
         .runner-bucket-count {
             display: inline-flex;
@@ -238,6 +241,9 @@ def inject_styles() -> None:
             color: #e5e7eb;
             margin: 0.25rem 0 0.95rem 0;
             line-height: 1.45;
+        }
+        .runner-result-gap {
+            height: 0.85rem;
         }
         </style>
         """,

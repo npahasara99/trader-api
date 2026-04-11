@@ -83,11 +83,22 @@ def render_chip_list(values: list[str], *, empty_text: str = "None", variant: st
 
 def render_runner_bucket_panel(title: str, values: list[str], *, empty_text: str = "None") -> None:
     count = len([str(value).strip() for value in values if str(value).strip()])
+    clean_values = [str(value).strip() for value in values if str(value).strip()]
+    if clean_values:
+        content = "".join(f'<span class="ticker-chip">{html.escape(value)}</span>' for value in clean_values)
+        content = f'<div class="ticker-chip-grid">{content}</div>'
+    else:
+        content = f'<div class="runner-empty-note">{html.escape(empty_text)}</div>'
+
     st.markdown(
-        f'<div class="runner-bucket-title">{html.escape(title)} <span class="runner-bucket-count">{count}</span></div>',
+        f"""
+        <div class="runner-bucket-inner">
+            <div class="runner-bucket-title">{html.escape(title)} <span class="runner-bucket-count">{count}</span></div>
+            {content}
+        </div>
+        """,
         unsafe_allow_html=True,
     )
-    render_chip_list(values, empty_text=empty_text)
 
 
 def render_runner_note(text: str) -> None:
