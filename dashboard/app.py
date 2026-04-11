@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from dashboard.components import (
+from components import (
     format_run_history_display,
     format_watchlist_display,
     render_actionability,
@@ -18,7 +18,7 @@ from dashboard.components import (
     render_what_to_watch,
     summary_from_row,
 )
-from dashboard.queries import (
+from queries import (
     fetch_latest_run_summary,
     fetch_latest_snapshots,
     fetch_latest_ticker_result,
@@ -27,8 +27,8 @@ from dashboard.queries import (
     fetch_run_ticker_result,
     fetch_top_watch,
 )
-from dashboard.styles import inject_styles
-from dashboard.utils import (
+from styles import inject_styles
+from utils import (
     filter_watchlist_df,
     format_price,
     format_short_date,

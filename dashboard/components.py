@@ -6,7 +6,10 @@ import html
 
 import streamlit as st
 
-from .utils import first_non_empty, format_price, format_short_date, format_ts, safe_json
+try:
+    from .utils import first_non_empty, format_price, format_short_date, format_ts, safe_json
+except ImportError:
+    from utils import first_non_empty, format_price, format_short_date, format_ts, safe_json
 
 
 def _badge_class(kind: str, value) -> str:

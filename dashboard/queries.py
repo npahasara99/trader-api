@@ -7,7 +7,10 @@ import json
 import pandas as pd
 import streamlit as st
 
-from .db import get_engine
+try:
+    from .db import get_engine
+except ImportError:
+    from db import get_engine
 
 
 LATEST_RUN_SQL = """
