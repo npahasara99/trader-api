@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import streamlit as st
 
+from api_client import (
+    TraderAPIError,
+    api_config_status,
+    run_manual_basket,
+    run_single_stock_workflow,
+    run_sp100_workflow,
+)
 from components import (
     format_run_history_display,
     format_watchlist_display,
@@ -29,9 +36,12 @@ from queries import (
 from styles import inject_styles
 from utils import (
     filter_watchlist_df,
+    first_non_empty,
     format_price,
+    format_runner_plan_rows,
     format_short_date,
     format_ts,
+    parse_ticker_text,
     sort_watchlist_table,
 )
 
@@ -41,6 +51,212 @@ st.set_page_config(
     layout="wide",
 )
 inject_styles()
+
+
+RUNNER_DEFAULTS = {
+    "runner_type": "SP100 Top 10",
+    "single_ticker": "",
+    "single_lookback_days": 30,
+    "single_learning_limit": 200,
+    "single_mode": "manual",
+    "single_llm_provider": "chatgpt-actions",
+    "single_llm_model": "gpt-5",
+    "single_llm_style": "swing_v2_structured",
+    "sp100_top_scan": 100,
+    "sp100_top_plan": 10,
+    "sp100_pre_scan_shortlist": 25,
+    "sp100_lookback_days": 180,
+    "sp100_min_history_samples": 3,
+    "sp100_sector": "",
+    "sp100_industry": "",
+    "sp100_mode": "sp100_auto",
+    "sp100_llm_provider": "chatgpt-actions",
+    "sp100_llm_model": "gpt-5",
+    "sp100_llm_style": "sp100_ranker_v2_structured",
+    "sp100_compact_response": False,
+    "basket_tickers": "",
+    "basket_mode": "manual",
+    "basket_llm_provider": "chatgpt-actions",
+    "basket_llm_model": "gpt-5",
+    "basket_llm_style": "swing_v2_structured",
+}
+
+
+def _init_runner_state() -> None:
+    for key, value in RUNNER_DEFAULTS.items():
+        st.session_state.setdefault(key, value)
+    st.session_state.setdefault("runner_last_result", None)
+    st.session_state.setdefault("runner_last_error", None)
+
+
+def _apply_runner_preset(preset: str) -> None:
+    mapping = {
+        "sp100_default": {
+            "runner_type": "SP100 Top 10",
+            "sp100_sector": "",
+            "sp100_industry": "",
+            "sp100_top_scan": 100,
+            "sp100_top_plan": 10,
+            "sp100_pre_scan_shortlist": 25,
+        },
+        "sp100_tech": {
+            "runner_type": "SP100 Sector / Industry",
+            "sp100_sector": "tech",
+            "sp100_industry": "",
+            "sp100_top_scan": 100,
+            "sp100_top_plan": 10,
+            "sp100_pre_scan_shortlist": 25,
+        },
+        "sp100_semis": {
+            "runner_type": "SP100 Sector / Industry",
+            "sp100_sector": "",
+            "sp100_industry": "semiconductors",
+            "sp100_top_scan": 100,
+            "sp100_top_plan": 10,
+            "sp100_pre_scan_shortlist": 25,
+        },
+        "sp100_energy": {
+            "runner_type": "SP100 Sector / Industry",
+            "sp100_sector": "energy",
+            "sp100_industry": "",
+            "sp100_top_scan": 100,
+            "sp100_top_plan": 10,
+            "sp100_pre_scan_shortlist": 25,
+        },
+        "single_stock": {
+            "runner_type": "Single Stock",
+        },
+        "manual_basket": {
+            "runner_type": "Manual Basket",
+        },
+    }
+    for key, value in mapping.get(preset, {}).items():
+        st.session_state[key] = value
+
+
+def _runner_row_summary(row: dict) -> str:
+    return first_non_empty(
+        ((row.get("what_to_watch") or {}).get("watch_summary_short")),
+        ((row.get("actionability_soon") or {}).get("actionability_summary")),
+        row.get("watchlist_summary"),
+        ((row.get("chart_execution_view") or {}).get("chart_execution_summary")),
+    ) or "No short summary available."
+
+
+def _runner_badge_row(row: dict) -> dict:
+    return {
+        **row,
+        "actionability_label": ((row.get("actionability_soon") or {}).get("actionability_label")),
+        "suitability_label": ((row.get("swing_trade_suitability") or {}).get("suitability_label")),
+    }
+
+
+def _refresh_dashboard_data() -> None:
+    st.cache_data.clear()
+    st.rerun()
+
+
+def _store_runner_result(run_type: str, response: dict, *, title: str) -> None:
+    st.session_state["runner_last_result"] = {
+        "run_type": run_type,
+        "title": title,
+        "response": response,
+    }
+    st.session_state["runner_last_error"] = None
+    st.cache_data.clear()
+    st.rerun()
+
+
+def _render_runner_workflow_result(result: dict) -> None:
+    metric_cols = st.columns(5)
+    with metric_cols[0]:
+        render_kpi_card("Market Regime", result.get("market_regime") or "-")
+    with metric_cols[1]:
+        render_kpi_card("Pre-Scanned", int(result.get("pre_scanned_count") or 0), small=True)
+    with metric_cols[2]:
+        render_kpi_card("Shortlist", int(result.get("pre_scan_shortlist_count") or 0), small=True)
+    with metric_cols[3]:
+        render_kpi_card("Selected", int(result.get("selected_count") or 0), small=True)
+    with metric_cols[4]:
+        render_kpi_card("Rows Logged", int(result.get("rows_logged") or 0), small=True)
+
+    bucket_cols = st.columns(3)
+    with bucket_cols[0]:
+        st.markdown("**Best Immediate**")
+        st.caption(", ".join(result.get("best_immediate_tickers") or []) or "None")
+    with bucket_cols[1]:
+        st.markdown("**Best Watchlist**")
+        st.caption(", ".join(result.get("best_watchlist_tickers") or []) or "None")
+    with bucket_cols[2]:
+        st.markdown("**Rejected / Low Priority**")
+        st.caption(", ".join(result.get("rejected_or_low_priority_tickers") or []) or "None")
+
+    st.markdown("**Selected Tickers**")
+    st.caption(", ".join(result.get("selected_tickers") or []) or "None")
+
+    rows = result.get("rows") or []
+    if rows:
+        st.dataframe(format_runner_plan_rows(rows), use_container_width=True, hide_index=True)
+
+
+def _render_runner_plan_result(rows: list[dict], *, planned_at: str | None = None, market_regime: str | None = None) -> None:
+    summary_cols = st.columns(3)
+    with summary_cols[0]:
+        render_kpi_card("Rows", len(rows), small=True)
+    with summary_cols[1]:
+        render_kpi_card("Market Regime", market_regime or "-", small=True)
+    with summary_cols[2]:
+        render_kpi_card("Planned At", format_ts(planned_at), small=True)
+
+    if not rows:
+        st.caption("No rows were returned.")
+        return
+
+    st.dataframe(format_runner_plan_rows(rows), use_container_width=True, hide_index=True)
+
+    detail_ticker = st.selectbox(
+        "Result Detail",
+        options=[str((row or {}).get("ticker") or "-") for row in rows],
+        key=f"runner_detail_{planned_at or 'rows'}",
+    )
+    detail_row = next((row for row in rows if str(row.get("ticker")) == detail_ticker), rows[0])
+    render_badge_row(_runner_badge_row(detail_row))
+    st.caption(_runner_row_summary(detail_row))
+
+    overview_tab, execution_tab, watch_tab, actionability_tab, debug_tab = st.tabs(
+        ["Overview", "Execution", "What to Watch", "Actionability", "Debug"]
+    )
+
+    with overview_tab:
+        render_key_value_grid(
+            [
+                ("Final Action", detail_row.get("final_action") or "-"),
+                ("Watchlist Tier", detail_row.get("watchlist_tier") or "-"),
+                ("Actionability", ((detail_row.get("actionability_soon") or {}).get("actionability_label")) or "-"),
+                ("Suitability", ((detail_row.get("swing_trade_suitability") or {}).get("suitability_label")) or "-"),
+                ("Trend State", detail_row.get("trend_state") or "-"),
+                ("Preferred Entry", format_price(detail_row.get("preferred_entry"))),
+                ("Stop Loss", format_price(detail_row.get("stop_loss"))),
+                ("Take Profit 1", format_price(detail_row.get("take_profit_1"))),
+                ("Max Hold Date", format_short_date(detail_row.get("max_hold_date"))),
+            ],
+            columns=3,
+        )
+
+    with execution_tab:
+        render_chart_execution_view(detail_row.get("chart_execution_view"))
+
+    with watch_tab:
+        render_what_to_watch(detail_row.get("what_to_watch"))
+
+    with actionability_tab:
+        render_actionability(detail_row.get("actionability_soon"))
+
+    with debug_tab:
+        render_raw_json_block("Raw Row JSON", detail_row)
+        render_raw_json_block("Raw JSON: Chart Execution View", detail_row.get("chart_execution_view"))
+        render_raw_json_block("Raw JSON: What To Watch", detail_row.get("what_to_watch"))
+        render_raw_json_block("Raw JSON: Actionability Soon", detail_row.get("actionability_soon"))
 
 
 def _snapshot_payload(snapshot_row, key: str):
@@ -60,6 +276,9 @@ def _load_dashboard_data():
     return latest_run, snapshots, run_history, top_watch
 
 
+_init_runner_state()
+
+
 try:
     latest_run_df, snapshots_df, run_history_df, top_watch_df = _load_dashboard_data()
 except Exception as exc:
@@ -68,11 +287,7 @@ except Exception as exc:
         st.code(str(exc))
     st.stop()
 
-if latest_run_df.empty:
-    st.warning("No scan runs have been written to the reporting database yet.")
-    st.stop()
-
-latest_run = latest_run_df.iloc[0]
+latest_run = latest_run_df.iloc[0] if not latest_run_df.empty else {}
 sorted_snapshots_df = sort_watchlist_table(snapshots_df)
 latest_data_ts = None if sorted_snapshots_df.empty else format_ts(sorted_snapshots_df["updated_at"].max())
 
@@ -81,11 +296,206 @@ render_header(
     latest_data_ts=latest_data_ts,
 )
 
-active_tab, history_tab = st.tabs(["Active Dashboard", "History"])
+scanner_tab, active_tab, history_tab = st.tabs(["Run Scanner", "Active Dashboard", "History"])
+
+with scanner_tab:
+    st.markdown("### Scanner / Runner")
+    st.caption("Run supported trader API workflows from the dashboard. The API remains the source of truth, and Supabase-backed dashboard views refresh after successful runs.")
+
+    api_status = api_config_status()
+    if not api_status.get("base_url"):
+        st.warning("TRADER_API_BASE_URL is not configured yet. You can still use the viewer, but API runs from this tab will fail until that environment variable is set.")
+    status_cols = st.columns([3, 1, 1])
+    with status_cols[0]:
+        st.caption(f"API Base URL: {api_status.get('base_url') or 'Not configured'}")
+    with status_cols[1]:
+        render_kpi_card("Auth Token", "Configured" if api_status.get("has_bearer_token") else "Missing", small=True)
+    with status_cols[2]:
+        if st.button("Refresh Dashboard Data", key="runner_refresh_button", use_container_width=True):
+            _refresh_dashboard_data()
+
+    preset_cols = st.columns(5)
+    if preset_cols[0].button("SP100 Top 10", use_container_width=True):
+        _apply_runner_preset("sp100_default")
+        st.rerun()
+    if preset_cols[1].button("SP100 Tech", use_container_width=True):
+        _apply_runner_preset("sp100_tech")
+        st.rerun()
+    if preset_cols[2].button("SP100 Semis", use_container_width=True):
+        _apply_runner_preset("sp100_semis")
+        st.rerun()
+    if preset_cols[3].button("SP100 Energy", use_container_width=True):
+        _apply_runner_preset("sp100_energy")
+        st.rerun()
+    if preset_cols[4].button("Manual Basket", use_container_width=True):
+        _apply_runner_preset("manual_basket")
+        st.rerun()
+
+    control_col, result_col = st.columns([1.05, 1.35], gap="large")
+    with control_col:
+        st.session_state["runner_type"] = st.selectbox(
+            "Run Type",
+            options=["Single Stock", "SP100 Top 10", "SP100 Sector / Industry", "Manual Basket"],
+            index=["Single Stock", "SP100 Top 10", "SP100 Sector / Industry", "Manual Basket"].index(st.session_state["runner_type"]),
+        )
+
+        run_type = st.session_state["runner_type"]
+        if run_type == "Single Stock":
+            with st.form("single_stock_runner_form", clear_on_submit=False):
+                st.text_input("Ticker", key="single_ticker", placeholder="AAPL")
+                form_cols = st.columns(2)
+                form_cols[0].number_input("Lookback Days", min_value=7, max_value=720, key="single_lookback_days")
+                form_cols[1].number_input("Learning Limit", min_value=20, max_value=500, key="single_learning_limit")
+                st.text_input("Mode", key="single_mode")
+                llm_cols = st.columns(3)
+                llm_cols[0].text_input("LLM Provider", key="single_llm_provider")
+                llm_cols[1].text_input("LLM Model", key="single_llm_model")
+                llm_cols[2].text_input("LLM Style", key="single_llm_style")
+                single_submit = st.form_submit_button("Run Single Stock Workflow", use_container_width=True)
+
+            if single_submit:
+                try:
+                    ticker = (st.session_state.get("single_ticker") or "").strip().upper()
+                    if not ticker:
+                        raise TraderAPIError("Enter a ticker before running the single-stock workflow.")
+                    payload = {
+                        "ticker": ticker,
+                        "lookback_days": int(st.session_state["single_lookback_days"]),
+                        "learning_limit": int(st.session_state["single_learning_limit"]),
+                        "mode": st.session_state["single_mode"],
+                        "llm_provider": st.session_state["single_llm_provider"],
+                        "llm_model": st.session_state["single_llm_model"],
+                        "llm_style": st.session_state["single_llm_style"],
+                    }
+                    response = run_single_stock_workflow(payload)
+                    _store_runner_result("single_stock", response, title=f"Single Stock: {ticker}")
+                except TraderAPIError as exc:
+                    st.session_state["runner_last_error"] = str(exc)
+
+        elif run_type in {"SP100 Top 10", "SP100 Sector / Industry"}:
+            with st.form("sp100_runner_form", clear_on_submit=False):
+                scan_cols = st.columns(3)
+                scan_cols[0].number_input("Top Scan", min_value=10, max_value=100, key="sp100_top_scan")
+                scan_cols[1].number_input("Top Plan", min_value=1, max_value=20, key="sp100_top_plan")
+                scan_cols[2].number_input("Pre-Scan Shortlist", min_value=1, max_value=60, key="sp100_pre_scan_shortlist")
+                analysis_cols = st.columns(2)
+                analysis_cols[0].number_input("Lookback Days", min_value=30, max_value=720, key="sp100_lookback_days")
+                analysis_cols[1].number_input("Min History Samples", min_value=1, max_value=20, key="sp100_min_history_samples")
+                if run_type == "SP100 Sector / Industry":
+                    scope_cols = st.columns(2)
+                    scope_cols[0].text_input("Sector", key="sp100_sector", placeholder="tech")
+                    scope_cols[1].text_input("Industry", key="sp100_industry", placeholder="semiconductors")
+                else:
+                    st.session_state["sp100_sector"] = ""
+                    st.session_state["sp100_industry"] = ""
+                llm_cols = st.columns(4)
+                llm_cols[0].text_input("Mode", key="sp100_mode")
+                llm_cols[1].text_input("LLM Provider", key="sp100_llm_provider")
+                llm_cols[2].text_input("LLM Model", key="sp100_llm_model")
+                llm_cols[3].text_input("LLM Style", key="sp100_llm_style")
+                st.checkbox("Compact Response", key="sp100_compact_response")
+                sp100_submit = st.form_submit_button("Run SP100 Workflow", use_container_width=True)
+
+            if sp100_submit:
+                try:
+                    payload = {
+                        "top_scan": int(st.session_state["sp100_top_scan"]),
+                        "top_plan": int(st.session_state["sp100_top_plan"]),
+                        "pre_scan_shortlist": int(st.session_state["sp100_pre_scan_shortlist"]),
+                        "lookback_days": int(st.session_state["sp100_lookback_days"]),
+                        "min_history_samples": int(st.session_state["sp100_min_history_samples"]),
+                        "sector": (st.session_state.get("sp100_sector") or "").strip() or None,
+                        "industry": (st.session_state.get("sp100_industry") or "").strip() or None,
+                        "mode": st.session_state["sp100_mode"],
+                        "llm_provider": st.session_state["sp100_llm_provider"],
+                        "llm_model": st.session_state["sp100_llm_model"],
+                        "llm_style": st.session_state["sp100_llm_style"],
+                        "compact_response": bool(st.session_state["sp100_compact_response"]),
+                    }
+                    response = run_sp100_workflow(payload)
+                    title = "SP100 Workflow"
+                    if payload.get("industry"):
+                        title = f"SP100 {payload['industry'].title()}"
+                    elif payload.get("sector"):
+                        title = f"SP100 {payload['sector'].title()}"
+                    _store_runner_result("sp100_workflow", response, title=title)
+                except TraderAPIError as exc:
+                    st.session_state["runner_last_error"] = str(exc)
+
+        elif run_type == "Manual Basket":
+            with st.form("manual_basket_runner_form", clear_on_submit=False):
+                st.text_area("Tickers", key="basket_tickers", placeholder="AAPL, MSFT, NVDA")
+                st.text_input("Mode", key="basket_mode")
+                llm_cols = st.columns(3)
+                llm_cols[0].text_input("LLM Provider", key="basket_llm_provider")
+                llm_cols[1].text_input("LLM Model", key="basket_llm_model")
+                llm_cols[2].text_input("LLM Style", key="basket_llm_style")
+                basket_submit = st.form_submit_button("Run Manual Basket", use_container_width=True)
+
+            if basket_submit:
+                try:
+                    tickers = parse_ticker_text(st.session_state.get("basket_tickers", ""))
+                    if not tickers:
+                        raise TraderAPIError("Enter at least one ticker for the manual basket run.")
+                    payload = {
+                        "tickers": tickers,
+                        "mode": st.session_state["basket_mode"],
+                        "llm_used": True,
+                        "llm_provider": st.session_state["basket_llm_provider"],
+                        "llm_model": st.session_state["basket_llm_model"],
+                        "llm_style": st.session_state["basket_llm_style"],
+                    }
+                    response = run_manual_basket(payload)
+                    _store_runner_result("manual_basket", response, title=f"Manual Basket: {', '.join(tickers)}")
+                except TraderAPIError as exc:
+                    st.session_state["runner_last_error"] = str(exc)
+
+        st.info("SP500 is not shown here because the current backend does not expose a supported SP500 workflow route.")
+
+    with result_col:
+        st.markdown("### Latest Runner Result")
+        runner_error = st.session_state.get("runner_last_error")
+        if runner_error:
+            st.error(runner_error)
+
+        last_result = st.session_state.get("runner_last_result")
+        if not last_result:
+            st.caption("Run a workflow from the left panel to see the API response here.")
+        else:
+            st.markdown(f"**{last_result.get('title') or 'Run Result'}**")
+            response = last_result.get("response") or {}
+            if last_result.get("run_type") == "sp100_workflow":
+                if response.get("selection_message"):
+                    st.caption(response.get("selection_message"))
+                _render_runner_workflow_result(response)
+            elif last_result.get("run_type") == "single_stock":
+                row = response.get("row")
+                _render_runner_plan_result(
+                    [row] if isinstance(row, dict) else [],
+                    planned_at=response.get("planned_at"),
+                    market_regime=response.get("market_regime"),
+                )
+                info_cols = st.columns(3)
+                with info_cols[0]:
+                    render_kpi_card("Ticker", response.get("ticker") or "-", small=True)
+                with info_cols[1]:
+                    render_kpi_card("Rows Logged", int(response.get("rows_logged") or 0), small=True)
+                with info_cols[2]:
+                    render_kpi_card("Learning Samples", int(response.get("learning_samples") or 0), small=True)
+                if response.get("logging_skipped_reason"):
+                    st.caption(response.get("logging_skipped_reason"))
+            elif last_result.get("run_type") == "manual_basket":
+                _render_runner_plan_result(
+                    response.get("rows") or [],
+                    planned_at=response.get("planned_at"),
+                    market_regime=response.get("market_regime"),
+                )
 
 with active_tab:
     st.markdown("### Overview")
     st.caption("Current-state metrics are driven only by non-expired rows in watchlist snapshots.")
+    if latest_run_df.empty:
+        st.info("No historical scan runs are stored yet. You can still use the Scanner tab to run workflows and populate the dashboard.")
     primary_metrics = st.columns(5)
     with primary_metrics[0]:
         render_kpi_card("Market Regime", str(latest_run.get("market_regime") or "-"))
@@ -243,6 +653,8 @@ with active_tab:
 with history_tab:
     st.markdown("### History")
     st.caption("Past runs and archived per-run selections remain available here. This section reads from scan_runs and scan_ticker_results.")
+    if run_history_df.empty:
+        st.info("No historical workflow runs have been written to the reporting tables yet.")
     st.dataframe(
         format_run_history_display(
             run_history_df[

@@ -97,3 +97,69 @@ def first_non_empty(*values):
             return value
     return None
 
+
+def parse_ticker_text(raw: str) -> list[str]:
+    if not raw:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for part in raw.replace("\n", ",").split(","):
+        ticker = part.strip().upper()
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        out.append(ticker)
+    return out
+
+
+def format_runner_plan_rows(rows: list[dict]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    keep = [
+        "ticker",
+        "final_action",
+        "watchlist_tier",
+        "watch_priority",
+        "actionability_soon",
+        "swing_trade_suitability",
+        "trend_state",
+        "preferred_entry",
+        "stop_loss",
+        "take_profit_1",
+        "max_hold_date",
+    ]
+    available = [column for column in keep if column in df.columns]
+    out = df[available].copy()
+    if "actionability_soon" in out.columns:
+        out["actionability_label"] = out["actionability_soon"].apply(
+            lambda value: (value or {}).get("actionability_label") if isinstance(value, dict) else None
+        )
+        out = out.drop(columns=["actionability_soon"])
+    if "swing_trade_suitability" in out.columns:
+        out["suitability_label"] = out["swing_trade_suitability"].apply(
+            lambda value: (value or {}).get("suitability_label") if isinstance(value, dict) else None
+        )
+        out = out.drop(columns=["swing_trade_suitability"])
+    ordered_columns = [
+        "ticker",
+        "final_action",
+        "watchlist_tier",
+        "watch_priority",
+        "actionability_label",
+        "suitability_label",
+        "trend_state",
+        "preferred_entry",
+        "stop_loss",
+        "take_profit_1",
+        "max_hold_date",
+    ]
+    ordered_columns = [column for column in ordered_columns if column in out.columns]
+    out = out[ordered_columns]
+    for column in ["preferred_entry", "stop_loss", "take_profit_1"]:
+        if column in out.columns:
+            out[column] = out[column].apply(format_price)
+    if "max_hold_date" in out.columns:
+        out["max_hold_date"] = out["max_hold_date"].apply(format_short_date)
+    return out
+
