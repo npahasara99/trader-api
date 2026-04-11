@@ -35,7 +35,7 @@ Then open the local Streamlit URL shown in the terminal.
 From the repo root you can also use:
 
 - [Launch Dashboard.bat](C:/Users/nadun/OneDrive/Documents/Stock%20Simulator/trader-api/Launch%20Dashboard.bat)
-  - double-click to start the dashboard with a visible console window
+  - double-click to start the dashboard with a visible console window and wait for the local server before opening the browser
 - [Launch Dashboard.vbs](C:/Users/nadun/OneDrive/Documents/Stock%20Simulator/trader-api/Launch%20Dashboard.vbs)
   - double-click to start it without keeping the console window in front
 
@@ -50,6 +50,7 @@ SUPABASE_DATABASE_URL=postgresql://...
 ```
 
 Use the same Supabase reporting connection string that the API uses for reporting writes.
+For local use, the dashboard will also read `SUPABASE_DATABASE_URL` from the repo-level `.env` file if it is present there.
 
 ## Deploy
 

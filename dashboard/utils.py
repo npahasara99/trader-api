@@ -71,6 +71,17 @@ def format_ts(value) -> str:
     return str(value)
 
 
+def format_short_date(value) -> str:
+    if value is None or value == "":
+        return "-"
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+    text = str(value)
+    return text[:10] if len(text) >= 10 else text
+
+
 def format_price(value) -> str:
     if value is None or value == "":
         return "-"
