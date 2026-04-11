@@ -75,6 +75,7 @@ group by
     lr.pre_scan_shortlist,
     lr.pre_scanned_count,
     lr.pre_scan_shortlist_count,
+    lr.selected_count,
     lr.rows_logged,
     lr.selection_message
 """
