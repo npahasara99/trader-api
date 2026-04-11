@@ -160,6 +160,50 @@ def _refresh_dashboard_data() -> None:
     st.rerun()
 
 
+def _workflow_conclusion(result: dict) -> str:
+    selection_message = (result.get("selection_message") or "").strip()
+    if selection_message:
+        return selection_message
+
+    regime = str(result.get("market_regime") or "neutral")
+    immediate = result.get("best_immediate_tickers") or []
+    watchlist = result.get("best_watchlist_tickers") or []
+    rejected = result.get("rejected_or_low_priority_tickers") or []
+    selected = int(result.get("selected_count") or 0)
+
+    if selected == 0:
+        return f"{regime.title()} regime with no selected names from this run."
+    if not immediate and watchlist:
+        return f"{regime.title()} regime with no immediate setups; focus on the best watchlist names."
+    if immediate and not watchlist:
+        return f"{regime.title()} regime with immediate setups leading this run."
+    if immediate and watchlist:
+        return f"{regime.title()} regime with both immediate and watchlist names in play."
+    if rejected and not watchlist and not immediate:
+        return f"{regime.title()} regime with low-priority output and no clear active setups."
+    return f"{regime.title()} regime with mostly WAIT-style output from this run."
+
+
+def _runner_result_conclusion(run_type: str, response: dict) -> str:
+    if run_type == "sp100_workflow":
+        return _workflow_conclusion(response)
+
+    rows = response.get("rows") or ([response.get("row")] if isinstance(response.get("row"), dict) else [])
+    if not rows:
+        return "No detailed rows were returned for this run."
+
+    buy_count = sum(1 for row in rows if (row or {}).get("final_action") == "BUY")
+    wait_count = sum(1 for row in rows if (row or {}).get("final_action") == "WAIT")
+    top_row = rows[0]
+    top_summary = _runner_row_summary(top_row)
+
+    if buy_count:
+        return f"This run returned {buy_count} BUY-ready setup{'s' if buy_count != 1 else ''}. {top_summary}"
+    if wait_count:
+        return f"This run produced mostly WAIT setups. {top_summary}"
+    return top_summary
+
+
 def _store_runner_result(run_type: str, response: dict, *, title: str) -> None:
     st.session_state["runner_last_result"] = {
         "run_type": run_type,
@@ -200,7 +244,7 @@ def _render_runner_workflow_result(result: dict) -> None:
             )
 
     st.markdown("**Selected Tickers**")
-    render_chip_list(result.get("selected_tickers") or [], empty_text="No selected tickers")
+    render_chip_list(result.get("selected_tickers") or [], empty_text="No selected tickers", variant="muted")
 
     rows = result.get("rows") or []
     if rows:
@@ -491,11 +535,15 @@ with scanner_tab:
             if not last_result:
                 render_runner_note("Run a workflow from the left panel to see the API response here.")
             else:
+                workflow_label = str(last_result.get("run_type") or "run").replace("_", " ").title()
                 st.markdown(f"**{last_result.get('title') or 'Run Result'}**")
+                st.caption(workflow_label)
                 response = last_result.get("response") or {}
+                st.markdown(
+                    f'<div class="runner-conclusion">{_runner_result_conclusion(last_result.get("run_type") or "", response)}</div>',
+                    unsafe_allow_html=True,
+                )
                 if last_result.get("run_type") == "sp100_workflow":
-                    if response.get("selection_message"):
-                        st.caption(response.get("selection_message"))
                     _render_runner_workflow_result(response)
                 elif last_result.get("run_type") == "single_stock":
                     row = response.get("row")

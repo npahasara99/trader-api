@@ -71,18 +71,20 @@ def render_status_bar(items: list[tuple[str, object]]) -> None:
     st.markdown(f'<div class="runner-status-bar">{"".join(parts)}</div>', unsafe_allow_html=True)
 
 
-def render_chip_list(values: list[str], *, empty_text: str = "None") -> None:
+def render_chip_list(values: list[str], *, empty_text: str = "None", variant: str = "default") -> None:
     clean_values = [str(value).strip() for value in values if str(value).strip()]
     if not clean_values:
         st.markdown(f'<div class="runner-empty-note">{html.escape(empty_text)}</div>', unsafe_allow_html=True)
         return
-    chips = "".join(f'<span class="ticker-chip">{html.escape(value)}</span>' for value in clean_values)
+    css_class = "ticker-chip muted" if variant == "muted" else "ticker-chip"
+    chips = "".join(f'<span class="{css_class}">{html.escape(value)}</span>' for value in clean_values)
     st.markdown(f'<div class="ticker-chip-grid">{chips}</div>', unsafe_allow_html=True)
 
 
 def render_runner_bucket_panel(title: str, values: list[str], *, empty_text: str = "None") -> None:
+    count = len([str(value).strip() for value in values if str(value).strip()])
     st.markdown(
-        f'<div class="runner-bucket-title">{html.escape(title)}</div>',
+        f'<div class="runner-bucket-title">{html.escape(title)} <span class="runner-bucket-count">{count}</span></div>',
         unsafe_allow_html=True,
     )
     render_chip_list(values, empty_text=empty_text)

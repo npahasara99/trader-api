@@ -183,6 +183,21 @@ def inject_styles() -> None:
             font-weight: 700;
             margin-bottom: 0.55rem;
         }
+        .runner-bucket-count {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 1.35rem;
+            height: 1.35rem;
+            padding: 0 0.38rem;
+            margin-left: 0.35rem;
+            border-radius: 999px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            color: #cbd5e1;
+            background: rgba(148, 163, 184, 0.14);
+            border: 1px solid rgba(148, 163, 184, 0.22);
+        }
         .ticker-chip-grid {
             display: flex;
             flex-wrap: wrap;
@@ -199,6 +214,13 @@ def inject_styles() -> None:
             background: rgba(59, 130, 246, 0.14);
             border: 1px solid rgba(59, 130, 246, 0.25);
         }
+        .ticker-chip.muted {
+            color: #cbd5e1;
+            background: rgba(71, 85, 105, 0.16);
+            border: 1px solid rgba(71, 85, 105, 0.26);
+            font-size: 0.72rem;
+            padding: 0.24rem 0.62rem;
+        }
         .runner-empty-note {
             color: #94a3b8;
             font-size: 0.88rem;
@@ -211,6 +233,11 @@ def inject_styles() -> None:
         .runner-result-subtitle {
             color: #94a3b8;
             margin-bottom: 0.85rem;
+        }
+        .runner-conclusion {
+            color: #e5e7eb;
+            margin: 0.25rem 0 0.95rem 0;
+            line-height: 1.45;
         }
         </style>
         """,
