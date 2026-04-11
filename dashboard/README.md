@@ -30,6 +30,17 @@ streamlit run dashboard/app.py
 
 Then open the local Streamlit URL shown in the terminal.
 
+## Windows double-click launch
+
+From the repo root you can also use:
+
+- [Launch Dashboard.bat](C:/Users/nadun/OneDrive/Documents/Stock%20Simulator/trader-api/Launch%20Dashboard.bat)
+  - double-click to start the dashboard with a visible console window
+- [Launch Dashboard.vbs](C:/Users/nadun/OneDrive/Documents/Stock%20Simulator/trader-api/Launch%20Dashboard.vbs)
+  - double-click to start it without keeping the console window in front
+
+Both launchers expect Python and the dashboard requirements to already be installed.
+
 ## Local env setup
 
 Set:
