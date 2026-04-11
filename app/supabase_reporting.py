@@ -197,10 +197,14 @@ def save_supabase_ticker_results(session, *, scan_run_id, ranked_rows: list, cre
 
 def upsert_supabase_watchlist_snapshots(session, *, scan_run_id, ranked_rows: list, planned_at) -> None:
     components = _get_supabase_components()
-    if not components or not ranked_rows:
+    if not components:
         return
 
     table = components["watchlist_snapshots"]
+    if not ranked_rows:
+        _prune_expired_watchlist_snapshots(session, table=table, planned_at=planned_at)
+        return
+
     ticker_column = table.c.ticker
     rows_by_ticker = {ranked.row.ticker: ranked.row for ranked in ranked_rows}
 
@@ -249,13 +253,18 @@ def upsert_supabase_watchlist_snapshots(session, *, scan_run_id, ranked_rows: li
         else:
             session.execute(table.insert().values(**payload))
 
-    if "max_hold_date" in _column_names(table):
-        session.execute(
-            delete(table).where(
-                table.c.max_hold_date.is_not(None),
-                table.c.max_hold_date < planned_at,
-            )
+    _prune_expired_watchlist_snapshots(session, table=table, planned_at=planned_at)
+
+
+def _prune_expired_watchlist_snapshots(session, *, table: Table, planned_at) -> None:
+    if "max_hold_date" not in _column_names(table):
+        return
+    session.execute(
+        delete(table).where(
+            table.c.max_hold_date.is_not(None),
+            table.c.max_hold_date < planned_at,
         )
+    )
 
 
 def persist_sp100_workflow_to_supabase(

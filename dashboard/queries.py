@@ -53,7 +53,8 @@ select
     lr.pre_scan_shortlist,
     lr.pre_scanned_count,
     lr.pre_scan_shortlist_count,
-    lr.selected_count,
+    count(s.ticker) as selected_count,
+    lr.selected_count as latest_run_selected_count,
     lr.rows_logged,
     lr.selection_message,
     coalesce(sum(case when s.actionability_label = 'ready_soon' then 1 else 0 end), 0) as ready_soon_count,
@@ -74,7 +75,6 @@ group by
     lr.pre_scan_shortlist,
     lr.pre_scanned_count,
     lr.pre_scan_shortlist_count,
-    lr.selected_count,
     lr.rows_logged,
     lr.selection_message
 """
@@ -184,37 +184,6 @@ from public.watchlist_snapshots
 where ticker = %(ticker)s
   and (max_hold_date is null or max_hold_date >= now())
 order by updated_at desc
-limit 1
-"""
-
-
-RUN_TICKER_RESULT_SQL = """
-select
-    created_at,
-    run_id,
-    ticker,
-    rank,
-    final_action,
-    quant_action,
-    llm_action,
-    watchlist_tier,
-    watch_priority,
-    actionability_label,
-    actionability_score,
-    suitability_label,
-    suitability_score,
-    trend_state,
-    preferred_entry,
-    stop_loss,
-    take_profit_1,
-    max_hold_date,
-    chart_execution_view_json,
-    what_to_watch_json,
-    actionability_soon_json,
-    raw_result_json
-from public.scan_ticker_results
-where run_id = %(run_id)s and ticker = %(ticker)s
-order by created_at desc
 limit 1
 """
 
@@ -330,15 +299,6 @@ def fetch_run_results(run_id: str) -> pd.DataFrame:
 def fetch_latest_ticker_snapshot(ticker: str) -> pd.DataFrame:
     df = pd.read_sql_query(LATEST_TICKER_SNAPSHOT_SQL, get_engine(), params={"ticker": ticker})
     return _normalize_df_json(df, ["raw_result_json"])
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_run_ticker_result(run_id: str, ticker: str) -> pd.DataFrame:
-    df = pd.read_sql_query(RUN_TICKER_RESULT_SQL, get_engine(), params={"run_id": run_id, "ticker": ticker})
-    return _normalize_df_json(
-        df,
-        ["chart_execution_view_json", "what_to_watch_json", "actionability_soon_json", "raw_result_json"],
-    )
 
 
 @st.cache_data(ttl=60, show_spinner=False)
