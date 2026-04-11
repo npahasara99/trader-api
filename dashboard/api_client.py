@@ -87,6 +87,11 @@ def post_json(path: str, payload: dict[str, Any], *, timeout: int = 180) -> dict
     if not response.ok:
         detail = data.get("detail") if isinstance(data, dict) else data
         message = f"Trader API returned HTTP {response.status_code} for {path}."
+        if response.status_code in {404, 405}:
+            message = (
+                f"{message} This usually means TRADER_API_BASE_URL is pointing at the wrong service "
+                f"(for example the Streamlit dashboard domain instead of the FastAPI API base URL)."
+            )
         if detail:
             message = f"{message} {detail}"
         raise TraderAPIError(message, status_code=response.status_code, detail=detail)
