@@ -61,6 +61,37 @@ def render_kpi_card(label: str, value, *, small: bool = False) -> None:
     )
 
 
+def render_status_bar(items: list[tuple[str, object]]) -> None:
+    parts = []
+    for label, value in items:
+        parts.append(
+            f'<div class="runner-status-item"><span class="runner-status-label">{html.escape(str(label))}</span>'
+            f'<span class="runner-status-value">{html.escape(str(value if value not in (None, "") else "-"))}</span></div>'
+        )
+    st.markdown(f'<div class="runner-status-bar">{"".join(parts)}</div>', unsafe_allow_html=True)
+
+
+def render_chip_list(values: list[str], *, empty_text: str = "None") -> None:
+    clean_values = [str(value).strip() for value in values if str(value).strip()]
+    if not clean_values:
+        st.markdown(f'<div class="runner-empty-note">{html.escape(empty_text)}</div>', unsafe_allow_html=True)
+        return
+    chips = "".join(f'<span class="ticker-chip">{html.escape(value)}</span>' for value in clean_values)
+    st.markdown(f'<div class="ticker-chip-grid">{chips}</div>', unsafe_allow_html=True)
+
+
+def render_runner_bucket_panel(title: str, values: list[str], *, empty_text: str = "None") -> None:
+    st.markdown(
+        f'<div class="runner-bucket-title">{html.escape(title)}</div>',
+        unsafe_allow_html=True,
+    )
+    render_chip_list(values, empty_text=empty_text)
+
+
+def render_runner_note(text: str) -> None:
+    st.markdown(f'<div class="runner-empty-note">{html.escape(text)}</div>', unsafe_allow_html=True)
+
+
 def summary_from_row(row) -> str:
     raw = safe_json(row.get("raw_result_json"))
     what_to_watch = (raw or {}).get("what_to_watch") or {}

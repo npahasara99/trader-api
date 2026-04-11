@@ -124,6 +124,94 @@ def inject_styles() -> None:
             margin: 0.75rem 0 0.25rem 0;
             border-top: 1px solid rgba(148, 163, 184, 0.14);
         }
+        .runner-status-bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.8rem 1.1rem;
+            padding: 0.55rem 0.8rem;
+            border: 1px solid rgba(148, 163, 184, 0.16);
+            background: rgba(15, 23, 42, 0.26);
+            border-radius: 12px;
+            margin-bottom: 0.85rem;
+        }
+        .runner-status-item {
+            display: inline-flex;
+            gap: 0.45rem;
+            align-items: baseline;
+            color: #cbd5e1;
+        }
+        .runner-status-label {
+            color: #94a3b8;
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .runner-status-value {
+            font-size: 0.83rem;
+            color: #e5e7eb;
+        }
+        .runner-section-card {
+            border: 1px solid rgba(148, 163, 184, 0.16);
+            background: rgba(15, 23, 42, 0.28);
+            border-radius: 14px;
+            padding: 0.85rem 0.95rem 0.95rem 0.95rem;
+            margin-bottom: 0.9rem;
+        }
+        .runner-section-title {
+            font-weight: 700;
+            margin-bottom: 0.2rem;
+        }
+        .runner-section-subtitle {
+            color: #94a3b8;
+            margin-bottom: 0.75rem;
+        }
+        .runner-form-group-title {
+            color: #cbd5e1;
+            font-size: 0.84rem;
+            font-weight: 700;
+            margin: 0.2rem 0 0.55rem 0;
+        }
+        .runner-bucket-panel {
+            border: 1px solid rgba(148, 163, 184, 0.16);
+            background: rgba(15, 23, 42, 0.28);
+            border-radius: 14px;
+            padding: 0.75rem 0.85rem;
+            min-height: 108px;
+        }
+        .runner-bucket-title {
+            color: #cbd5e1;
+            font-weight: 700;
+            margin-bottom: 0.55rem;
+        }
+        .ticker-chip-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.45rem;
+        }
+        .ticker-chip {
+            display: inline-flex;
+            align-items: center;
+            border-radius: 999px;
+            padding: 0.28rem 0.7rem;
+            font-size: 0.77rem;
+            font-weight: 600;
+            color: #dbeafe;
+            background: rgba(59, 130, 246, 0.14);
+            border: 1px solid rgba(59, 130, 246, 0.25);
+        }
+        .runner-empty-note {
+            color: #94a3b8;
+            font-size: 0.88rem;
+            padding: 0.15rem 0;
+        }
+        .runner-result-heading {
+            font-weight: 700;
+            margin-bottom: 0.15rem;
+        }
+        .runner-result-subtitle {
+            color: #94a3b8;
+            margin-bottom: 0.85rem;
+        }
         </style>
         """,
         unsafe_allow_html=True,
