@@ -51,6 +51,17 @@ def get_api_bearer_token() -> str | None:
     return token or None
 
 
+def get_api_timeout_seconds(default: int) -> int:
+    _load_repo_env()
+    raw = os.getenv("TRADER_API_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return default
+    try:
+        return max(30, int(raw))
+    except ValueError:
+        return default
+
+
 def api_config_status() -> dict[str, Any]:
     try:
         base_url = get_api_base_url()
@@ -76,6 +87,11 @@ def post_json(path: str, payload: dict[str, Any], *, timeout: int = 180) -> dict
     url = f"{base_url}{path}"
     try:
         response = requests.post(url, json=payload, headers=_headers(), timeout=timeout)
+    except requests.Timeout as exc:
+        raise TraderAPIError(
+            f"The trader API did not finish within {timeout} seconds for {path}. "
+            f"This usually means the workflow is still running and needs a longer timeout."
+        ) from exc
     except requests.RequestException as exc:
         raise TraderAPIError(f"Could not reach the trader API at {url}: {exc}") from exc
 
@@ -103,12 +119,24 @@ def post_json(path: str, payload: dict[str, Any], *, timeout: int = 180) -> dict
 
 
 def run_sp100_workflow(payload: dict[str, Any]) -> dict[str, Any]:
-    return post_json("/workflow/sp100/top10-log", payload)
+    return post_json(
+        "/workflow/sp100/top10-log",
+        payload,
+        timeout=get_api_timeout_seconds(420),
+    )
 
 
 def run_single_stock_workflow(payload: dict[str, Any]) -> dict[str, Any]:
-    return post_json("/workflow/swing-plan-log", payload)
+    return post_json(
+        "/workflow/swing-plan-log",
+        payload,
+        timeout=get_api_timeout_seconds(180),
+    )
 
 
 def run_manual_basket(payload: dict[str, Any]) -> dict[str, Any]:
-    return post_json("/plan/swing", payload)
+    return post_json(
+        "/plan/swing",
+        payload,
+        timeout=get_api_timeout_seconds(300),
+    )
