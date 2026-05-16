@@ -8,6 +8,7 @@ from .execution_view import build_chart_execution_view
 from .llm_reasoning import classify_final_action, reconcile_actions
 from .monitoring import build_wait_monitoring_plan
 from .ranking import build_ranking_profile
+from .risk_engine import build_stop_loss, build_take_profits, estimate_hold_window
 from .scanner import build_pre_scan_profile
 from .suitability import build_swing_trade_suitability
 from .what_to_watch import build_what_to_watch
@@ -1248,3 +1249,105 @@ def evaluate_chart_execution_fixtures() -> list[dict]:
             }
         )
     return results
+
+
+def evaluate_swing_realism_fixtures() -> list[dict]:
+    config = DEFAULT_PLANNING_CONFIG
+
+    wide_stop = build_stop_loss(
+        preferred_entry=100.0,
+        support_zone_1={"lower": 71.0, "upper": 73.0, "source_tags": ["pivot_low"]},
+        support_zone_2={"lower": 66.0, "upper": 68.0, "source_tags": ["sma50"]},
+        recent_swing_low=69.5,
+        atr=3.0,
+        current_price=101.0,
+        trend_state="pullback_in_uptrend",
+        config=config,
+    )
+
+    repair_stop = build_stop_loss(
+        preferred_entry=100.0,
+        support_zone_1={"lower": 84.8, "upper": 86.2, "source_tags": ["repair_band"]},
+        support_zone_2={"lower": 82.5, "upper": 84.0, "source_tags": ["sma50"]},
+        recent_swing_low=85.2,
+        atr=3.0,
+        current_price=99.5,
+        trend_state="weak_breakdown_risk",
+        config=config,
+    )
+
+    initial_hold = estimate_hold_window(
+        preferred_entry=100.0,
+        take_profit_1=118.0,
+        atr=2.0,
+        recent_swing_bars=12,
+        historical_hold_days=10,
+        config=config,
+    )
+    capped_tp = build_take_profits(
+        preferred_entry=100.0,
+        stop_loss=93.0,
+        resistance_zone_1={"lower": 128.0, "upper": 132.0, "source_tags": ["pivot_high"]},
+        resistance_zone_2={"lower": 136.0, "upper": 140.0, "source_tags": ["gap_fill"]},
+        recent_swing_high=129.5,
+        atr=2.0,
+        hold_days_hint=6,
+        trend_state="pullback_in_uptrend",
+        config=config,
+    )
+    broad_tp = build_take_profits(
+        preferred_entry=100.0,
+        stop_loss=94.0,
+        resistance_zone_1={"lower": 106.0, "upper": 108.0, "source_tags": ["pivot_high"]},
+        resistance_zone_2={"lower": 111.0, "upper": 114.0, "source_tags": ["gap_fill"]},
+        recent_swing_high=107.0,
+        atr=2.4,
+        hold_days_hint=12,
+        trend_state="uptrend",
+        config=config,
+    )
+
+    return [
+        {
+            "name": "normal_swing_stop_is_capped_when_structure_is_too_wide",
+            "pass": (
+                wide_stop["stop_width_pct"] <= config.max_stop_width_pct_default * 100.0 + 0.01
+                and wide_stop["risk_width_flag"] == "capped_for_swing"
+            ),
+            "stop_width_pct": wide_stop["stop_width_pct"],
+            "risk_width_flag": wide_stop["risk_width_flag"],
+        },
+        {
+            "name": "repair_setups_can_run_wider_but_stay_bounded",
+            "pass": (
+                repair_stop["stop_width_pct"] <= config.max_stop_width_pct_repair * 100.0 + 0.01
+                and repair_stop["stop_width_pct"] > config.max_stop_width_pct_default * 100.0
+            ),
+            "stop_width_pct": repair_stop["stop_width_pct"],
+            "swing_realism_flag": repair_stop["swing_realism_flag"],
+        },
+        {
+            "name": "hold_window_reachability_compresses_far_tp1",
+            "pass": (
+                capped_tp["target_reachability_flag"] == "capped_to_hold_window"
+                and capped_tp["tp1_distance_pct"] < 20.0
+            ),
+            "tp1_distance_pct": capped_tp["tp1_distance_pct"],
+            "reachability_flag": capped_tp["target_reachability_flag"],
+            "reachability_score": capped_tp["hold_window_reachability_score"],
+        },
+        {
+            "name": "tp1_prefers_first_swing_target_not_distant_structure",
+            "pass": (
+                broad_tp["take_profit_1"] < 109.0
+                and broad_tp["tp1_generation_reason"].startswith("tp1 near first actionable resistance slice")
+            ),
+            "take_profit_1": broad_tp["take_profit_1"],
+            "tp1_generation_reason": broad_tp["tp1_generation_reason"],
+        },
+        {
+            "name": "hold_window_estimate_stays_consistent_with_near_term_target",
+            "pass": initial_hold["max_hold_days"] <= config.max_hold_days_max,
+            "max_hold_days": initial_hold["max_hold_days"],
+        },
+    ]

@@ -155,6 +155,7 @@ def generate_structured_plan(
         recent_swing_low=recent_swing_low,
         atr=atr_val,
         current_price=current_price,
+        trend_state=structure.trend_state,
         config=config,
     )
     historical_hold_days = None
@@ -179,10 +180,44 @@ def generate_structured_plan(
         trend_state=structure.trend_state,
         config=config,
     )
+    final_hold = estimate_hold_window(
+        preferred_entry=preferred["preferred_entry"],
+        take_profit_1=targets["take_profit_1"],
+        atr=atr_val,
+        recent_swing_bars=12,
+        historical_hold_days=historical_hold_days,
+        config=config,
+    )
+    if abs(final_hold["max_hold_days"] - hold["max_hold_days"]) >= 2:
+        hold = final_hold
+        targets = build_take_profits(
+            preferred_entry=preferred["preferred_entry"],
+            stop_loss=stop["stop_loss"],
+            resistance_zone_1=zones["resistance_zone_1"],
+            resistance_zone_2=zones["resistance_zone_2"],
+            recent_swing_high=recent_swing_high,
+            atr=atr_val,
+            hold_days_hint=hold["max_hold_days"],
+            trend_state=structure.trend_state,
+            config=config,
+        )
+    else:
+        hold = final_hold
     if stop["stop_loss"] >= preferred["preferred_entry"]:
         raise ValueError(f"Invalid long stop placement for {ticker}: stop >= entry")
     if targets["take_profit_1"] <= preferred["preferred_entry"]:
         raise ValueError(f"Invalid long target placement for {ticker}: tp1 <= entry")
+
+    stop_realism = stop["swing_realism_flag"]
+    target_realism = targets["target_reachability_flag"]
+    if stop_realism != "realistic" and target_realism != "reachable":
+        level_geometry_flag = "compressed_stop_and_target"
+    elif stop_realism != "realistic":
+        level_geometry_flag = "compressed_stop"
+    elif target_realism != "reachable":
+        level_geometry_flag = "compressed_target"
+    else:
+        level_geometry_flag = "balanced"
 
     earnings = _earnings_payload(earnings_context)
     reward_risk = {
@@ -287,13 +322,24 @@ def generate_structured_plan(
         "stop_loss": stop["stop_loss"],
         "stop_basis": stop["stop_basis"],
         "stop_distance_pct": stop["stop_distance_pct"],
+        "stop_width_pct": stop["stop_width_pct"],
+        "stop_width_atr": stop["stop_width_atr"],
         "stop_too_tight_flag": stop["stop_too_tight_flag"],
         "take_profit_1": targets["take_profit_1"],
         "take_profit_2": targets["take_profit_2"],
         "take_profit_final": targets["take_profit_final"],
+        "tp1_distance_pct": targets["tp1_distance_pct"],
+        "tp1_distance_atr": targets["tp1_distance_atr"],
         "tp_basis": targets["tp_basis"],
         "reward_risk": reward_risk,
         "tp_too_optimistic_flag": targets["tp_too_optimistic_flag"],
+        "hold_window_reachability_score": targets["hold_window_reachability_score"],
+        "swing_realism_flag": stop["swing_realism_flag"],
+        "risk_width_flag": stop["risk_width_flag"],
+        "target_reachability_flag": targets["target_reachability_flag"],
+        "level_geometry_flag": level_geometry_flag,
+        "stop_generation_reason": stop["stop_generation_reason"],
+        "tp1_generation_reason": targets["tp1_generation_reason"],
         "max_hold_days": hold["max_hold_days"],
         "max_hold_date": hold["max_hold_date"],
         "trend_quality_score": scores["trend_quality_score"],

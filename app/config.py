@@ -28,6 +28,15 @@ class PlanningConfig:
     tp2_atr_mult: float = 3.0
     max_hold_days_min: int = 5
     max_hold_days_max: int = 30
+    max_stop_width_pct_default: float = 0.12
+    max_stop_width_pct_repair: float = 0.18
+    max_stop_width_atr_default: float = 3.8
+    max_stop_width_atr_repair: float = 5.2
+    max_tp1_distance_pct_default: float = 0.16
+    max_tp1_distance_pct_repair: float = 0.22
+    max_tp1_distance_atr_default: float = 5.5
+    max_tp1_distance_atr_repair: float = 7.0
+    hold_window_reachability_factor: float = 0.85
     earnings_penalty_near_days: int = 7
     earnings_penalty_mid_days: int = 14
     earnings_hard_block_days: int = 3

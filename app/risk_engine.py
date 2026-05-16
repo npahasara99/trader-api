@@ -5,6 +5,10 @@ from datetime import datetime, timedelta, timezone
 from .config import PlanningConfig
 
 
+def _clip(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
 def _zone_mid(zone: dict | None) -> float | None:
     if not zone:
         return None
@@ -15,6 +19,61 @@ def _zone_mid(zone: dict | None) -> float | None:
     return (float(lower) + float(upper)) / 2.0
 
 
+def _zone_lower(zone: dict | None) -> float | None:
+    if not zone or zone.get("lower") is None:
+        return None
+    return float(zone["lower"])
+
+
+def _zone_upper(zone: dict | None) -> float | None:
+    if not zone or zone.get("upper") is None:
+        return None
+    return float(zone["upper"])
+
+
+def _zone_actionable_target(zone: dict | None, atr: float) -> float | None:
+    lower = _zone_lower(zone)
+    upper = _zone_upper(zone)
+    if lower is None or upper is None:
+        return None
+    width = max(upper - lower, 0.0)
+    actionable_offset = min(width * 0.25, atr * 0.35)
+    return lower + actionable_offset
+
+
+def _is_repair_setup(trend_state: str | None) -> bool:
+    return (trend_state or "").strip().lower() == "weak_breakdown_risk"
+
+
+def _stop_caps(*, trend_state: str | None, config: PlanningConfig) -> tuple[float, float]:
+    if _is_repair_setup(trend_state):
+        return config.max_stop_width_pct_repair, config.max_stop_width_atr_repair
+    return config.max_stop_width_pct_default, config.max_stop_width_atr_default
+
+
+def _tp1_caps(*, trend_state: str | None, config: PlanningConfig) -> tuple[float, float]:
+    if _is_repair_setup(trend_state):
+        return config.max_tp1_distance_pct_repair, config.max_tp1_distance_atr_repair
+    return config.max_tp1_distance_pct_default, config.max_tp1_distance_atr_default
+
+
+def _trend_reachability_factor(trend_state: str | None) -> float:
+    normalized = (trend_state or "").strip().lower()
+    if normalized == "uptrend":
+        return 1.08
+    if normalized == "pullback_in_uptrend":
+        return 1.0
+    if normalized == "range":
+        return 0.88
+    if normalized == "weak_breakdown_risk":
+        return 0.72
+    return 0.84
+
+
+def _format_pct(distance: float, base: float) -> float:
+    return float(round(distance / max(base, 1e-9) * 100.0, 3))
+
+
 def build_stop_loss(
     *,
     preferred_entry: float,
@@ -23,40 +82,89 @@ def build_stop_loss(
     recent_swing_low: float | None,
     atr: float,
     current_price: float,
+    trend_state: str | None,
     config: PlanningConfig,
 ) -> dict:
     atr = max(float(atr or 0.0), max(current_price * 0.01, 0.01))
     buffer = atr * config.stop_buffer_atr_mult
     max_valid_stop = preferred_entry - max(atr * 0.35, current_price * 0.0035)
+    max_width_pct, max_width_atr = _stop_caps(trend_state=trend_state, config=config)
 
-    candidates: list[tuple[float, str]] = []
-    if support_zone_1:
-        level = float(support_zone_1["lower"]) - buffer - current_price * config.stop_below_zone_buffer_pct
+    candidates: list[dict] = []
+
+    support_1 = _zone_lower(support_zone_1)
+    if support_1 is not None:
+        level = support_1 - buffer - current_price * config.stop_below_zone_buffer_pct
         if level < max_valid_stop:
-            candidates.append((level, "below support_zone_1 and ATR buffer"))
-    if support_zone_2:
-        level = float(support_zone_2["lower"]) - buffer * 0.8
+            candidates.append({"price": level, "basis": "below support_zone_1 and ATR buffer"})
+
+    support_2 = _zone_lower(support_zone_2)
+    if support_2 is not None:
+        level = support_2 - buffer * 0.8
         if level < max_valid_stop:
-            candidates.append((level, "below support_zone_2 and ATR buffer"))
+            candidates.append({"price": level, "basis": "below support_zone_2 and ATR buffer"})
+
     if recent_swing_low is not None:
         level = float(recent_swing_low) - buffer
         if level < max_valid_stop:
-            candidates.append((level, "below recent swing low and ATR buffer"))
+            candidates.append({"price": level, "basis": "below recent swing low and ATR buffer"})
 
+    fallback_stop = preferred_entry - atr * 1.6
     if not candidates:
-        candidates.append((preferred_entry - atr * 1.6, "fallback ATR invalidation"))
+        candidates.append({"price": fallback_stop, "basis": "fallback ATR invalidation"})
 
-    stop_loss, basis = min(candidates, key=lambda item: item[0])
+    for candidate in candidates:
+        width = max(preferred_entry - float(candidate["price"]), 0.0)
+        candidate["width"] = width
+        candidate["width_pct"] = width / max(preferred_entry, 1e-9)
+        candidate["width_atr"] = width / max(atr, 1e-9)
+        candidate["within_cap"] = (
+            candidate["width_pct"] <= max_width_pct and candidate["width_atr"] <= max_width_atr
+        )
+
+    valid_candidates = [candidate for candidate in candidates if candidate["within_cap"]]
+    selected = max(valid_candidates or candidates, key=lambda item: item["price"])
+
+    stop_loss = float(selected["price"])
+    stop_generation_reason = str(selected["basis"])
+    swing_realism_flag = "realistic"
+    risk_width_flag = "ok"
+
+    if not selected["within_cap"]:
+        allowed_width = min(preferred_entry * max_width_pct, atr * max_width_atr)
+        capped_stop = preferred_entry - max(allowed_width, atr * 0.95)
+        capped_stop = min(capped_stop, max_valid_stop)
+        if capped_stop > stop_loss:
+            stop_loss = capped_stop
+            swing_realism_flag = "compressed"
+            risk_width_flag = "capped_for_swing"
+            stop_generation_reason = f"{selected['basis']}; compressed to swing-risk envelope"
+        else:
+            swing_realism_flag = "flagged"
+            risk_width_flag = "too_wide_for_swing"
+            stop_generation_reason = f"{selected['basis']}; broad structure exceeds normal swing width"
+
     if stop_loss >= preferred_entry:
-        stop_loss = preferred_entry - atr * 1.6
-        basis = "fallback ATR invalidation"
-    stop_distance_pct = (preferred_entry - stop_loss) / max(preferred_entry, 1e-9) * 100.0
-    stop_too_tight = (preferred_entry - stop_loss) < atr * 0.9
+        stop_loss = fallback_stop
+        swing_realism_flag = "compressed"
+        risk_width_flag = "fallback_atr_stop"
+        stop_generation_reason = "fallback ATR invalidation after invalid structural stop"
+
+    stop_width = max(preferred_entry - stop_loss, 0.0)
+    stop_distance_pct = _format_pct(stop_width, preferred_entry)
+    stop_width_atr = float(round(stop_width / max(atr, 1e-9), 3))
+    stop_too_tight = stop_width < atr * 0.9
+
     return {
         "stop_loss": float(round(stop_loss, 6)),
-        "stop_basis": basis,
-        "stop_distance_pct": float(round(stop_distance_pct, 3)),
+        "stop_basis": str(selected["basis"]),
+        "stop_distance_pct": stop_distance_pct,
+        "stop_width_pct": stop_distance_pct,
+        "stop_width_atr": stop_width_atr,
         "stop_too_tight_flag": bool(stop_too_tight),
+        "swing_realism_flag": swing_realism_flag,
+        "risk_width_flag": risk_width_flag,
+        "stop_generation_reason": stop_generation_reason,
     }
 
 
@@ -74,40 +182,68 @@ def build_take_profits(
 ) -> dict:
     atr = max(float(atr or 0.0), max(preferred_entry * 0.01, 0.01))
     risk_per_share = max(preferred_entry - stop_loss, atr * 0.6)
-    reachable_move = atr * max(1.0, min(float(hold_days_hint), 20.0) * config.atr_target_window_mult)
+    hold_days = max(1, int(hold_days_hint or config.max_hold_days_min))
+    reachability_factor = _trend_reachability_factor(trend_state)
+    reachable_move = atr * hold_days * config.hold_window_reachability_factor * reachability_factor
+    max_tp1_pct, max_tp1_atr = _tp1_caps(trend_state=trend_state, config=config)
+    max_tp1_distance = min(preferred_entry * max_tp1_pct, atr * max_tp1_atr, reachable_move)
+    min_tp1_distance = max(atr * 0.45, risk_per_share * 0.65)
 
-    tp1 = _zone_mid(resistance_zone_1) or recent_swing_high or preferred_entry + max(risk_per_share * 1.2, atr * config.tp1_atr_mult)
-    tp2 = _zone_mid(resistance_zone_2) or preferred_entry + max(risk_per_share * 2.0, atr * config.tp2_atr_mult)
-    min_tp1 = preferred_entry + max(atr * 0.45, risk_per_share * 0.9)
-    min_tp2 = preferred_entry + max(atr * 0.95, risk_per_share * 1.5)
+    candidates: list[dict] = []
+    resistance_1_target = _zone_actionable_target(resistance_zone_1, atr)
+    if resistance_1_target is not None and resistance_1_target > preferred_entry:
+        candidates.append({"price": resistance_1_target, "basis": "tp1 near first actionable resistance slice"})
+    if recent_swing_high is not None and float(recent_swing_high) > preferred_entry:
+        candidates.append({"price": float(recent_swing_high), "basis": "tp1 near recent swing high"})
 
-    if tp1 <= preferred_entry:
-        tp1 = min_tp1
-    else:
-        tp1 = max(tp1, min_tp1)
+    fallback_tp1 = preferred_entry + max(risk_per_share * 1.05, atr * config.tp1_atr_mult)
+    candidates.append({"price": fallback_tp1, "basis": "tp1 via ATR/risk multiple"})
+
+    eligible = [candidate for candidate in candidates if candidate["price"] >= preferred_entry + min_tp1_distance]
+    raw_tp1_candidate = min(eligible or candidates, key=lambda item: item["price"])
+    raw_tp1 = float(raw_tp1_candidate["price"])
+    raw_tp1_distance = max(raw_tp1 - preferred_entry, 0.0)
+
+    tp1_distance_cap = max(atr * 0.35, max_tp1_distance)
+    tp1_distance = min(raw_tp1_distance, tp1_distance_cap)
+    tp1 = preferred_entry + tp1_distance
+
+    target_reachability_flag = "reachable"
+    tp1_generation_reason = str(raw_tp1_candidate["basis"])
+    if raw_tp1_distance > tp1_distance_cap + 1e-9:
+        target_reachability_flag = "capped_to_hold_window"
+        tp1_generation_reason = f"{raw_tp1_candidate['basis']}; compressed to first reachable swing target"
+    elif raw_tp1_distance < min_tp1_distance:
+        target_reachability_flag = "minimal_target"
+        tp1_generation_reason = f"{raw_tp1_candidate['basis']}; nearest reasonable target remains close"
+
+    resistance_2_mid = _zone_mid(resistance_zone_2)
+    tp2 = resistance_2_mid or (tp1 + max(atr * 1.0, risk_per_share * 0.8))
     if tp2 <= tp1:
-        tp2 = max(min_tp2, tp1 + max(atr * 0.8, risk_per_share * 0.5))
+        tp2 = tp1 + max(atr * 0.9, risk_per_share * 0.55)
 
-    trend_bonus = 1.4 if trend_state == "uptrend" else 1.0
-    tp_final = max(tp2, preferred_entry + min(reachable_move * trend_bonus, atr * 8.0))
+    trend_bonus = 1.25 if trend_state == "uptrend" else 1.0
+    final_cap = preferred_entry + min(reachable_move * 1.35 * trend_bonus, atr * 8.0)
+    tp_final = max(tp2, final_cap)
     if tp_final <= tp2:
         tp_final = tp2 + max(atr * 0.5, risk_per_share * 0.35)
 
-    rr1 = (tp1 - preferred_entry) / max(preferred_entry - stop_loss, 1e-9)
-    rr2 = (tp2 - preferred_entry) / max(preferred_entry - stop_loss, 1e-9)
-    rr_final = (tp_final - preferred_entry) / max(preferred_entry - stop_loss, 1e-9)
+    rr_divisor = max(preferred_entry - stop_loss, 1e-9)
+    rr1 = (tp1 - preferred_entry) / rr_divisor
+    rr2 = (tp2 - preferred_entry) / rr_divisor
+    rr_final = (tp_final - preferred_entry) / rr_divisor
     optimistic_flag = (tp_final - preferred_entry) > reachable_move * 1.35 and trend_state != "uptrend"
+    reachability_score = _clip(
+        10.0 * min(1.0, tp1_distance_cap / max(raw_tp1_distance, 1e-9)),
+        0.0,
+        10.0,
+    )
 
-    basis_parts = []
-    if resistance_zone_1:
-        basis_parts.append("tp1 near resistance_zone_1")
-    else:
-        basis_parts.append("tp1 via ATR/risk multiple")
-    if resistance_zone_2:
-        basis_parts.append("tp2 near resistance_zone_2")
-    else:
-        basis_parts.append("tp2 via swing projection")
-    basis_parts.append("final target capped by ATR reachability and trend strength")
+    basis_parts = [
+        tp1_generation_reason,
+        "tp2 near next resistance shelf" if resistance_zone_2 else "tp2 via measured swing extension",
+        "final target bounded by trend and ATR reachability",
+    ]
 
     return {
         "take_profit_1": float(round(tp1, 6)),
@@ -118,6 +254,11 @@ def build_take_profits(
         "expected_reward_risk_to_tp2": float(round(rr2, 3)),
         "expected_reward_risk_to_final": float(round(rr_final, 3)),
         "tp_too_optimistic_flag": bool(optimistic_flag),
+        "tp1_distance_pct": _format_pct(tp1 - preferred_entry, preferred_entry),
+        "tp1_distance_atr": float(round((tp1 - preferred_entry) / max(atr, 1e-9), 3)),
+        "hold_window_reachability_score": float(round(reachability_score, 3)),
+        "target_reachability_flag": target_reachability_flag,
+        "tp1_generation_reason": tp1_generation_reason,
     }
 
 
