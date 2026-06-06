@@ -25,6 +25,7 @@ from .db import Base, engine, get_db
 from .models import SwingDecision, DailyBar
 from .logic import (
     build_swing_plan,
+    get_upcoming_earnings_calendar,
     get_last_price,
     evaluate_plan_row,
     get_sp100_universe,
@@ -418,6 +419,39 @@ class DailyBarsStatusResponse(BaseModel):
     symbols_with_data: int
     total_rows: int
     rows: List[DailyBarsStatusRow]
+
+
+class EarningsCalendarRowOut(BaseModel):
+    ticker: str
+    company_name: Optional[str] = None
+    earnings_date: str
+    earnings_session: str
+    earnings_time: Optional[str] = None
+    days_to_earnings: int
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    eps_estimate: Optional[float] = None
+    eps_actual: Optional[float] = None
+    revenue_estimate: Optional[float] = None
+    revenue_actual: Optional[float] = None
+    avg_post_earnings_move_pct: Optional[float] = None
+    post_earnings_up_rate: Optional[float] = None
+    reaction_samples: Optional[int] = None
+    avg_surprise_percent: Optional[float] = None
+    earnings_risk_flag: Optional[bool] = None
+
+
+class EarningsCalendarResponse(BaseModel):
+    as_of: datetime
+    days_ahead: int
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    sp100_only: bool = False
+    event_count: int
+    before_open_count: int
+    after_close_count: int
+    unknown_session_count: int
+    rows: List[EarningsCalendarRowOut] = Field(default_factory=list)
 
 
 def _to_plan_row_out(r) -> PlanRowOut:
@@ -1240,6 +1274,73 @@ def scan_sp100(
     )
     n = max(1, min(int(top_n), len(ranked))) if ranked else 0
     return {"tickers": [row["ticker"] for row in ranked[:n]]}
+
+
+@app.get("/calendar/earnings", response_model=EarningsCalendarResponse)
+def get_earnings_calendar(
+    days_ahead: int = Query(default=30, ge=1, le=90),
+    sector: Optional[str] = None,
+    industry: Optional[str] = None,
+    sp100_only: bool = False,
+    db: Session = Depends(get_db),
+    _=Depends(require_bearer_token),
+):
+    daily_closes_loader = _build_daily_closes_loader(db)
+    rows = get_upcoming_earnings_calendar(
+        days_ahead=days_ahead,
+        sector=sector,
+        industry=industry,
+        sp100_only=sp100_only,
+    )
+    enriched_rows: list[dict] = []
+    enrich_reaction_fields = sp100_only or len(rows) <= 120
+    for row in rows:
+        ticker = str(row.get("ticker") or "").strip().upper()
+        if not ticker:
+            continue
+        earnings_context = {}
+        if enrich_reaction_fields:
+            try:
+                last_price = get_last_price_or_recent_close(
+                    ticker,
+                    daily_closes_loader=daily_closes_loader,
+                )
+                _, earnings_context = compute_earnings_signal(
+                    ticker,
+                    last_price,
+                    daily_closes_loader=daily_closes_loader,
+                )
+            except Exception:
+                earnings_context = {}
+        enriched_rows.append(
+            {
+                **row,
+                "avg_post_earnings_move_pct": earnings_context.get("avg_post_earnings_move_pct"),
+                "post_earnings_up_rate": earnings_context.get("post_earnings_up_rate"),
+                "reaction_samples": earnings_context.get("reaction_samples"),
+                "avg_surprise_percent": earnings_context.get("avg_surprise_percent"),
+                "earnings_risk_flag": bool(
+                    earnings_context.get("days_to_earnings") is not None
+                    and int(earnings_context.get("days_to_earnings")) <= 10
+                ),
+            }
+        )
+
+    before_open_count = sum(1 for row in enriched_rows if row.get("earnings_session") == "before_open")
+    after_close_count = sum(1 for row in enriched_rows if row.get("earnings_session") == "after_close")
+    unknown_session_count = sum(1 for row in enriched_rows if row.get("earnings_session") == "unknown")
+    return EarningsCalendarResponse(
+        as_of=datetime.now(timezone.utc),
+        days_ahead=days_ahead,
+        sector=sector,
+        industry=industry,
+        sp100_only=sp100_only,
+        event_count=len(enriched_rows),
+        before_open_count=before_open_count,
+        after_close_count=after_close_count,
+        unknown_session_count=unknown_session_count,
+        rows=[EarningsCalendarRowOut(**row) for row in enriched_rows],
+    )
 
 
 @app.post("/scan/sp100", response_model=ScanResponse)

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
 from api_client import (
     TraderAPIError,
     api_config_status,
+    fetch_earnings_calendar,
     run_manual_basket,
     run_single_stock_workflow,
     run_sp100_workflow,
@@ -320,12 +322,43 @@ def _snapshot_payload(snapshot_row, key: str):
     return None
 
 
+def _filter_earnings_df(
+    df: pd.DataFrame,
+    *,
+    max_days: int,
+    ticker_search: str,
+    sector_filter: str,
+    industry_filter: str,
+    watchlist_only: bool,
+    watchlist_tickers: set[str],
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    out = out[out["days_to_earnings"].fillna(9999) <= max_days]
+    if sector_filter != "All":
+        out = out[out["sector"].fillna("") == sector_filter]
+    if industry_filter != "All":
+        out = out[out["industry"].fillna("") == industry_filter]
+    if ticker_search.strip():
+        query = ticker_search.strip().upper()
+        out = out[out["ticker"].astype(str).str.upper().str.contains(query, na=False)]
+    if watchlist_only:
+        out = out[out["ticker"].astype(str).isin(watchlist_tickers)]
+    return out.sort_values(by=["days_to_earnings", "ticker"], ascending=[True, True], na_position="last")
+
+
 def _load_dashboard_data():
     latest_run = fetch_latest_run_summary()
     snapshots = fetch_latest_snapshots()
     run_history = fetch_run_history()
     top_watch = fetch_top_watch()
     return latest_run, snapshots, run_history, top_watch
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_earnings_calendar_data(*, days_ahead: int, sp100_only: bool) -> dict:
+    return fetch_earnings_calendar(days_ahead=days_ahead, sp100_only=sp100_only)
 
 
 _init_runner_state()
@@ -348,7 +381,7 @@ render_header(
     latest_data_ts=latest_data_ts,
 )
 
-scanner_tab, active_tab, history_tab = st.tabs(["Run Scanner", "Active Dashboard", "History"])
+scanner_tab, active_tab, earnings_tab, history_tab = st.tabs(["Run Scanner", "Active Dashboard", "Earnings", "History"])
 
 with scanner_tab:
     st.markdown("### Scanner / Runner")
@@ -724,6 +757,127 @@ with active_tab:
                 render_raw_json_block("Raw JSON: Chart Execution View", chart_execution_payload)
                 render_raw_json_block("Raw JSON: What To Watch", what_to_watch_payload)
                 render_raw_json_block("Raw JSON: Actionability Soon", actionability_payload)
+
+with earnings_tab:
+    st.markdown("### Earnings")
+    st.caption("Upcoming earnings events from the trader API for the next 30 days, with local filters for watchlist monitoring.")
+
+    earnings_top = st.columns([4, 1], gap="medium")
+    with earnings_top[0]:
+        st.caption("This tab stays read-only and uses the API calendar as the source of truth for dates and sessions.")
+    with earnings_top[1]:
+        earnings_sp100_only = st.toggle("SP100 Only", value=True, key="earnings_sp100_only")
+
+    try:
+        earnings_payload = _load_earnings_calendar_data(days_ahead=30, sp100_only=earnings_sp100_only)
+    except TraderAPIError as exc:
+        st.error(str(exc))
+        earnings_payload = {}
+
+    earnings_rows = earnings_payload.get("rows") or []
+    earnings_df = pd.DataFrame(earnings_rows)
+    if not earnings_df.empty:
+        earnings_df["days_to_earnings"] = pd.to_numeric(earnings_df["days_to_earnings"], errors="coerce")
+        earnings_df["earnings_date"] = earnings_df["earnings_date"].astype(str)
+
+    active_watchlist_tickers = set(sorted_snapshots_df["ticker"].dropna().astype(str).tolist())
+    earnings_filter_box = st.container(border=True)
+    with earnings_filter_box:
+        filter_cols = st.columns([1, 2, 2, 2, 1], gap="medium")
+        earnings_horizon = filter_cols[0].selectbox(
+            "Window",
+            [7, 14, 30],
+            index=2,
+            format_func=lambda value: f"Next {value}d",
+            key="earnings_horizon",
+        )
+        earnings_search = filter_cols[1].text_input(
+            "Ticker Search",
+            placeholder="Search ticker",
+            key="earnings_search",
+        )
+        sector_options = ["All"]
+        industry_options = ["All"]
+        if not earnings_df.empty:
+            sector_options += sorted([value for value in earnings_df["sector"].dropna().astype(str).unique().tolist() if value])
+            industry_options += sorted([value for value in earnings_df["industry"].dropna().astype(str).unique().tolist() if value])
+        earnings_sector = filter_cols[2].selectbox("Sector", sector_options, key="earnings_sector")
+        earnings_industry = filter_cols[3].selectbox("Industry", industry_options, key="earnings_industry")
+        earnings_watchlist_only = filter_cols[4].toggle("Watchlist Only", value=False, key="earnings_watchlist_only")
+
+    filtered_earnings_df = _filter_earnings_df(
+        earnings_df,
+        max_days=int(earnings_horizon),
+        ticker_search=earnings_search,
+        sector_filter=earnings_sector,
+        industry_filter=earnings_industry,
+        watchlist_only=earnings_watchlist_only,
+        watchlist_tickers=active_watchlist_tickers,
+    )
+
+    summary_cols = st.columns(4)
+    next_7_count = 0 if filtered_earnings_df.empty else int((filtered_earnings_df["days_to_earnings"] <= 7).sum())
+    next_window_count = len(filtered_earnings_df.index)
+    before_open_count = 0 if filtered_earnings_df.empty else int((filtered_earnings_df["earnings_session"] == "before_open").sum())
+    after_close_count = 0 if filtered_earnings_df.empty else int((filtered_earnings_df["earnings_session"] == "after_close").sum())
+    with summary_cols[0]:
+        render_kpi_card("Next 7 Days", next_7_count, small=True)
+    with summary_cols[1]:
+        render_kpi_card(f"Next {earnings_horizon} Days", next_window_count, small=True)
+    with summary_cols[2]:
+        render_kpi_card("Before Open", before_open_count, small=True)
+    with summary_cols[3]:
+        render_kpi_card("After Close", after_close_count, small=True)
+
+    st.markdown("### Upcoming Earnings Calendar")
+    if filtered_earnings_df.empty:
+        st.caption("No earnings events match the current filters.")
+    else:
+        calendar_columns = [
+            "ticker",
+            "company_name",
+            "earnings_date",
+            "earnings_session",
+            "days_to_earnings",
+            "sector",
+            "industry",
+        ]
+        calendar_df = filtered_earnings_df[[column for column in calendar_columns if column in filtered_earnings_df.columns]].copy()
+        calendar_df["company_name"] = calendar_df["company_name"].fillna("-")
+        calendar_df["earnings_session"] = calendar_df["earnings_session"].astype(str).str.replace("_", " ").str.title()
+        st.dataframe(calendar_df, use_container_width=True, hide_index=True)
+
+        st.markdown("### Earnings Detail")
+        selected_earnings_ticker = st.selectbox(
+            "Ticker Detail",
+            options=filtered_earnings_df["ticker"].astype(str).tolist(),
+            key="earnings_detail_ticker",
+        )
+        earnings_detail = filtered_earnings_df[filtered_earnings_df["ticker"].astype(str) == selected_earnings_ticker].iloc[0]
+
+        render_key_value_grid(
+            [
+                ("Ticker", earnings_detail.get("ticker") or "-"),
+                ("Company", earnings_detail.get("company_name") or "-"),
+                ("Earnings Date", earnings_detail.get("earnings_date") or "-"),
+                ("Session", str(earnings_detail.get("earnings_session") or "-").replace("_", " ").title()),
+                ("Days To Earnings", earnings_detail.get("days_to_earnings")),
+                ("Sector", earnings_detail.get("sector") or "-"),
+                ("Industry", earnings_detail.get("industry") or "-"),
+            ],
+            columns=4,
+        )
+        st.markdown("**Earnings Reaction Context**")
+        render_key_value_grid(
+            [
+                ("Avg Post-Earnings Move %", earnings_detail.get("avg_post_earnings_move_pct") if pd.notna(earnings_detail.get("avg_post_earnings_move_pct")) else "-"),
+                ("Post-Earnings Up Rate", earnings_detail.get("post_earnings_up_rate") if pd.notna(earnings_detail.get("post_earnings_up_rate")) else "-"),
+                ("Reaction Samples", earnings_detail.get("reaction_samples") if pd.notna(earnings_detail.get("reaction_samples")) else "-"),
+                ("Avg Surprise %", earnings_detail.get("avg_surprise_percent") if pd.notna(earnings_detail.get("avg_surprise_percent")) else "-"),
+                ("Earnings Risk Flag", "Yes" if earnings_detail.get("earnings_risk_flag") else "No"),
+            ],
+            columns=3,
+        )
 
 with history_tab:
     st.markdown("### History")

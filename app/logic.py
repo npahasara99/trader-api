@@ -545,6 +545,85 @@ def _get_earnings_calendar(ticker: str, days_ahead: int = 45) -> dict | None:
     }
 
 
+def _normalize_earnings_session(hour: str | None) -> str:
+    normalized = str(hour or "").strip().lower()
+    if normalized in {"bmo", "before market", "before open", "pre-market", "premarket"}:
+        return "before_open"
+    if normalized in {"amc", "after market", "after close", "post-market", "postmarket"}:
+        return "after_close"
+    return "unknown"
+
+
+def get_upcoming_earnings_calendar(
+    *,
+    days_ahead: int = 30,
+    sector: str | None = None,
+    industry: str | None = None,
+    sp100_only: bool = False,
+    tickers: list[str] | None = None,
+) -> list[dict]:
+    today = datetime.now(timezone.utc).date()
+    to = today + timedelta(days=max(1, int(days_ahead)))
+    data = finnhub_get(
+        "/calendar/earnings",
+        {
+            "from": today.isoformat(),
+            "to": to.isoformat(),
+        },
+    )
+    if not isinstance(data, dict):
+        return []
+
+    rows = data.get("earningsCalendar") or []
+    allowed_symbols: set[str] | None = None
+    if tickers:
+        allowed_symbols = {str(t).strip().upper() for t in tickers if str(t).strip()}
+
+    sector_filter = _normalize_filter_value(sector)
+    industry_filter = _normalize_filter_value(industry)
+
+    results: list[dict] = []
+    for row in rows:
+        ticker = str(row.get("symbol") or "").strip().upper()
+        if not ticker:
+            continue
+        if allowed_symbols is not None and ticker not in allowed_symbols:
+            continue
+        if sp100_only and ticker not in SP100_CLASSIFICATION:
+            continue
+        if not _ticker_matches_filter(ticker, sector=sector_filter, industry=industry_filter):
+            continue
+
+        earnings_date = _safe_date(row.get("date"))
+        if earnings_date is None:
+            continue
+        days_to_earnings = (earnings_date - today).days
+        if days_to_earnings < 0:
+            continue
+
+        meta = SP100_CLASSIFICATION.get(ticker, {})
+        session = _normalize_earnings_session(row.get("hour"))
+        results.append(
+            {
+                "ticker": ticker,
+                "company_name": row.get("name") or row.get("company") or None,
+                "earnings_date": earnings_date.isoformat(),
+                "earnings_session": session,
+                "earnings_time": row.get("hour"),
+                "days_to_earnings": days_to_earnings,
+                "sector": meta.get("sector"),
+                "industry": meta.get("industry"),
+                "eps_estimate": row.get("epsEstimate"),
+                "eps_actual": row.get("epsActual"),
+                "revenue_estimate": row.get("revenueEstimate"),
+                "revenue_actual": row.get("revenueActual"),
+            }
+        )
+
+    results.sort(key=lambda item: (item.get("days_to_earnings", 9999), item.get("ticker", "")))
+    return results
+
+
 def _get_earnings_history(ticker: str, limit: int = 8) -> list[dict]:
     data = finnhub_get("/stock/earnings", {"symbol": ticker, "limit": max(4, limit)})
     if not isinstance(data, list):

@@ -82,6 +82,36 @@ def _headers() -> dict[str, str]:
     return headers
 
 
+def get_json(path: str, params: dict[str, Any] | None = None, *, timeout: int = 120) -> dict[str, Any]:
+    base_url = get_api_base_url()
+    url = f"{base_url}{path}"
+    try:
+        response = requests.get(url, params=params or {}, headers=_headers(), timeout=timeout)
+    except requests.Timeout as exc:
+        raise TraderAPIError(
+            f"The trader API did not finish within {timeout} seconds for {path}. "
+            f"This request may need more time or the API may be under load."
+        ) from exc
+    except requests.RequestException as exc:
+        raise TraderAPIError(f"Could not reach the trader API at {url}: {exc}") from exc
+
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+
+    if not response.ok:
+        detail = data.get("detail") if isinstance(data, dict) else data
+        message = f"Trader API returned HTTP {response.status_code} for {path}."
+        if detail:
+            message = f"{message} {detail}"
+        raise TraderAPIError(message, status_code=response.status_code, detail=detail)
+
+    if not isinstance(data, dict):
+        raise TraderAPIError(f"Trader API returned a malformed response for {path}.")
+    return data
+
+
 def post_json(path: str, payload: dict[str, Any], *, timeout: int = 180) -> dict[str, Any]:
     base_url = get_api_base_url()
     url = f"{base_url}{path}"
@@ -139,4 +169,26 @@ def run_manual_basket(payload: dict[str, Any]) -> dict[str, Any]:
         "/plan/swing",
         payload,
         timeout=get_api_timeout_seconds(300),
+    )
+
+
+def fetch_earnings_calendar(
+    *,
+    days_ahead: int = 30,
+    sector: str | None = None,
+    industry: str | None = None,
+    sp100_only: bool = False,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "days_ahead": int(days_ahead),
+        "sp100_only": str(bool(sp100_only)).lower(),
+    }
+    if sector:
+        params["sector"] = sector
+    if industry:
+        params["industry"] = industry
+    return get_json(
+        "/calendar/earnings",
+        params=params,
+        timeout=get_api_timeout_seconds(180),
     )
