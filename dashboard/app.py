@@ -1,4 +1,4 @@
-"""Read-only Streamlit dashboard for Supabase scan/watchlist reporting."""
+﻿"""Read-only Streamlit dashboard for Supabase scan/watchlist reporting."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from api_client import (
     TraderAPIError,
     api_config_status,
     fetch_earnings_calendar,
+    fetch_earnings_detail,
     run_manual_basket,
     run_single_stock_workflow,
     run_sp100_workflow,
@@ -359,6 +360,11 @@ def _load_dashboard_data():
 @st.cache_data(ttl=900, show_spinner=False)
 def _load_earnings_calendar_data(*, days_ahead: int, sp100_only: bool) -> dict:
     return fetch_earnings_calendar(days_ahead=days_ahead, sp100_only=sp100_only)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_earnings_detail_data(ticker: str, *, days_ahead: int) -> dict:
+    return fetch_earnings_detail(ticker, days_ahead=days_ahead)
 
 
 _init_runner_state()
@@ -854,27 +860,37 @@ with earnings_tab:
             key="earnings_detail_ticker",
         )
         earnings_detail = filtered_earnings_df[filtered_earnings_df["ticker"].astype(str) == selected_earnings_ticker].iloc[0]
+        detail_payload = {}
+        detail_error = None
+        try:
+            detail_payload = _load_earnings_detail_data(selected_earnings_ticker, days_ahead=30)
+        except TraderAPIError as exc:
+            detail_error = str(exc)
+
+        detail_source = detail_payload or earnings_detail.to_dict()
 
         render_key_value_grid(
             [
-                ("Ticker", earnings_detail.get("ticker") or "-"),
-                ("Company", earnings_detail.get("company_name") or "-"),
-                ("Earnings Date", earnings_detail.get("earnings_date") or "-"),
-                ("Session", str(earnings_detail.get("earnings_session") or "-").replace("_", " ").title()),
-                ("Days To Earnings", earnings_detail.get("days_to_earnings")),
-                ("Sector", earnings_detail.get("sector") or "-"),
-                ("Industry", earnings_detail.get("industry") or "-"),
+                ("Ticker", detail_source.get("ticker") or "-"),
+                ("Company", detail_source.get("company_name") or "-"),
+                ("Earnings Date", detail_source.get("earnings_date") or "-"),
+                ("Session", str(detail_source.get("earnings_session") or "-").replace("_", " ").title()),
+                ("Days To Earnings", detail_source.get("days_to_earnings")),
+                ("Sector", detail_source.get("sector") or "-"),
+                ("Industry", detail_source.get("industry") or "-"),
             ],
             columns=4,
         )
+        if detail_error:
+            st.caption(f"Historical reaction detail is temporarily unavailable: {detail_error}")
         st.markdown("**Earnings Reaction Context**")
         render_key_value_grid(
             [
-                ("Avg Post-Earnings Move %", earnings_detail.get("avg_post_earnings_move_pct") if pd.notna(earnings_detail.get("avg_post_earnings_move_pct")) else "-"),
-                ("Post-Earnings Up Rate", earnings_detail.get("post_earnings_up_rate") if pd.notna(earnings_detail.get("post_earnings_up_rate")) else "-"),
-                ("Reaction Samples", earnings_detail.get("reaction_samples") if pd.notna(earnings_detail.get("reaction_samples")) else "-"),
-                ("Avg Surprise %", earnings_detail.get("avg_surprise_percent") if pd.notna(earnings_detail.get("avg_surprise_percent")) else "-"),
-                ("Earnings Risk Flag", "Yes" if earnings_detail.get("earnings_risk_flag") else "No"),
+                ("Avg Post-Earnings Move %", detail_source.get("avg_post_earnings_move_pct") if pd.notna(detail_source.get("avg_post_earnings_move_pct")) else "-"),
+                ("Post-Earnings Up Rate", detail_source.get("post_earnings_up_rate") if pd.notna(detail_source.get("post_earnings_up_rate")) else "-"),
+                ("Reaction Samples", detail_source.get("reaction_samples") if pd.notna(detail_source.get("reaction_samples")) else "-"),
+                ("Avg Surprise %", detail_source.get("avg_surprise_percent") if pd.notna(detail_source.get("avg_surprise_percent")) else "-"),
+                ("Earnings Risk Flag", "Yes" if detail_source.get("earnings_risk_flag") else "No"),
             ],
             columns=3,
         )
@@ -934,3 +950,5 @@ with history_tab:
             use_container_width=True,
             hide_index=True,
         )
+
+

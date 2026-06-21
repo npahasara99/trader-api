@@ -190,5 +190,17 @@ def fetch_earnings_calendar(
     return get_json(
         "/calendar/earnings",
         params=params,
-        timeout=get_api_timeout_seconds(180),
+        timeout=get_api_timeout_seconds(120),
     )
+
+
+def fetch_earnings_detail(ticker: str, *, days_ahead: int = 30) -> dict[str, Any]:
+    normalized_ticker = str(ticker or "").strip().upper()
+    if not normalized_ticker:
+        raise TraderAPIError("Ticker is required for earnings detail.")
+    return get_json(
+        f"/calendar/earnings/{normalized_ticker}",
+        params={"days_ahead": int(days_ahead)},
+        timeout=get_api_timeout_seconds(120),
+    )
+

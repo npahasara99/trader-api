@@ -1,4 +1,4 @@
-
+﻿
 from fastapi import FastAPI, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
@@ -452,6 +452,10 @@ class EarningsCalendarResponse(BaseModel):
     after_close_count: int
     unknown_session_count: int
     rows: List[EarningsCalendarRowOut] = Field(default_factory=list)
+
+
+class EarningsCalendarDetailResponse(EarningsCalendarRowOut):
+    as_of: datetime
 
 
 def _to_plan_row_out(r) -> PlanRowOut:
@@ -1285,61 +1289,89 @@ def get_earnings_calendar(
     db: Session = Depends(get_db),
     _=Depends(require_bearer_token),
 ):
-    daily_closes_loader = _build_daily_closes_loader(db)
     rows = get_upcoming_earnings_calendar(
         days_ahead=days_ahead,
         sector=sector,
         industry=industry,
         sp100_only=sp100_only,
     )
-    enriched_rows: list[dict] = []
-    enrich_reaction_fields = sp100_only or len(rows) <= 120
+    normalized_rows: list[dict] = []
     for row in rows:
-        ticker = str(row.get("ticker") or "").strip().upper()
-        if not ticker:
-            continue
-        earnings_context = {}
-        if enrich_reaction_fields:
-            try:
-                last_price = get_last_price_or_recent_close(
-                    ticker,
-                    daily_closes_loader=daily_closes_loader,
-                )
-                _, earnings_context = compute_earnings_signal(
-                    ticker,
-                    last_price,
-                    daily_closes_loader=daily_closes_loader,
-                )
-            except Exception:
-                earnings_context = {}
-        enriched_rows.append(
+        event_days = row.get("days_to_earnings")
+        normalized_rows.append(
             {
                 **row,
-                "avg_post_earnings_move_pct": earnings_context.get("avg_post_earnings_move_pct"),
-                "post_earnings_up_rate": earnings_context.get("post_earnings_up_rate"),
-                "reaction_samples": earnings_context.get("reaction_samples"),
-                "avg_surprise_percent": earnings_context.get("avg_surprise_percent"),
-                "earnings_risk_flag": bool(
-                    earnings_context.get("days_to_earnings") is not None
-                    and int(earnings_context.get("days_to_earnings")) <= 10
-                ),
+                "avg_post_earnings_move_pct": None,
+                "post_earnings_up_rate": None,
+                "reaction_samples": None,
+                "avg_surprise_percent": None,
+                "earnings_risk_flag": bool(event_days is not None and int(event_days) <= 10),
             }
         )
 
-    before_open_count = sum(1 for row in enriched_rows if row.get("earnings_session") == "before_open")
-    after_close_count = sum(1 for row in enriched_rows if row.get("earnings_session") == "after_close")
-    unknown_session_count = sum(1 for row in enriched_rows if row.get("earnings_session") == "unknown")
+    before_open_count = sum(1 for row in normalized_rows if row.get("earnings_session") == "before_open")
+    after_close_count = sum(1 for row in normalized_rows if row.get("earnings_session") == "after_close")
+    unknown_session_count = sum(1 for row in normalized_rows if row.get("earnings_session") == "unknown")
     return EarningsCalendarResponse(
         as_of=datetime.now(timezone.utc),
         days_ahead=days_ahead,
         sector=sector,
         industry=industry,
         sp100_only=sp100_only,
-        event_count=len(enriched_rows),
+        event_count=len(normalized_rows),
         before_open_count=before_open_count,
         after_close_count=after_close_count,
         unknown_session_count=unknown_session_count,
-        rows=[EarningsCalendarRowOut(**row) for row in enriched_rows],
+        rows=[EarningsCalendarRowOut(**row) for row in normalized_rows],
+    )
+
+
+@app.get("/calendar/earnings/{ticker}", response_model=EarningsCalendarDetailResponse)
+def get_earnings_calendar_detail(
+    ticker: str,
+    days_ahead: int = Query(default=30, ge=1, le=90),
+    db: Session = Depends(get_db),
+    _=Depends(require_bearer_token),
+):
+    normalized_ticker = str(ticker or "").strip().upper()
+    if not normalized_ticker:
+        raise HTTPException(status_code=400, detail="Ticker is required.")
+
+    matching_rows = get_upcoming_earnings_calendar(
+        days_ahead=days_ahead,
+        tickers=[normalized_ticker],
+    )
+    if not matching_rows:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No upcoming earnings event found for {normalized_ticker} in the next {days_ahead} days.",
+        )
+
+    event_row = matching_rows[0]
+    daily_closes_loader = _build_daily_closes_loader(db)
+    earnings_context = {}
+    try:
+        last_price = get_last_price_or_recent_close(
+            normalized_ticker,
+            daily_closes_loader=daily_closes_loader,
+        )
+        _, earnings_context = compute_earnings_signal(
+            normalized_ticker,
+            last_price,
+            daily_closes_loader=daily_closes_loader,
+        )
+    except Exception:
+        earnings_context = {}
+
+    event_days = event_row.get("days_to_earnings")
+    return EarningsCalendarDetailResponse(
+        as_of=datetime.now(timezone.utc),
+        **event_row,
+        avg_post_earnings_move_pct=earnings_context.get("avg_post_earnings_move_pct"),
+        post_earnings_up_rate=earnings_context.get("post_earnings_up_rate"),
+        reaction_samples=earnings_context.get("reaction_samples"),
+        avg_surprise_percent=earnings_context.get("avg_surprise_percent"),
+        earnings_risk_flag=bool(event_days is not None and int(event_days) <= 10),
     )
 
 
@@ -2204,3 +2236,5 @@ def learning_patterns(
         "by_ticker": by_ticker,
         "prompt_context": prompt_context,
     }
+
+
