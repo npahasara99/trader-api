@@ -16,6 +16,14 @@ def _normalize_db_url(db_url: str) -> str:
     return db_url.replace("postgresql+psycopg2://", "postgresql+psycopg://")
 
 
+def _engine_kwargs() -> dict:
+    # Keep the dashboard compatible with Supabase pooler connections.
+    return {
+        "pool_pre_ping": True,
+        "connect_args": {"prepare_threshold": None},
+    }
+
+
 @lru_cache(maxsize=1)
 def _load_repo_env() -> None:
     env_path = Path(__file__).resolve().parents[1] / ".env"
@@ -42,4 +50,4 @@ def get_supabase_db_url() -> str:
 
 @lru_cache(maxsize=1)
 def get_engine() -> Engine:
-    return create_engine(get_supabase_db_url(), pool_pre_ping=True)
+    return create_engine(get_supabase_db_url(), **_engine_kwargs())

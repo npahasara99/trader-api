@@ -22,13 +22,22 @@ def _normalize_db_url(db_url: str) -> str:
     return db_url.replace("postgresql+psycopg2://", "postgresql+psycopg://")
 
 
+def _supabase_engine_kwargs() -> dict[str, Any]:
+    # Supabase pooler connections can raise DuplicatePreparedStatement with
+    # psycopg prepared statements, so disable them for this reporting path.
+    return {
+        "pool_pre_ping": True,
+        "connect_args": {"prepare_threshold": None},
+    }
+
+
 @lru_cache(maxsize=1)
 def _get_supabase_components():
     db_url = os.getenv("SUPABASE_DATABASE_URL")
     if not db_url:
         return None
 
-    engine = create_engine(_normalize_db_url(db_url), pool_pre_ping=True)
+    engine = create_engine(_normalize_db_url(db_url), **_supabase_engine_kwargs())
     session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     metadata = MetaData(schema="public")
     scan_runs = Table("scan_runs", metadata, autoload_with=engine)
