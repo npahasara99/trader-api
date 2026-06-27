@@ -9,6 +9,7 @@ import pandas as pd
 
 
 WATCH_PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+ACTIONABILITY_ORDER = {"ready_soon": 0, "monitor": 1, "background": 2}
 
 
 def safe_json(value):
@@ -29,13 +30,14 @@ def sort_watchlist_table(df: pd.DataFrame) -> pd.DataFrame:
         return df
     out = df.copy()
     out["watch_priority_sort"] = out["watch_priority"].map(WATCH_PRIORITY_ORDER).fillna(3)
+    out["actionability_sort"] = out["actionability_label"].map(ACTIONABILITY_ORDER).fillna(3)
     out["actionability_score"] = pd.to_numeric(out["actionability_score"], errors="coerce")
     out = out.sort_values(
-        by=["actionability_score", "watch_priority_sort", "ticker"],
-        ascending=[False, True, True],
+        by=["actionability_sort", "actionability_score", "watch_priority_sort", "updated_at", "ticker"],
+        ascending=[True, False, True, False, True],
         na_position="last",
     )
-    return out.drop(columns=["watch_priority_sort"])
+    return out.drop(columns=["watch_priority_sort", "actionability_sort"])
 
 
 def filter_watchlist_df(

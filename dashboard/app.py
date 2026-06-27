@@ -380,7 +380,9 @@ except Exception as exc:
 
 latest_run = latest_run_df.iloc[0] if not latest_run_df.empty else {}
 sorted_snapshots_df = sort_watchlist_table(snapshots_df)
-latest_data_ts = None if sorted_snapshots_df.empty else format_ts(sorted_snapshots_df["updated_at"].max())
+latest_data_ts = format_ts(latest_run.get("latest_snapshot_updated_at")) if latest_run.get("latest_snapshot_updated_at") else (
+    None if sorted_snapshots_df.empty else format_ts(sorted_snapshots_df["updated_at"].max())
+)
 
 render_header(
     latest_run_ts=format_ts(latest_run.get("created_at")),
@@ -607,7 +609,7 @@ with scanner_tab:
 
 with active_tab:
     st.markdown("### Overview")
-    st.caption("Current-state metrics are driven only by non-expired rows in watchlist snapshots.")
+    st.caption("Current-state metrics are driven only by the latest non-expired row per ticker in watchlist snapshots. Current Price is the stored planner snapshot price, not a live quote.")
     if latest_run_df.empty:
         st.info("No historical scan runs are stored yet. You can still use the Scanner tab to run workflows and populate the dashboard.")
     primary_metrics = st.columns(5)
@@ -622,21 +624,23 @@ with active_tab:
     with primary_metrics[4]:
         render_kpi_card("Background", int(latest_run.get("background_count") or 0))
 
-    secondary_metrics = st.columns(2)
+    secondary_metrics = st.columns(3)
     with secondary_metrics[0]:
         render_kpi_card("Primary Watchlist", int(latest_run.get("primary_watchlist_count") or 0), small=True)
     with secondary_metrics[1]:
         render_kpi_card("Secondary Watchlist", int(latest_run.get("secondary_watchlist_count") or 0), small=True)
+    with secondary_metrics[2]:
+        render_kpi_card("Snapshot Updated", latest_data_ts or "-", small=True)
 
     st.markdown("### Top 5 Active Watch")
-    st.caption("The highest-priority names from the latest active snapshot set, ranked to surface what deserves attention first.")
+    st.caption("The highest-priority names from the active snapshot set. Cards show Current Price separately from planner levels so entries are not mistaken for live market price.")
     top_watch_cols = st.columns(5)
     for idx, (_, row) in enumerate(top_watch_df.iterrows()):
         with top_watch_cols[idx % 5]:
             render_top_watch_card(row)
 
     st.markdown("### Latest Watchlist")
-    st.caption("These rows come only from current non-expired ticker snapshots.")
+    st.caption("These rows come only from current non-expired ticker snapshots, using the latest applicable row per ticker.")
     filter_container = st.container(border=True)
     with filter_container:
         filter_cols = st.columns([1, 1, 1, 2])
@@ -670,10 +674,12 @@ with active_tab:
         "actionability_label",
         "suitability_label",
         "trend_state",
+        "current_price",
         "preferred_entry",
         "stop_loss",
         "take_profit_1",
         "max_hold_date",
+        "updated_at",
     ]
     st.dataframe(
         format_watchlist_display(filtered_snapshots_df[watchlist_table_cols]),
@@ -728,6 +734,8 @@ with active_tab:
                         ("Actionability", snapshot_row.get("actionability_label") or "-"),
                         ("Suitability", snapshot_row.get("suitability_label") or "-"),
                         ("Trend State", snapshot_row.get("trend_state") or "-"),
+                        ("Current Price", format_price(snapshot_row.get("current_price"))),
+                        ("Price / Snapshot As Of", format_ts(snapshot_row.get("current_price_asof") or snapshot_row.get("updated_at"))),
                         ("Preferred Entry", format_price(snapshot_row.get("preferred_entry"))),
                         ("Stop Loss", format_price(snapshot_row.get("stop_loss"))),
                         ("Take Profit 1", format_price(snapshot_row.get("take_profit_1"))),
@@ -735,6 +743,7 @@ with active_tab:
                     ],
                     columns=3,
                 )
+                st.caption("Planner levels below are from the stored active snapshot. Current Price is shown separately and is not a live streaming quote.")
                 st.caption(summary_from_row(snapshot_row))
 
         with execution_tab:

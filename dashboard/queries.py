@@ -13,15 +13,35 @@ except ImportError:
     from db import get_engine
 
 
-LATEST_RUN_SQL = """
-with latest_run as (
-    select *
-    from public.scan_runs
-    order by created_at desc
-    limit 1
+ACTIVE_SNAPSHOTS_CTE = """
+with ranked_snapshots as (
+    select
+        ticker,
+        updated_at,
+        source_run_id,
+        final_action,
+        watchlist_tier,
+        watch_priority,
+        actionability_label,
+        actionability_score,
+        suitability_label,
+        suitability_score,
+        trend_state,
+        preferred_entry,
+        stop_loss,
+        take_profit_1,
+        max_hold_date,
+        short_summary,
+        raw_result_json,
+        row_number() over (
+            partition by ticker
+            order by updated_at desc nulls last, source_run_id desc nulls last
+        ) as snapshot_rank
+    from public.watchlist_snapshots
+    where max_hold_date is null or max_hold_date >= now()
 ),
 active_snapshots as (
-    select distinct on (ticker)
+    select
         ticker,
         updated_at,
         source_run_id,
@@ -39,46 +59,58 @@ active_snapshots as (
         max_hold_date,
         short_summary,
         raw_result_json
-    from public.watchlist_snapshots
-    where max_hold_date is null or max_hold_date >= now()
-    order by ticker asc, updated_at desc
+    from ranked_snapshots
+    where snapshot_rank = 1
+)
+"""
+
+
+LATEST_RUN_SQL = (
+    ACTIVE_SNAPSHOTS_CTE
+    + """
+, latest_run as (
+    select *
+    from public.scan_runs
+    order by created_at desc
+    limit 1
+),
+latest_active_snapshot as (
+    select
+        source_run_id,
+        updated_at
+    from active_snapshots
+    order by updated_at desc nulls last, ticker asc
+    limit 1
+),
+active_context_run as (
+    select sr.*
+    from latest_active_snapshot las
+    join public.scan_runs sr
+        on sr.id = las.source_run_id
 )
 select
     lr.id,
     lr.created_at,
     lr.workflow_type,
-    lr.market_regime,
+    coalesce((select market_regime from active_context_run), lr.market_regime) as market_regime,
     lr.top_scan,
     lr.top_plan,
     lr.pre_scan_shortlist,
     lr.pre_scanned_count,
     lr.pre_scan_shortlist_count,
-    count(s.ticker) as selected_count,
+    (select count(*) from active_snapshots) as selected_count,
     lr.selected_count as latest_run_selected_count,
     lr.rows_logged,
     lr.selection_message,
-    coalesce(sum(case when s.actionability_label = 'ready_soon' then 1 else 0 end), 0) as ready_soon_count,
-    coalesce(sum(case when s.actionability_label = 'monitor' then 1 else 0 end), 0) as monitor_count,
-    coalesce(sum(case when s.actionability_label = 'background' then 1 else 0 end), 0) as background_count,
-    coalesce(sum(case when s.watchlist_tier = 'primary' then 1 else 0 end), 0) as primary_watchlist_count,
-    coalesce(sum(case when s.watchlist_tier = 'secondary' then 1 else 0 end), 0) as secondary_watchlist_count
+    (select updated_at from latest_active_snapshot) as latest_snapshot_updated_at,
+    coalesce((select count(*) from active_snapshots where actionability_label = 'ready_soon'), 0) as ready_soon_count,
+    coalesce((select count(*) from active_snapshots where actionability_label = 'monitor'), 0) as monitor_count,
+    coalesce((select count(*) from active_snapshots where actionability_label = 'background'), 0) as background_count,
+    coalesce((select count(*) from active_snapshots where watchlist_tier = 'primary'), 0) as primary_watchlist_count,
+    coalesce((select count(*) from active_snapshots where watchlist_tier = 'secondary'), 0) as secondary_watchlist_count
 from latest_run lr
-left join active_snapshots s
-    on true
-group by
-    lr.id,
-    lr.created_at,
-    lr.workflow_type,
-    lr.market_regime,
-    lr.top_scan,
-    lr.top_plan,
-    lr.pre_scan_shortlist,
-    lr.pre_scanned_count,
-    lr.pre_scan_shortlist_count,
-    lr.selected_count,
-    lr.rows_logged,
-    lr.selection_message
 """
+)
 
 
 RUN_HISTORY_SQL = """
@@ -98,8 +130,10 @@ limit %(limit)s
 """
 
 
-LATEST_SNAPSHOTS_SQL = """
-select distinct on (ticker)
+LATEST_SNAPSHOTS_SQL = (
+    ACTIVE_SNAPSHOTS_CTE
+    + """
+select
     ticker,
     updated_at,
     source_run_id,
@@ -117,10 +151,10 @@ select distinct on (ticker)
     max_hold_date,
     short_summary,
     raw_result_json
-from public.watchlist_snapshots
-where max_hold_date is null or max_hold_date >= now()
-order by ticker asc, updated_at desc
+from active_snapshots
+order by updated_at desc nulls last, ticker asc
 """
+)
 
 
 RUN_RESULTS_SQL = """
@@ -162,7 +196,9 @@ order by rank asc, ticker asc
 """
 
 
-LATEST_TICKER_SNAPSHOT_SQL = """
+LATEST_TICKER_SNAPSHOT_SQL = (
+    ACTIVE_SNAPSHOTS_CTE
+    + """
 select
     updated_at,
     source_run_id,
@@ -181,40 +217,19 @@ select
     max_hold_date,
     short_summary,
     raw_result_json
-from public.watchlist_snapshots
+from active_snapshots
 where ticker = %(ticker)s
-  and (max_hold_date is null or max_hold_date >= now())
-order by updated_at desc
 limit 1
 """
-
-
-TOP_WATCH_SQL = """
-with active_snapshots as (
-    select distinct on (ticker)
-        ticker,
-        updated_at,
-        source_run_id,
-        final_action,
-        watchlist_tier,
-        watch_priority,
-        actionability_label,
-        actionability_score,
-        suitability_label,
-        suitability_score,
-        trend_state,
-        preferred_entry,
-        stop_loss,
-        take_profit_1,
-        max_hold_date,
-        short_summary,
-        raw_result_json
-    from public.watchlist_snapshots
-    where (max_hold_date is null or max_hold_date >= now())
-    order by ticker asc, updated_at desc
 )
+
+
+TOP_WATCH_SQL = (
+    ACTIVE_SNAPSHOTS_CTE
+    + """
 select
     ticker,
+    updated_at,
     final_action,
     watchlist_tier,
     watch_priority,
@@ -244,10 +259,12 @@ order by
         when 'secondary' then 1
         else 2
     end asc,
+    updated_at desc nulls last,
     suitability_score desc nulls last,
     ticker asc
 limit %(limit)s
 """
+)
 
 
 def _normalize_json_column(value):
@@ -271,6 +288,19 @@ def _normalize_df_json(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return out
 
 
+def _decorate_active_snapshot_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    if "raw_result_json" in out.columns:
+        out["current_price"] = out["raw_result_json"].apply(
+            lambda payload: payload.get("current_price") if isinstance(payload, dict) else None
+        )
+    if "updated_at" in out.columns:
+        out["current_price_asof"] = out["updated_at"]
+    return out
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_latest_run_summary() -> pd.DataFrame:
     return pd.read_sql_query(LATEST_RUN_SQL, get_engine())
@@ -284,7 +314,7 @@ def fetch_run_history(limit: int = 25) -> pd.DataFrame:
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_latest_snapshots() -> pd.DataFrame:
     df = pd.read_sql_query(LATEST_SNAPSHOTS_SQL, get_engine())
-    return _normalize_df_json(df, ["raw_result_json"])
+    return _decorate_active_snapshot_df(_normalize_df_json(df, ["raw_result_json"]))
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -299,10 +329,10 @@ def fetch_run_results(run_id: str) -> pd.DataFrame:
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_latest_ticker_snapshot(ticker: str) -> pd.DataFrame:
     df = pd.read_sql_query(LATEST_TICKER_SNAPSHOT_SQL, get_engine(), params={"ticker": ticker})
-    return _normalize_df_json(df, ["raw_result_json"])
+    return _decorate_active_snapshot_df(_normalize_df_json(df, ["raw_result_json"]))
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_top_watch(limit: int = 5) -> pd.DataFrame:
     df = pd.read_sql_query(TOP_WATCH_SQL, get_engine(), params={"limit": limit})
-    return _normalize_df_json(df, ["raw_result_json"])
+    return _decorate_active_snapshot_df(_normalize_df_json(df, ["raw_result_json"]))

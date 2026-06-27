@@ -41,8 +41,8 @@ def render_header(*, latest_run_ts: str, latest_data_ts: str | None) -> None:
     st.title("Trader Watch Dashboard")
     st.markdown(
         f'<div class="dash-subtitle">Read-only view of the latest scan, watchlist, and run history from the Supabase reporting database.</div>'
-        f'<div class="section-caption">Latest run: {html.escape(latest_run_ts)}'
-        + (f" | Latest data: {html.escape(latest_data_ts)}" if latest_data_ts else "")
+        f'<div class="section-caption">Latest workflow run: {html.escape(latest_run_ts)}'
+        + (f" | Active snapshots updated: {html.escape(latest_data_ts)}" if latest_data_ts else "")
         + "</div>",
         unsafe_allow_html=True,
     )
@@ -133,10 +133,12 @@ def render_top_watch_card(row) -> None:
             <div class="badge-row">{badges}</div>
             <div class="mini-grid">
                 <div><div class="mini-label">Trend</div><div class="mini-value">{html.escape(pretty_label(row.get("trend_state")))}</div></div>
-                <div><div class="mini-label">Entry</div><div class="mini-value">{html.escape(format_price(row.get("preferred_entry")))}</div></div>
-                <div><div class="mini-label">Stop</div><div class="mini-value">{html.escape(format_price(row.get("stop_loss")))}</div></div>
-                <div><div class="mini-label">TP1</div><div class="mini-value">{html.escape(format_price(row.get("take_profit_1")))}</div></div>
+                <div><div class="mini-label">Current Price</div><div class="mini-value">{html.escape(format_price(row.get("current_price")))}</div></div>
+                <div><div class="mini-label">Preferred Entry</div><div class="mini-value">{html.escape(format_price(row.get("preferred_entry")))}</div></div>
+                <div><div class="mini-label">Stop Loss</div><div class="mini-value">{html.escape(format_price(row.get("stop_loss")))}</div></div>
+                <div><div class="mini-label">TP1 Target</div><div class="mini-value">{html.escape(format_price(row.get("take_profit_1")))}</div></div>
             </div>
+            <div class="section-caption">Snapshot updated: {html.escape(format_ts(row.get("updated_at")))}</div>
             <div class="summary-note">{html.escape(summary)}</div>
         </div>
         """,
@@ -260,11 +262,33 @@ def format_watchlist_display(df):
     if df.empty:
         return df
     out = df.copy()
-    for column in ["preferred_entry", "stop_loss", "take_profit_1"]:
+    for column in ["current_price", "preferred_entry", "stop_loss", "take_profit_1"]:
         if column in out.columns:
             out[column] = out[column].apply(format_price)
     if "max_hold_date" in out.columns:
         out["max_hold_date"] = out["max_hold_date"].apply(format_short_date)
+    if "updated_at" in out.columns:
+        out["updated_at"] = out["updated_at"].apply(format_ts)
+    if "current_price_asof" in out.columns:
+        out["current_price_asof"] = out["current_price_asof"].apply(format_ts)
+    out = out.rename(
+        columns={
+            "ticker": "Ticker",
+            "final_action": "Final Action",
+            "watchlist_tier": "Watchlist Tier",
+            "watch_priority": "Watch Priority",
+            "actionability_label": "Actionability",
+            "suitability_label": "Suitability",
+            "trend_state": "Trend State",
+            "current_price": "Current Price",
+            "current_price_asof": "Price As Of",
+            "preferred_entry": "Preferred Entry",
+            "stop_loss": "Stop Loss",
+            "take_profit_1": "TP1",
+            "max_hold_date": "Max Hold Date",
+            "updated_at": "Snapshot Updated",
+        }
+    )
     return out
 
 
