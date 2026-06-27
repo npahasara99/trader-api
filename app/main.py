@@ -123,6 +123,7 @@ class QuoteRowOut(BaseModel):
     live_price_asof: Optional[datetime] = None
     available: bool = False
     status: str = "unavailable"
+    price_source: str = "unavailable"
 
 
 class QuoteBatchResponse(BaseModel):
@@ -1284,6 +1285,7 @@ def debug_finnhub(_=Depends(require_bearer_token)):
 @app.get("/market/quotes", response_model=QuoteBatchResponse)
 def get_market_quotes(
     tickers: str = Query(..., description="Comma-separated ticker list"),
+    db: Session = Depends(get_db),
     _=Depends(require_bearer_token),
 ):
     normalized_tickers = _normalize_symbols(str(tickers or "").split(","))
@@ -1291,20 +1293,42 @@ def get_market_quotes(
         raise HTTPException(status_code=400, detail="At least one ticker is required.")
 
     as_of = datetime.now(timezone.utc)
+    daily_closes_loader = _build_daily_closes_loader(db)
     rows: list[QuoteRowOut] = []
     for ticker in normalized_tickers[:100]:
         live_price = None
+        live_price_asof = None
+        price_source = "unavailable"
+        status = "unavailable"
         try:
             live_price = get_last_price(ticker)
         except Exception:
             live_price = None
+        if live_price is not None:
+            live_price_asof = as_of
+            price_source = "live_quote"
+            status = "ok"
+        else:
+            end = as_of.date()
+            start = end - timedelta(days=14)
+            try:
+                close_map = daily_closes_loader(ticker, start, end)
+            except Exception:
+                close_map = {}
+            if close_map:
+                latest_day = max(close_map.keys())
+                live_price = float(close_map[latest_day])
+                live_price_asof = datetime.combine(latest_day, datetime.min.time(), tzinfo=timezone.utc)
+                price_source = "recent_close_fallback"
+                status = "stale_close"
         rows.append(
             QuoteRowOut(
                 ticker=ticker,
                 live_price=live_price,
-                live_price_asof=as_of if live_price is not None else None,
+                live_price_asof=live_price_asof,
                 available=live_price is not None,
-                status="ok" if live_price is not None else "unavailable",
+                status=status,
+                price_source=price_source,
             )
         )
 

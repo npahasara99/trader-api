@@ -242,6 +242,7 @@ def build_active_market_view(snapshot_df: pd.DataFrame, live_quotes_df: pd.DataF
     out["live_price_asof"] = None
     out["live_price_available"] = False
     out["live_quote_status"] = "unavailable"
+    out["live_price_source"] = "unavailable"
 
     if live_quotes_df is not None and not live_quotes_df.empty:
         merged = out.merge(live_quotes_df, on="ticker", how="left", suffixes=("", "_live"))
@@ -254,6 +255,8 @@ def build_active_market_view(snapshot_df: pd.DataFrame, live_quotes_df: pd.DataF
             out["live_price_available"] = out["available"].fillna(False)
         if "status" in out.columns:
             out["live_quote_status"] = out["status"].fillna("unavailable")
+        if "price_source" in out.columns:
+            out["live_price_source"] = out["price_source"].fillna("unavailable")
 
     out["distance_to_entry_pct"] = out.apply(lambda row: _pct_from_level(row.get("live_price"), row.get("preferred_entry")), axis=1)
     out["distance_to_stop_pct"] = out.apply(lambda row: _pct_from_level(row.get("live_price"), row.get("stop_loss")), axis=1)

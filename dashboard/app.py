@@ -239,10 +239,10 @@ def _render_runner_workflow_result(result: dict) -> None:
     supabase_run_id = result.get("supabase_scan_run_id")
     supabase_error = result.get("supabase_persistence_error")
     if supabase_persisted:
-        st.success(
-            "Supabase active-watchlist persistence succeeded."
-            + (f" Scan run id: {supabase_run_id}" if supabase_run_id else "")
-        )
+        toast_message = "Supabase active-watchlist persistence succeeded."
+        if supabase_run_id:
+            toast_message += f" Scan run id: {supabase_run_id}"
+        st.toast(toast_message, icon=":material/check_circle:")
     elif supabase_error:
         st.error(
             "Supabase active-watchlist persistence failed, so the Active Dashboard will not refresh from this run. "
@@ -652,7 +652,7 @@ with scanner_tab:
 
 with active_tab:
     st.markdown("### Overview")
-    st.caption("Planner state comes from the latest non-expired watchlist snapshots. Live Price comes from runtime quote fetches through the trader API and is never written back into Supabase.")
+    st.caption("Planner state comes from the latest non-expired watchlist snapshots. Live Price comes from runtime quote fetches through the trader API and falls back to the most recent close when a live quote is unavailable, such as when markets are closed.")
     if latest_snapshot_updated_at:
         now_ts = pd.Timestamp(datetime.utcnow())
         snapshot_ts = pd.to_datetime(latest_snapshot_updated_at, errors="coerce")
@@ -668,6 +668,8 @@ with active_tab:
         st.warning(f"Live quotes are currently unavailable. Active views keep planner levels visible, but Live Price stays N/A. {live_quote_error}")
     elif not active_market_df.empty and not bool(active_market_df["live_price_available"].fillna(False).any()):
         st.info("Live quotes were requested, but none were available for the active ticker set. Active views are showing planner levels with Live Price marked N/A.")
+    elif not active_market_df.empty and bool((active_market_df.get("live_price_source") == "recent_close_fallback").any()):
+        st.info("Some active prices are using the most recent close because live quotes were unavailable for those tickers.")
     if latest_run_df.empty:
         st.info("No historical scan runs are stored yet. You can still use the Scanner tab to run workflows and populate the dashboard.")
     primary_metrics = st.columns(5)
@@ -691,14 +693,14 @@ with active_tab:
         render_kpi_card("Snapshot Updated", latest_data_ts or "-", small=True)
 
     st.markdown("### Top 5 Active Watch")
-    st.caption("The highest-priority names from the active snapshot set, now reordered with live proximity in mind. Live Price comes from the API at dashboard runtime; planner levels still come from the saved plan.")
+    st.caption("The highest-priority names from the active snapshot set, now reordered with live proximity in mind. Live Price comes from the API at dashboard runtime and may use the most recent close fallback when markets are closed.")
     top_watch_cols = st.columns(5)
     for idx, (_, row) in enumerate(active_market_df.head(5).iterrows()):
         with top_watch_cols[idx % 5]:
             render_top_watch_card(row)
 
     st.markdown("### Latest Watchlist")
-    st.caption("These rows use the latest applicable non-expired planner snapshot per ticker, merged with live quotes at runtime. If a live quote is unavailable, Live Price stays N/A instead of falling back silently.")
+    st.caption("These rows use the latest applicable non-expired planner snapshot per ticker, merged with live quotes at runtime. If a live quote is unavailable, the dashboard uses the most recent close instead of leaving the active price blank.")
     filter_container = st.container(border=True)
     with filter_container:
         filter_cols = st.columns([1, 1, 1, 2])
@@ -764,7 +766,7 @@ with active_tab:
                 render_top_watch_card(row)
 
     st.markdown("### Selected Ticker")
-    st.caption("Ticker detail merges the latest active planner snapshot with runtime live quotes. Historical per-run results remain in the History tab.")
+    st.caption("Ticker detail merges the latest active planner snapshot with runtime live quotes. If a live quote is unavailable, it uses the most recent close fallback. Historical per-run results remain in the History tab.")
     available_tickers = filtered_active_df["ticker"].dropna().astype(str).tolist() or active_market_df["ticker"].dropna().astype(str).tolist()
     if not available_tickers:
         st.caption("No ticker snapshots available yet.")
@@ -798,6 +800,7 @@ with active_tab:
                         ("Trend State", snapshot_row.get("trend_state") or "-"),
                         ("Live Price", format_price(snapshot_row.get("live_price")) if snapshot_row.get("live_price_available") else "N/A"),
                         ("Live Price As Of", format_ts(snapshot_row.get("live_price_asof")) if snapshot_row.get("live_price_available") else "Unavailable"),
+                        ("Live Price Source", str(snapshot_row.get("live_price_source") or "unavailable").replace("_", " ").title()),
                         ("Distance to Entry", format_pct(snapshot_row.get("distance_to_entry_pct"))),
                         ("Distance to Stop", format_pct(snapshot_row.get("distance_to_stop_pct"))),
                         ("Distance to TP1", format_pct(snapshot_row.get("distance_to_tp1_pct"))),
@@ -809,7 +812,7 @@ with active_tab:
                     ],
                     columns=3,
                 )
-                st.caption("Live Price above comes from the trader API at dashboard runtime. Planner levels below remain fixed to the saved active snapshot and are not overwritten by live quotes.")
+                st.caption("Live Price above comes from the trader API at dashboard runtime and may fall back to the most recent close when live quotes are unavailable. Planner levels below remain fixed to the saved active snapshot and are not overwritten by live quotes.")
                 st.caption(summary_from_row(snapshot_row))
 
         with execution_tab:
