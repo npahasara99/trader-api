@@ -388,6 +388,9 @@ class Sp100WorkflowResponse(BaseModel):
     best_immediate_tickers: List[str] = Field(default_factory=list)
     best_watchlist_tickers: List[str] = Field(default_factory=list)
     rejected_or_low_priority_tickers: List[str] = Field(default_factory=list)
+    supabase_persisted: bool = False
+    supabase_scan_run_id: Optional[str] = None
+    supabase_persistence_error: Optional[str] = None
     rows: List[RankedPlanOut] = Field(default_factory=list)
     best_immediate_setups: List[RankedPlanOut] = Field(default_factory=list)
     best_watchlist_setups: List[RankedPlanOut] = Field(default_factory=list)
@@ -1788,11 +1791,14 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         best_watchlist_setups=[] if req.compact_response else best_watchlist_setups,
         rejected_or_low_priority=[] if req.compact_response else rejected_or_low_priority,
     )
-    persist_sp100_workflow_to_supabase(
+    supabase_status = persist_sp100_workflow_to_supabase(
         workflow_request=req,
         workflow_response=response,
         selected_rows=out_rows,
     )
+    response.supabase_persisted = bool((supabase_status or {}).get("persisted"))
+    response.supabase_scan_run_id = (supabase_status or {}).get("scan_run_id")
+    response.supabase_persistence_error = (supabase_status or {}).get("error")
     return response
 
 

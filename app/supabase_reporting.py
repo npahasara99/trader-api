@@ -272,12 +272,17 @@ def persist_sp100_workflow_to_supabase(
     workflow_request,
     workflow_response,
     selected_rows: list,
-) -> None:
+) -> dict[str, Any]:
     try:
         components = _get_supabase_components()
         if not components:
-            logger.warning("Supabase scan persistence skipped: SUPABASE_DATABASE_URL is not configured.")
-            return
+            message = "SUPABASE_DATABASE_URL is not configured."
+            logger.warning("Supabase scan persistence skipped: %s", message)
+            return {
+                "persisted": False,
+                "scan_run_id": None,
+                "error": message,
+            }
 
         session = components["session_factory"]()
         request_payload = workflow_request.model_dump(mode="json")
@@ -303,10 +308,20 @@ def persist_sp100_workflow_to_supabase(
             planned_at=workflow_response.planned_at,
         )
         session.commit()
+        return {
+            "persisted": True,
+            "scan_run_id": str(scan_run_id) if scan_run_id is not None else None,
+            "error": None,
+        }
     except Exception as exc:
         if "session" in locals():
             session.rollback()
         logger.warning("Supabase scan persistence failed for sp100 workflow: %s", exc)
+        return {
+            "persisted": False,
+            "scan_run_id": None,
+            "error": str(exc),
+        }
     finally:
         if "session" in locals():
             session.close()

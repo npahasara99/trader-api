@@ -235,6 +235,25 @@ def _render_runner_workflow_result(result: dict) -> None:
     with metric_cols[4]:
         render_kpi_card("Rows Logged", int(result.get("rows_logged") or 0), small=True)
 
+    supabase_persisted = bool(result.get("supabase_persisted"))
+    supabase_run_id = result.get("supabase_scan_run_id")
+    supabase_error = result.get("supabase_persistence_error")
+    if supabase_persisted:
+        st.success(
+            "Supabase active-watchlist persistence succeeded."
+            + (f" Scan run id: {supabase_run_id}" if supabase_run_id else "")
+        )
+    elif supabase_error:
+        st.error(
+            "Supabase active-watchlist persistence failed, so the Active Dashboard will not refresh from this run. "
+            f"{supabase_error}"
+        )
+    else:
+        st.warning(
+            "Supabase active-watchlist persistence status was not returned. "
+            "If the Active Dashboard did not update, check the API service deployment and logs."
+        )
+
     st.markdown('<div class="runner-result-gap"></div>', unsafe_allow_html=True)
     bucket_cols = st.columns(3)
     with bucket_cols[0]:
