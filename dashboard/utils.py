@@ -1,4 +1,4 @@
-"""Utility helpers for the Streamlit reporting dashboard."""
+﻿"""Utility helpers for the Streamlit reporting dashboard."""
 
 from __future__ import annotations
 
@@ -32,13 +32,35 @@ def sort_watchlist_table(df: pd.DataFrame) -> pd.DataFrame:
     out["watch_priority_sort"] = out["watch_priority"].map(WATCH_PRIORITY_ORDER).fillna(3)
     out["actionability_sort"] = out["actionability_label"].map(ACTIONABILITY_ORDER).fillna(3)
     out["actionability_score"] = pd.to_numeric(out["actionability_score"], errors="coerce")
+    distance_to_entry = out["distance_to_entry_pct"] if "distance_to_entry_pct" in out.columns else pd.Series([None] * len(out), index=out.index)
+    distance_to_stop = out["distance_to_stop_pct"] if "distance_to_stop_pct" in out.columns else pd.Series([None] * len(out), index=out.index)
+    live_available = out["live_price_available"] if "live_price_available" in out.columns else pd.Series([False] * len(out), index=out.index)
+    out["distance_to_entry_abs"] = pd.to_numeric(distance_to_entry, errors="coerce").abs()
+    out["distance_to_stop_pct"] = pd.to_numeric(distance_to_stop, errors="coerce")
+    out["live_price_available_sort"] = live_available.fillna(False).astype(int)
+
+    proximity_bonus = (12.0 - out["distance_to_entry_abs"].clip(upper=12.0)).fillna(0.0)
+    extension_penalty = pd.to_numeric(distance_to_entry, errors="coerce").clip(lower=0).fillna(0.0)
+    stop_pressure_penalty = out["distance_to_stop_pct"].apply(
+        lambda value: 10.0 if pd.notna(value) and value <= 1.5 else (4.0 if pd.notna(value) and value <= 4.0 else 0.0)
+    )
+    tier_bonus = out.get("watchlist_tier").map({"primary": 3.0, "secondary": 1.0}).fillna(0.0)
+    live_bonus = out["live_price_available_sort"] * 2.5
+    out["active_rank_score"] = (
+        out["actionability_score"].fillna(0.0) * 100.0
+        + proximity_bonus
+        + tier_bonus
+        + live_bonus
+        - extension_penalty
+        - stop_pressure_penalty
+    )
+
     out = out.sort_values(
-        by=["actionability_sort", "actionability_score", "watch_priority_sort", "updated_at", "ticker"],
+        by=["actionability_sort", "active_rank_score", "watch_priority_sort", "updated_at", "ticker"],
         ascending=[True, False, True, False, True],
         na_position="last",
     )
-    return out.drop(columns=["watch_priority_sort", "actionability_sort"])
-
+    return out.drop(columns=["watch_priority_sort", "actionability_sort", "distance_to_entry_abs", "distance_to_stop_pct", "live_price_available_sort"], errors="ignore")
 
 def filter_watchlist_df(
     df: pd.DataFrame,
@@ -92,6 +114,14 @@ def format_price(value) -> str:
     except Exception:
         return str(value)
 
+
+def format_pct(value) -> str:
+    if value is None or value == "":
+        return "-"
+    try:
+        return f"{float(value):+.2f}%"
+    except Exception:
+        return str(value)
 
 def first_non_empty(*values):
     for value in values:
@@ -165,3 +195,58 @@ def format_runner_plan_rows(rows: list[dict]) -> pd.DataFrame:
         out["max_hold_date"] = out["max_hold_date"].apply(format_short_date)
     return out
 
+
+
+def _safe_float(value):
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _pct_from_level(price, level):
+    price_val = _safe_float(price)
+    level_val = _safe_float(level)
+    if price_val is None or level_val is None or level_val == 0:
+        return None
+    return round(((price_val - level_val) / level_val) * 100.0, 2)
+
+
+def _pct_to_target(price, target):
+    price_val = _safe_float(price)
+    target_val = _safe_float(target)
+    if price_val is None or target_val is None or price_val == 0:
+        return None
+    return round(((target_val - price_val) / price_val) * 100.0, 2)
+
+
+def build_active_market_view(snapshot_df: pd.DataFrame, live_quotes_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    if snapshot_df.empty:
+        return snapshot_df
+
+    out = snapshot_df.copy()
+    out["snapshot_price"] = out.get("current_price")
+    out["snapshot_price_asof"] = out.get("current_price_asof")
+    out["live_price"] = None
+    out["live_price_asof"] = None
+    out["live_price_available"] = False
+    out["live_quote_status"] = "unavailable"
+
+    if live_quotes_df is not None and not live_quotes_df.empty:
+        merged = out.merge(live_quotes_df, on="ticker", how="left", suffixes=("", "_live"))
+        out = merged
+        if "live_price" not in out.columns and "live_price_live" in out.columns:
+            out["live_price"] = out["live_price_live"]
+        if "live_price_asof" not in out.columns and "live_price_asof_live" in out.columns:
+            out["live_price_asof"] = out["live_price_asof_live"]
+        if "available" in out.columns:
+            out["live_price_available"] = out["available"].fillna(False)
+        if "status" in out.columns:
+            out["live_quote_status"] = out["status"].fillna("unavailable")
+
+    out["distance_to_entry_pct"] = out.apply(lambda row: _pct_from_level(row.get("live_price"), row.get("preferred_entry")), axis=1)
+    out["distance_to_stop_pct"] = out.apply(lambda row: _pct_from_level(row.get("live_price"), row.get("stop_loss")), axis=1)
+    out["distance_to_tp1_pct"] = out.apply(lambda row: _pct_to_target(row.get("live_price"), row.get("take_profit_1")), axis=1)
+    return out

@@ -1,4 +1,4 @@
-"""HTTP client helpers for triggering trader API workflows from Streamlit."""
+﻿"""HTTP client helpers for triggering trader API workflows from Streamlit."""
 
 from __future__ import annotations
 
@@ -204,3 +204,14 @@ def fetch_earnings_detail(ticker: str, *, days_ahead: int = 30) -> dict[str, Any
         timeout=get_api_timeout_seconds(120),
     )
 
+
+
+def fetch_live_quotes(tickers: list[str]) -> dict[str, Any]:
+    normalized = [str(ticker or "").strip().upper() for ticker in tickers if str(ticker or "").strip()]
+    if not normalized:
+        return {"as_of": None, "quote_count": 0, "available_count": 0, "unavailable_count": 0, "rows": []}
+    return get_json(
+        "/market/quotes",
+        params={"tickers": ",".join(normalized)},
+        timeout=get_api_timeout_seconds(60),
+    )

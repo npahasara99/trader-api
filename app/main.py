@@ -117,6 +117,22 @@ class ScanResponse(BaseModel):
     tickers: List[str]
 
 
+class QuoteRowOut(BaseModel):
+    ticker: str
+    live_price: Optional[float] = None
+    live_price_asof: Optional[datetime] = None
+    available: bool = False
+    status: str = "unavailable"
+
+
+class QuoteBatchResponse(BaseModel):
+    as_of: datetime
+    quote_count: int
+    available_count: int
+    unavailable_count: int
+    rows: List[QuoteRowOut] = Field(default_factory=list)
+
+
 class Sp100ScanRequest(BaseModel):
     top_n: int = 100
     sector: Optional[str] = None
@@ -1262,6 +1278,43 @@ def debug_finnhub(_=Depends(require_bearer_token)):
     }
 
 
+@app.get("/market/quotes", response_model=QuoteBatchResponse)
+def get_market_quotes(
+    tickers: str = Query(..., description="Comma-separated ticker list"),
+    _=Depends(require_bearer_token),
+):
+    normalized_tickers = _normalize_symbols(str(tickers or "").split(","))
+    if not normalized_tickers:
+        raise HTTPException(status_code=400, detail="At least one ticker is required.")
+
+    as_of = datetime.now(timezone.utc)
+    rows: list[QuoteRowOut] = []
+    for ticker in normalized_tickers[:100]:
+        live_price = None
+        try:
+            live_price = get_last_price(ticker)
+        except Exception:
+            live_price = None
+        rows.append(
+            QuoteRowOut(
+                ticker=ticker,
+                live_price=live_price,
+                live_price_asof=as_of if live_price is not None else None,
+                available=live_price is not None,
+                status="ok" if live_price is not None else "unavailable",
+            )
+        )
+
+    available_count = sum(1 for row in rows if row.available)
+    return QuoteBatchResponse(
+        as_of=as_of,
+        quote_count=len(rows),
+        available_count=available_count,
+        unavailable_count=len(rows) - available_count,
+        rows=rows,
+    )
+
+
 @app.get("/scan/sp100", response_model=ScanResponse)
 def scan_sp100(
     top_n: int = 100,
@@ -2236,5 +2289,6 @@ def learning_patterns(
         "by_ticker": by_ticker,
         "prompt_context": prompt_context,
     }
+
 
 

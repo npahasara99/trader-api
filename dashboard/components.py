@@ -1,4 +1,4 @@
-"""Reusable UI components for the Streamlit trader dashboard."""
+﻿"""Reusable UI components for the Streamlit trader dashboard."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ import html
 import streamlit as st
 
 try:
-    from .utils import first_non_empty, format_price, format_short_date, format_ts, safe_json
+    from .utils import first_non_empty, format_pct, format_price, format_short_date, format_ts, safe_json
 except ImportError:
-    from utils import first_non_empty, format_price, format_short_date, format_ts, safe_json
+    from utils import first_non_empty, format_pct, format_price, format_short_date, format_ts, safe_json
 
 
 def _badge_class(kind: str, value) -> str:
@@ -126,6 +126,8 @@ def render_top_watch_card(row) -> None:
         ]
     )
     summary = summary_from_row(row)
+    live_price = format_price(row.get("live_price")) if row.get("live_price_available") else "N/A"
+    live_asof = format_ts(row.get("live_price_asof")) if row.get("live_price_available") else "Unavailable"
     st.markdown(
         f"""
         <div class="watch-card">
@@ -133,12 +135,13 @@ def render_top_watch_card(row) -> None:
             <div class="badge-row">{badges}</div>
             <div class="mini-grid">
                 <div><div class="mini-label">Trend</div><div class="mini-value">{html.escape(pretty_label(row.get("trend_state")))}</div></div>
-                <div><div class="mini-label">Current Price</div><div class="mini-value">{html.escape(format_price(row.get("current_price")))}</div></div>
+                <div><div class="mini-label">Live Price</div><div class="mini-value">{html.escape(live_price)}</div></div>
                 <div><div class="mini-label">Preferred Entry</div><div class="mini-value">{html.escape(format_price(row.get("preferred_entry")))}</div></div>
                 <div><div class="mini-label">Stop Loss</div><div class="mini-value">{html.escape(format_price(row.get("stop_loss")))}</div></div>
                 <div><div class="mini-label">TP1 Target</div><div class="mini-value">{html.escape(format_price(row.get("take_profit_1")))}</div></div>
+                <div><div class="mini-label">Dist to Entry</div><div class="mini-value">{html.escape(format_pct(row.get("distance_to_entry_pct")))}</div></div>
             </div>
-            <div class="section-caption">Snapshot updated: {html.escape(format_ts(row.get("updated_at")))}</div>
+            <div class="section-caption">Live price as of: {html.escape(live_asof)} | Planner snapshot: {html.escape(format_ts(row.get("updated_at")))}</div>
             <div class="summary-note">{html.escape(summary)}</div>
         </div>
         """,
@@ -262,15 +265,20 @@ def format_watchlist_display(df):
     if df.empty:
         return df
     out = df.copy()
-    for column in ["current_price", "preferred_entry", "stop_loss", "take_profit_1"]:
+    for column in ["live_price", "preferred_entry", "stop_loss", "take_profit_1", "snapshot_price"]:
         if column in out.columns:
             out[column] = out[column].apply(format_price)
     if "max_hold_date" in out.columns:
         out["max_hold_date"] = out["max_hold_date"].apply(format_short_date)
     if "updated_at" in out.columns:
         out["updated_at"] = out["updated_at"].apply(format_ts)
-    if "current_price_asof" in out.columns:
-        out["current_price_asof"] = out["current_price_asof"].apply(format_ts)
+    if "live_price_asof" in out.columns:
+        out["live_price_asof"] = out["live_price_asof"].apply(format_ts)
+    if "snapshot_price_asof" in out.columns:
+        out["snapshot_price_asof"] = out["snapshot_price_asof"].apply(format_ts)
+    for column in ["distance_to_entry_pct", "distance_to_stop_pct", "distance_to_tp1_pct"]:
+        if column in out.columns:
+            out[column] = out[column].apply(format_pct)
     out = out.rename(
         columns={
             "ticker": "Ticker",
@@ -280,13 +288,18 @@ def format_watchlist_display(df):
             "actionability_label": "Actionability",
             "suitability_label": "Suitability",
             "trend_state": "Trend State",
-            "current_price": "Current Price",
-            "current_price_asof": "Price As Of",
+            "live_price": "Live Price",
+            "live_price_asof": "Live Price As Of",
+            "distance_to_entry_pct": "Dist to Entry %",
+            "distance_to_stop_pct": "Dist to Stop %",
+            "distance_to_tp1_pct": "Dist to TP1 %",
             "preferred_entry": "Preferred Entry",
             "stop_loss": "Stop Loss",
             "take_profit_1": "TP1",
             "max_hold_date": "Max Hold Date",
-            "updated_at": "Snapshot Updated",
+            "updated_at": "Planner Snapshot Updated",
+            "snapshot_price": "Snapshot Price",
+            "snapshot_price_asof": "Snapshot Price As Of",
         }
     )
     return out
@@ -299,3 +312,4 @@ def format_run_history_display(df):
     if "created_at" in out.columns:
         out["created_at"] = out["created_at"].apply(format_ts)
     return out
+

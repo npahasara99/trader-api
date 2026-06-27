@@ -10,6 +10,7 @@ from api_client import (
     api_config_status,
     fetch_earnings_calendar,
     fetch_earnings_detail,
+    fetch_live_quotes,
     run_manual_basket,
     run_single_stock_workflow,
     run_sp100_workflow,
@@ -38,12 +39,13 @@ from queries import (
     fetch_latest_ticker_snapshot,
     fetch_run_history,
     fetch_run_results,
-    fetch_top_watch,
 )
 from styles import inject_styles
 from utils import (
+    build_active_market_view,
     filter_watchlist_df,
     first_non_empty,
+    format_pct,
     format_price,
     format_runner_plan_rows,
     format_short_date,
@@ -353,8 +355,7 @@ def _load_dashboard_data():
     latest_run = fetch_latest_run_summary()
     snapshots = fetch_latest_snapshots()
     run_history = fetch_run_history()
-    top_watch = fetch_top_watch()
-    return latest_run, snapshots, run_history, top_watch
+    return latest_run, snapshots, run_history
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -367,11 +368,16 @@ def _load_earnings_detail_data(ticker: str, *, days_ahead: int) -> dict:
     return fetch_earnings_detail(ticker, days_ahead=days_ahead)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_live_quotes_data(tickers: tuple[str, ...]) -> dict:
+    return fetch_live_quotes(list(tickers))
+
+
 _init_runner_state()
 
 
 try:
-    latest_run_df, snapshots_df, run_history_df, top_watch_df = _load_dashboard_data()
+    latest_run_df, snapshots_df, run_history_df = _load_dashboard_data()
 except Exception as exc:
     st.error("Could not load the Supabase reporting database.")
     with st.expander("Error details", expanded=True):
@@ -383,6 +389,19 @@ sorted_snapshots_df = sort_watchlist_table(snapshots_df)
 latest_data_ts = format_ts(latest_run.get("latest_snapshot_updated_at")) if latest_run.get("latest_snapshot_updated_at") else (
     None if sorted_snapshots_df.empty else format_ts(sorted_snapshots_df["updated_at"].max())
 )
+live_quote_error = None
+live_quote_payload = {}
+active_market_df = build_active_market_view(sorted_snapshots_df, pd.DataFrame())
+active_tickers = tuple(sorted_snapshots_df["ticker"].dropna().astype(str).tolist())
+if active_tickers:
+    try:
+        live_quote_payload = _load_live_quotes_data(active_tickers)
+        live_quotes_df = pd.DataFrame(live_quote_payload.get("rows") or [])
+        active_market_df = build_active_market_view(sorted_snapshots_df, live_quotes_df)
+    except TraderAPIError as exc:
+        live_quote_error = str(exc)
+        active_market_df = build_active_market_view(sorted_snapshots_df, pd.DataFrame())
+active_market_df = sort_watchlist_table(active_market_df)
 
 render_header(
     latest_run_ts=format_ts(latest_run.get("created_at")),
@@ -609,7 +628,11 @@ with scanner_tab:
 
 with active_tab:
     st.markdown("### Overview")
-    st.caption("Current-state metrics are driven only by the latest non-expired row per ticker in watchlist snapshots. Current Price is the stored planner snapshot price, not a live quote.")
+    st.caption("Planner state comes from the latest non-expired watchlist snapshots. Live Price comes from runtime quote fetches through the trader API and is never written back into Supabase.")
+    if live_quote_error:
+        st.warning(f"Live quotes are currently unavailable. Active views keep planner levels visible, but Live Price stays N/A. {live_quote_error}")
+    elif not active_market_df.empty and not bool(active_market_df["live_price_available"].fillna(False).any()):
+        st.info("Live quotes were requested, but none were available for the active ticker set. Active views are showing planner levels with Live Price marked N/A.")
     if latest_run_df.empty:
         st.info("No historical scan runs are stored yet. You can still use the Scanner tab to run workflows and populate the dashboard.")
     primary_metrics = st.columns(5)
@@ -633,14 +656,14 @@ with active_tab:
         render_kpi_card("Snapshot Updated", latest_data_ts or "-", small=True)
 
     st.markdown("### Top 5 Active Watch")
-    st.caption("The highest-priority names from the active snapshot set. Cards show Current Price separately from planner levels so entries are not mistaken for live market price.")
+    st.caption("The highest-priority names from the active snapshot set, now reordered with live proximity in mind. Live Price comes from the API at dashboard runtime; planner levels still come from the saved plan.")
     top_watch_cols = st.columns(5)
-    for idx, (_, row) in enumerate(top_watch_df.iterrows()):
+    for idx, (_, row) in enumerate(active_market_df.head(5).iterrows()):
         with top_watch_cols[idx % 5]:
             render_top_watch_card(row)
 
     st.markdown("### Latest Watchlist")
-    st.caption("These rows come only from current non-expired ticker snapshots, using the latest applicable row per ticker.")
+    st.caption("These rows use the latest applicable non-expired planner snapshot per ticker, merged with live quotes at runtime. If a live quote is unavailable, Live Price stays N/A instead of falling back silently.")
     filter_container = st.container(border=True)
     with filter_container:
         filter_cols = st.columns([1, 1, 1, 2])
@@ -658,8 +681,8 @@ with active_tab:
         )
         ticker_search = filter_cols[3].text_input("Ticker Search", placeholder="Search ticker")
 
-    filtered_snapshots_df = filter_watchlist_df(
-        sorted_snapshots_df,
+    filtered_active_df = filter_watchlist_df(
+        active_market_df,
         final_action=selected_final_action,
         watchlist_tier=selected_watchlist_tier,
         actionability_label=selected_actionability,
@@ -674,7 +697,11 @@ with active_tab:
         "actionability_label",
         "suitability_label",
         "trend_state",
-        "current_price",
+        "live_price",
+        "live_price_asof",
+        "distance_to_entry_pct",
+        "distance_to_stop_pct",
+        "distance_to_tp1_pct",
         "preferred_entry",
         "stop_loss",
         "take_profit_1",
@@ -682,16 +709,16 @@ with active_tab:
         "updated_at",
     ]
     st.dataframe(
-        format_watchlist_display(filtered_snapshots_df[watchlist_table_cols]),
+        format_watchlist_display(filtered_active_df[watchlist_table_cols]),
         use_container_width=True,
         hide_index=True,
     )
 
     st.markdown("### Ready Soon")
-    st.caption("The most actionable WAIT setups from the active snapshot set.")
-    ready_df = filtered_snapshots_df[
-        (filtered_snapshots_df["final_action"] == "WAIT")
-        & (filtered_snapshots_df["actionability_label"] == "ready_soon")
+    st.caption("The most actionable WAIT setups from the active snapshot set, with live proximity to entry factored into the active ordering.")
+    ready_df = filtered_active_df[
+        (filtered_active_df["final_action"] == "WAIT")
+        & (filtered_active_df["actionability_label"] == "ready_soon")
     ]
     if ready_df.empty:
         st.caption("No ready-soon WAIT names in the current filtered view.")
@@ -702,14 +729,14 @@ with active_tab:
                 render_top_watch_card(row)
 
     st.markdown("### Selected Ticker")
-    st.caption("Ticker detail here always comes from the latest active snapshot. Historical per-run results are available in the History tab.")
-    available_tickers = filtered_snapshots_df["ticker"].dropna().astype(str).tolist() or sorted_snapshots_df["ticker"].dropna().astype(str).tolist()
+    st.caption("Ticker detail merges the latest active planner snapshot with runtime live quotes. Historical per-run results remain in the History tab.")
+    available_tickers = filtered_active_df["ticker"].dropna().astype(str).tolist() or active_market_df["ticker"].dropna().astype(str).tolist()
     if not available_tickers:
         st.caption("No ticker snapshots available yet.")
     else:
         selected_ticker = st.selectbox("Ticker", options=available_tickers, index=0)
         detail_df = fetch_latest_ticker_snapshot(selected_ticker)
-        snapshot_detail = sorted_snapshots_df[sorted_snapshots_df["ticker"] == selected_ticker]
+        snapshot_detail = active_market_df[active_market_df["ticker"] == selected_ticker]
         snapshot_row = snapshot_detail.iloc[0] if not snapshot_detail.empty else None
         detail_row = detail_df.iloc[0] if not detail_df.empty else None
         chart_execution_payload = _snapshot_payload(detail_row, "chart_execution_view")
@@ -734,8 +761,12 @@ with active_tab:
                         ("Actionability", snapshot_row.get("actionability_label") or "-"),
                         ("Suitability", snapshot_row.get("suitability_label") or "-"),
                         ("Trend State", snapshot_row.get("trend_state") or "-"),
-                        ("Current Price", format_price(snapshot_row.get("current_price"))),
-                        ("Price / Snapshot As Of", format_ts(snapshot_row.get("current_price_asof") or snapshot_row.get("updated_at"))),
+                        ("Live Price", format_price(snapshot_row.get("live_price")) if snapshot_row.get("live_price_available") else "N/A"),
+                        ("Live Price As Of", format_ts(snapshot_row.get("live_price_asof")) if snapshot_row.get("live_price_available") else "Unavailable"),
+                        ("Distance to Entry", format_pct(snapshot_row.get("distance_to_entry_pct"))),
+                        ("Distance to Stop", format_pct(snapshot_row.get("distance_to_stop_pct"))),
+                        ("Distance to TP1", format_pct(snapshot_row.get("distance_to_tp1_pct"))),
+                        ("Planner Snapshot Updated", format_ts(snapshot_row.get("updated_at"))),
                         ("Preferred Entry", format_price(snapshot_row.get("preferred_entry"))),
                         ("Stop Loss", format_price(snapshot_row.get("stop_loss"))),
                         ("Take Profit 1", format_price(snapshot_row.get("take_profit_1"))),
@@ -743,7 +774,7 @@ with active_tab:
                     ],
                     columns=3,
                 )
-                st.caption("Planner levels below are from the stored active snapshot. Current Price is shown separately and is not a live streaming quote.")
+                st.caption("Live Price above comes from the trader API at dashboard runtime. Planner levels below remain fixed to the saved active snapshot and are not overwritten by live quotes.")
                 st.caption(summary_from_row(snapshot_row))
 
         with execution_tab:
