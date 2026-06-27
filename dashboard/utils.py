@@ -36,12 +36,12 @@ def sort_watchlist_table(df: pd.DataFrame) -> pd.DataFrame:
     distance_to_stop = out["distance_to_stop_pct"] if "distance_to_stop_pct" in out.columns else pd.Series([None] * len(out), index=out.index)
     live_available = out["live_price_available"] if "live_price_available" in out.columns else pd.Series([False] * len(out), index=out.index)
     out["distance_to_entry_abs"] = pd.to_numeric(distance_to_entry, errors="coerce").abs()
-    out["distance_to_stop_pct"] = pd.to_numeric(distance_to_stop, errors="coerce")
+    out["distance_to_stop_pct_sort"] = pd.to_numeric(distance_to_stop, errors="coerce")
     out["live_price_available_sort"] = live_available.fillna(False).astype(int)
 
     proximity_bonus = (12.0 - out["distance_to_entry_abs"].clip(upper=12.0)).fillna(0.0)
     extension_penalty = pd.to_numeric(distance_to_entry, errors="coerce").clip(lower=0).fillna(0.0)
-    stop_pressure_penalty = out["distance_to_stop_pct"].apply(
+    stop_pressure_penalty = out["distance_to_stop_pct_sort"].apply(
         lambda value: 10.0 if pd.notna(value) and value <= 1.5 else (4.0 if pd.notna(value) and value <= 4.0 else 0.0)
     )
     tier_bonus = out.get("watchlist_tier").map({"primary": 3.0, "secondary": 1.0}).fillna(0.0)
@@ -60,7 +60,16 @@ def sort_watchlist_table(df: pd.DataFrame) -> pd.DataFrame:
         ascending=[True, False, True, False, True],
         na_position="last",
     )
-    return out.drop(columns=["watch_priority_sort", "actionability_sort", "distance_to_entry_abs", "distance_to_stop_pct", "live_price_available_sort"], errors="ignore")
+    return out.drop(
+        columns=[
+            "watch_priority_sort",
+            "actionability_sort",
+            "distance_to_entry_abs",
+            "distance_to_stop_pct_sort",
+            "live_price_available_sort",
+        ],
+        errors="ignore",
+    )
 
 def filter_watchlist_df(
     df: pd.DataFrame,
