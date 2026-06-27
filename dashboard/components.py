@@ -41,7 +41,7 @@ def render_header(*, latest_run_ts: str, latest_data_ts: str | None) -> None:
     st.title("Trader Watch Dashboard")
     st.markdown(
         f'<div class="dash-subtitle">Read-only view of the latest scan, watchlist, and run history from the Supabase reporting database.</div>'
-        f'<div class="section-caption">Latest workflow run: {html.escape(latest_run_ts)}'
+        f'<div class="section-caption">Latest persisted watchlist run: {html.escape(latest_run_ts)}'
         + (f" | Active snapshots updated: {html.escape(latest_data_ts)}" if latest_data_ts else "")
         + "</div>",
         unsafe_allow_html=True,

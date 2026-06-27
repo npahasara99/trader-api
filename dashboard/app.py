@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pandas as pd
 import streamlit as st
 
@@ -389,6 +391,7 @@ sorted_snapshots_df = sort_watchlist_table(snapshots_df)
 latest_data_ts = format_ts(latest_run.get("latest_snapshot_updated_at")) if latest_run.get("latest_snapshot_updated_at") else (
     None if sorted_snapshots_df.empty else format_ts(sorted_snapshots_df["updated_at"].max())
 )
+latest_snapshot_updated_at = latest_run.get("latest_snapshot_updated_at")
 live_quote_error = None
 live_quote_payload = {}
 active_market_df = build_active_market_view(sorted_snapshots_df, pd.DataFrame())
@@ -619,16 +622,29 @@ with scanner_tab:
                         render_kpi_card("Learning Samples", int(response.get("learning_samples") or 0), small=True)
                     if response.get("logging_skipped_reason"):
                         st.caption(response.get("logging_skipped_reason"))
+                    st.info("Single-stock runs do not currently update the active watchlist in Supabase. The Active Dashboard reflects the latest persisted watchlist workflow, which is currently the SP100 workflow path.")
                 elif last_result.get("run_type") == "manual_basket":
                     _render_runner_plan_result(
                         response.get("rows") or [],
                         planned_at=response.get("planned_at"),
                         market_regime=response.get("market_regime"),
                     )
+                    st.info("Manual basket runs do not currently update the active watchlist in Supabase. The Active Dashboard reflects the latest persisted watchlist workflow, which is currently the SP100 workflow path.")
 
 with active_tab:
     st.markdown("### Overview")
     st.caption("Planner state comes from the latest non-expired watchlist snapshots. Live Price comes from runtime quote fetches through the trader API and is never written back into Supabase.")
+    if latest_snapshot_updated_at:
+        now_ts = pd.Timestamp(datetime.utcnow())
+        snapshot_ts = pd.to_datetime(latest_snapshot_updated_at, errors="coerce")
+        if pd.notna(snapshot_ts):
+            age = now_ts - snapshot_ts.tz_localize(None) if getattr(snapshot_ts, "tzinfo", None) is not None else now_ts - snapshot_ts
+            if age.days >= 1:
+                st.warning(
+                    f"Active watchlist data is stale. Latest persisted watchlist snapshot is from {format_ts(latest_snapshot_updated_at)}. "
+                    "If you ran a workflow today, only SP100 workflow runs currently refresh the active dashboard. "
+                    "If you did run SP100 today, check the API service logs for Supabase persistence warnings."
+                )
     if live_quote_error:
         st.warning(f"Live quotes are currently unavailable. Active views keep planner levels visible, but Live Price stays N/A. {live_quote_error}")
     elif not active_market_df.empty and not bool(active_market_df["live_price_available"].fillna(False).any()):
