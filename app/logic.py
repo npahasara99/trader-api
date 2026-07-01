@@ -1118,25 +1118,56 @@ def build_swing_plan(
             )
             continue
 
-        structured = generate_structured_plan(
-            ticker=t,
-            current_price=float(last),
-            bars=bars,
-            news_items=news,
-            news_score=news_score,
-            earnings_score=earnings_score,
-            earnings_context=earnings_context,
-            market_regime=regime_val,
-            buy_threshold=buy_threshold,
-            avoid_threshold=avoid_threshold,
-            history_stats=(history_stats_by_ticker or {}).get(t),
-            benchmark_bars=benchmark_bars,
-            ticker_meta=SP100_CLASSIFICATION.get(t),
-            sector_relative_strength=pre_scan.get("sector_relative_strength"),
-            llm_provider=llm_provider,
-            llm_model=llm_model,
-            llm_style=llm_style,
-        )
+        try:
+            structured = generate_structured_plan(
+                ticker=t,
+                current_price=float(last),
+                bars=bars,
+                news_items=news,
+                news_score=news_score,
+                earnings_score=earnings_score,
+                earnings_context=earnings_context,
+                market_regime=regime_val,
+                buy_threshold=buy_threshold,
+                avoid_threshold=avoid_threshold,
+                history_stats=(history_stats_by_ticker or {}).get(t),
+                benchmark_bars=benchmark_bars,
+                ticker_meta=SP100_CLASSIFICATION.get(t),
+                sector_relative_strength=pre_scan.get("sector_relative_strength"),
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                llm_style=llm_style,
+            )
+        except Exception as exc:
+            rows.append(
+                PlanRow(
+                    ticker=t,
+                    last=float(last),
+                    entry=None,
+                    stop=None,
+                    take_profit=None,
+                    strategy_action="WAIT",
+                    strategy_reason=f"Structured planner crashed for {t}: {exc}",
+                    max_hold_date=datetime.now(timezone.utc) + timedelta(days=20),
+                    news=news,
+                    llm_action="WAIT",
+                    llm_rationale="structured-planner-crash",
+                    news_score=news_score,
+                    earnings_score=earnings_score,
+                    earnings_context=earnings_context,
+                    signal_score=signal_score,
+                    market_regime=regime_val,
+                    buy_threshold=buy_threshold,
+                    avoid_threshold=avoid_threshold,
+                    current_price=float(last),
+                    pre_scan_score=pre_scan.get("pre_scan_score"),
+                    pre_scan_reason_tags=list(pre_scan.get("pre_scan_reason_tags") or []),
+                    sector_relative_strength=pre_scan.get("sector_relative_strength"),
+                    scan_shortlisted=pre_scan.get("scan_shortlisted"),
+                    scan_rejection_reason="planner_crashed",
+                )
+            )
+            continue
 
         probs = estimate_trade_probabilities(
             signal_score=signal_score,
