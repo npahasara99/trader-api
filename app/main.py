@@ -432,6 +432,8 @@ class Sp100WorkflowResponse(BaseModel):
     selected_count: int
     rows_logged: int
     selection_message: Optional[str] = None
+    planner_crash_count: int = 0
+    planner_crashed_tickers: List[str] = Field(default_factory=list)
     selected_tickers: List[str] = Field(default_factory=list)
     best_immediate_tickers: List[str] = Field(default_factory=list)
     best_watchlist_tickers: List[str] = Field(default_factory=list)
@@ -1714,6 +1716,8 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
             selected_count=0,
             rows_logged=0,
             selection_message="No SP100 stocks matched the requested sector/industry filter.",
+            planner_crash_count=0,
+            planner_crashed_tickers=[],
             selected_tickers=[],
             best_immediate_tickers=[],
             best_watchlist_tickers=[],
@@ -1757,11 +1761,19 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         llm_style=req.llm_style,
     )
 
+    planner_crashed_rows = [
+        r for r in rows
+        if str(getattr(r, "scan_rejection_reason", None) or "") == "planner_crashed"
+    ]
+    planner_crashed_tickers = [r.ticker for r in planner_crashed_rows]
+
     ranked: list[dict] = []
+    skipped_rows: list = []
     priced_candidates = 0
     eligible_count = 0
     for r in rows:
         if r.entry is None or r.stop is None or r.take_profit is None:
+            skipped_rows.append(r)
             continue
         priced_candidates += 1
 
@@ -1820,6 +1832,18 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         if max_hold_days is not None
         else f"Pre-scanned {len(pre_scanned)} names and fully planned {len(shortlist)} shortlisted candidates."
     )
+    if not ranked and planner_crashed_rows:
+        preview = ", ".join(planner_crashed_tickers[:6])
+        suffix = "..." if len(planner_crashed_tickers) > 6 else ""
+        selection_message = (
+            f"No ranked setups were produced because the structured planner crashed for "
+            f"{len(planner_crashed_rows)} tickers. Affected names: {preview}{suffix}."
+        )
+    elif planner_crashed_rows:
+        selection_message = (
+            f"{selection_message} Structured planner crashes were isolated for "
+            f"{len(planner_crashed_rows)} tickers."
+        )
 
     out_rows: list[RankedPlanOut] = []
     for idx, item in enumerate(selected, start=1):
@@ -1840,6 +1864,19 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
     immediate_items = [item for item in ranked if getattr(item["row"], "ranking_bucket", None) == "best_immediate_setups"]
     watchlist_items = [item for item in ranked if getattr(item["row"], "ranking_bucket", None) == "best_watchlist_setups"]
     rejected_items = [item for item in ranked if getattr(item["row"], "ranking_bucket", None) == "rejected_or_low_priority"]
+    if not rejected_items and skipped_rows:
+        rejected_items = [
+            {
+                "score": -999.0,
+                "signal_score": int(getattr(r, "signal_score", 0) or 0),
+                "history_boost": 0.0,
+                "history_samples": 0,
+                "history_win_rate": None,
+                "history_avg_return": None,
+                "row": r,
+            }
+            for r in skipped_rows[:top_plan]
+        ]
 
     def _ranked_rows_for(items: list[dict], limit: int) -> list[RankedPlanOut]:
         out: list[RankedPlanOut] = []
@@ -1905,6 +1942,8 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         selected_count=len(out_rows),
         rows_logged=rows_logged,
         selection_message=selection_message,
+        planner_crash_count=len(planner_crashed_rows),
+        planner_crashed_tickers=planner_crashed_tickers,
         selected_tickers=selected_tickers,
         best_immediate_tickers=best_immediate_tickers,
         best_watchlist_tickers=best_watchlist_tickers,
