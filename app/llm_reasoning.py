@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
+from datetime import date, datetime
 
 from .config import PlanningConfig
 
@@ -41,6 +43,36 @@ def _to_float(value: object, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _json_safe(value: object):
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+
+    item_method = getattr(value, "item", None)
+    if callable(item_method):
+        try:
+            return _json_safe(item_method())
+        except Exception:
+            pass
+
+    try:
+        numeric = float(value)
+        if math.isnan(numeric) or math.isinf(numeric):
+            return None
+        return numeric
+    except Exception:
+        return str(value)
 
 
 def _collect_constructive_traits(payload: dict, config: PlanningConfig) -> list[str]:
@@ -386,7 +418,7 @@ def classify_final_action(*, payload: dict, config: PlanningConfig) -> dict:
 
 def build_llm_prompt(payload: dict) -> str:
     """Create a provider-agnostic JSON-only prompt using structured planner output."""
-    compact = json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
+    compact = json.dumps(_json_safe(payload), separators=(",", ":"), ensure_ascii=True)
     return (
         "You are reviewing a US swing-trade setup. Use only the provided structured data. "
         "Do not invent price levels or unsupported indicators. "
