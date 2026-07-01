@@ -13,6 +13,15 @@ ALLOWED_ACTIONS = {"BUY", "WAIT", "AVOID"}
 class LLMReviewResult:
     llm_action: str
     setup_type: str
+    price_location_context: str
+    continuation_vs_reversion_bias: str
+    news_regime_alignment: str
+    setup_scenario: str
+    tp_aggressiveness: str
+    sl_tolerance: str
+    expected_move_profile: str
+    scenario_confidence: float
+    scenario_rationale: str
     confidence: float
     consensus_view: str
     entry_assessment: str
@@ -48,6 +57,10 @@ def _collect_constructive_traits(payload: dict, config: PlanningConfig) -> list[
     reversal_state = str(volume_context.get("reversal_volume_state") or "unknown")
     earnings = payload.get("earnings") or {}
     days_to_earnings = earnings.get("days_to_earnings")
+    price_location_context = str(payload.get("price_location_context") or "")
+    setup_scenario = str(payload.get("setup_scenario") or "")
+    chart_news_alignment = str(payload.get("chart_news_alignment") or "")
+    macro_alignment_score = _to_float(payload.get("macro_alignment_score"), 5.0)
 
     if trend_state == "pullback_in_uptrend":
         traits.append("pullback_in_uptrend")
@@ -70,6 +83,14 @@ def _collect_constructive_traits(payload: dict, config: PlanningConfig) -> list[
         traits.append("positive_expectancy")
     if reversal_state == "weak_bounce":
         traits.append("early_reversal_attempt")
+    if price_location_context in {"near_high_but_supported", "mid_range_constructive", "reversal_from_low"}:
+        traits.append("price_location_constructive")
+    if setup_scenario in {"strong_continuation_pullback", "supported_high_range_continuation", "range_rebound_candidate", "rebound_repair_candidate"}:
+        traits.append("scenario_context_supportive")
+    if chart_news_alignment in {"news_supports_continuation", "news_supports_rebound", "aligned_bullish"}:
+        traits.append("news_context_supportive")
+    if macro_alignment_score >= config.context_macro_alignment_supportive:
+        traits.append("macro_context_supportive")
     if bool(payload.get("entry_requires_confirmation")):
         traits.append("confirmation_is_main_blocker")
     if days_to_earnings is None or int(days_to_earnings) > config.earnings_penalty_near_days:
@@ -157,6 +178,11 @@ def classify_final_action(*, payload: dict, config: PlanningConfig) -> dict:
     volume_context = payload.get("volume_context") or {}
     selloff_state = str(volume_context.get("selloff_volume_state") or "unknown")
     reversal_state = str(volume_context.get("reversal_volume_state") or "unknown")
+    price_location_context = str(payload.get("price_location_context") or "")
+    setup_scenario = str(payload.get("setup_scenario") or "")
+    chart_news_alignment = str(payload.get("chart_news_alignment") or "news_neutral")
+    macro_alignment_score = _to_float(payload.get("macro_alignment_score"), 5.0)
+    scenario_confidence = _to_float(payload.get("scenario_confidence"), 0.5)
 
     constructive_traits = _collect_constructive_traits(payload, config)
     buy_blockers: list[str] = []
@@ -180,6 +206,38 @@ def classify_final_action(*, payload: dict, config: PlanningConfig) -> dict:
         if relative_strength_score >= config.wait_min_relative_strength_score:
             severity -= 0.85
             wait_reasons.append("weak_structure_has_positive_offsets")
+
+    if price_location_context == "extended_near_high":
+        buy_blockers.append("extended_near_high")
+        wait_reasons.append("price_is_extended_and_needs_reset")
+        severity += 0.75
+    elif price_location_context in {"near_high_but_supported", "mid_range_constructive"}:
+        wait_reasons.append("price_location_is_constructive")
+        severity -= 0.2
+    elif price_location_context in {"weak_near_low", "deep_repair_zone"} and trend_state == "weak_breakdown_risk":
+        buy_blockers.append("still_in_repair_zone")
+        severity += 0.55
+
+    if setup_scenario in {"strong_continuation_pullback", "supported_high_range_continuation", "range_rebound_candidate", "rebound_repair_candidate"}:
+        wait_reasons.append("scenario_context_is_constructive")
+        severity -= 0.35
+    elif setup_scenario in {"extension_needs_reset", "conflicted_setup", "structure_still_damaged"}:
+        avoid_reasons.append("scenario_context_is_unfavorable")
+        severity += 0.7
+
+    if chart_news_alignment in {"news_supports_continuation", "news_supports_rebound", "aligned_bullish"}:
+        wait_reasons.append("news_and_chart_are_aligned")
+        severity -= 0.35
+    elif chart_news_alignment in {"news_conflicts_with_chart", "aligned_bearish"}:
+        avoid_reasons.append("news_conflicts_with_chart_structure")
+        severity += 0.8
+
+    if macro_alignment_score >= config.context_macro_alignment_supportive:
+        wait_reasons.append("macro_context_is_supportive")
+        severity -= 0.25
+    elif macro_alignment_score <= config.context_macro_alignment_conflict:
+        avoid_reasons.append("macro_context_conflicts_with_setup")
+        severity += 0.6
 
     if relative_strength_score < 4.8:
         buy_blockers.append("relative_strength_weak")
@@ -290,6 +348,11 @@ def classify_final_action(*, payload: dict, config: PlanningConfig) -> dict:
             and len(constructive_traits) >= 3
             and composite >= config.wait_min_composite_score
         )
+        or (
+            setup_scenario in {"supported_high_range_continuation", "strong_continuation_pullback", "range_rebound_candidate", "rebound_repair_candidate"}
+            and scenario_confidence >= 0.58
+            and composite >= max(3.8, config.wait_min_composite_score - 0.25)
+        )
     )
     severity_threshold = config.avoid_severity_threshold_risk_off if market_regime == "risk_off" else config.avoid_severity_threshold
     avoid_ok = bool(severity >= severity_threshold and not monitorable_setup)
@@ -339,8 +402,12 @@ def build_llm_prompt(payload: dict) -> str:
         "Support presence alone is not enough for WAIT. "
         "Positive expectancy and a non-poor probability profile matter for a weak_breakdown_risk setup to remain monitorable. "
         "Treat no_confirmation + negative expectancy + weak relative strength as AVOID. "
+        "Interpret structured price-location, catalyst, and macro context to decide whether continuation or rebound is credible. "
+        "Do not guess price targets. Numeric levels remain fixed by the quant engine. "
         "Return JSON only with fields: "
-        "llm_action, setup_type, confidence, consensus_view, entry_assessment, stop_assessment, "
+        "llm_action, setup_type, price_location_context, continuation_vs_reversion_bias, news_regime_alignment, "
+        "setup_scenario, tp_aggressiveness, sl_tolerance, expected_move_profile, scenario_confidence, "
+        "scenario_rationale, confidence, consensus_view, entry_assessment, stop_assessment, "
         "take_profit_assessment, rationale, confirmation_needed, key_risk, risk_tuning_reason. "
         f"Input={compact}"
     )
@@ -359,6 +426,15 @@ def parse_llm_response(raw: str) -> dict | None:
 
 def deterministic_review(*, payload: dict, config: PlanningConfig) -> LLMReviewResult:
     trend_state = str(payload.get("trend_state") or "range")
+    price_location_context = str(payload.get("price_location_context") or "mid_range_constructive")
+    continuation_vs_reversion_bias = str(payload.get("continuation_vs_reversion_bias") or "balanced")
+    news_regime_alignment = str(payload.get("news_regime_alignment") or "neutral")
+    setup_scenario = str(payload.get("setup_scenario") or trend_state)
+    tp_aggressiveness = str(payload.get("tp_aggressiveness") or "moderate")
+    sl_tolerance = str(payload.get("sl_tolerance") or "moderate")
+    expected_move_profile = str(payload.get("expected_move_profile") or "first_resistance_test")
+    scenario_confidence = _to_float(payload.get("scenario_confidence"), 0.55)
+    scenario_rationale = str(payload.get("scenario_rationale") or "")
     reward_risk = payload.get("reward_risk") or {}
     earnings = payload.get("earnings") or {}
     entry_quality = _to_float(payload.get("entry_quality_score"))
@@ -426,6 +502,10 @@ def deterministic_review(*, payload: dict, config: PlanningConfig) -> LLMReviewR
         reasons.append(f"Earnings are {int(days_to_earnings)} days away, which still matters for timing risk.")
 
     confidence = 0.52 if action == "WAIT" else 0.79 if action == "AVOID" else 0.76
+    if setup_scenario in {"strong_continuation_pullback", "supported_high_range_continuation"}:
+        confidence += 0.03
+    elif setup_scenario in {"structure_still_damaged", "extension_needs_reset"}:
+        confidence += 0.01
     key_risk = (
         str(avoid_reason)
         if action == "AVOID" and avoid_reason
@@ -446,7 +526,16 @@ def deterministic_review(*, payload: dict, config: PlanningConfig) -> LLMReviewR
 
     return LLMReviewResult(
         llm_action=action,
-        setup_type=trend_state,
+        setup_type=setup_type,
+        price_location_context=price_location_context,
+        continuation_vs_reversion_bias=continuation_vs_reversion_bias,
+        news_regime_alignment=news_regime_alignment,
+        setup_scenario=setup_scenario,
+        tp_aggressiveness=tp_aggressiveness,
+        sl_tolerance=sl_tolerance,
+        expected_move_profile=expected_move_profile,
+        scenario_confidence=round(max(0.0, min(1.0, scenario_confidence)), 3),
+        scenario_rationale=scenario_rationale,
         confidence=round(max(0.0, min(1.0, confidence)), 3),
         consensus_view=consensus_view,
         entry_assessment=entry_assessment,
@@ -475,6 +564,15 @@ def review_setup(*, payload: dict, config: PlanningConfig, provider: str | None 
     return {
         "llm_action": review.llm_action,
         "setup_type": review.setup_type,
+        "price_location_context": review.price_location_context,
+        "continuation_vs_reversion_bias": review.continuation_vs_reversion_bias,
+        "news_regime_alignment": review.news_regime_alignment,
+        "setup_scenario": review.setup_scenario,
+        "tp_aggressiveness": review.tp_aggressiveness,
+        "sl_tolerance": review.sl_tolerance,
+        "expected_move_profile": review.expected_move_profile,
+        "scenario_confidence": review.scenario_confidence,
+        "scenario_rationale": review.scenario_rationale,
         "confidence": review.confidence,
         "consensus_view": review.consensus_view,
         "entry_assessment": review.entry_assessment,

@@ -32,6 +32,9 @@ def build_ranking_profile(row, *, config: PlanningConfig) -> dict:
     suitability_score = _safe_float(suitability.get("suitability_score"))
     pre_scan_score = _safe_float(getattr(row, "pre_scan_score", None))
     sector_relative = _safe_float(getattr(row, "sector_relative_strength", None))
+    scenario_confidence = _safe_float(getattr(row, "scenario_confidence", None))
+    macro_alignment_score = _safe_float(getattr(row, "macro_alignment_score", None))
+    setup_scenario = str(getattr(row, "setup_scenario", None) or "")
 
     p_edge = p_tp - p_sl
     immediate_w = config.immediate_rank_weights
@@ -47,6 +50,8 @@ def build_ranking_profile(row, *, config: PlanningConfig) -> dict:
         + suitability_score * immediate_w["suitability"]
         + pre_scan_score * immediate_w["pre_scan"]
         + sector_relative * immediate_w["sector_relative"]
+        + scenario_confidence * 3.2
+        + macro_alignment_score * 0.35
     )
     if final_action == "BUY":
         immediate_rank_score += 3.0
@@ -67,6 +72,8 @@ def build_ranking_profile(row, *, config: PlanningConfig) -> dict:
         + suitability_score * watch_w["suitability"]
         + pre_scan_score * watch_w["pre_scan"]
         + sector_relative * watch_w["sector_relative"]
+        + scenario_confidence * 2.4
+        + macro_alignment_score * 0.32
     )
     if watchlist_tier == "primary":
         watchlist_rank_score += 2.4
@@ -78,6 +85,10 @@ def build_ranking_profile(row, *, config: PlanningConfig) -> dict:
         watchlist_rank_score += 1.0
     elif final_action == "AVOID":
         watchlist_rank_score -= 2.8
+    if setup_scenario in {"supported_high_range_continuation", "strong_continuation_pullback", "range_rebound_candidate"}:
+        watchlist_rank_score += 0.9
+    elif setup_scenario in {"extension_needs_reset", "conflicted_setup", "structure_still_damaged"}:
+        watchlist_rank_score -= 0.9
 
     if final_action == "BUY":
         ranking_bucket = "best_immediate_setups"

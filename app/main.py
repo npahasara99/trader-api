@@ -182,6 +182,49 @@ class PlanRowOut(BaseModel):
     risk_tuning_reason: Optional[str] = None
     current_price: Optional[float] = None
     trend_state: Optional[str] = None
+    range_position_1m: Optional[float] = None
+    range_position_3m: Optional[float] = None
+    range_position_12m: Optional[float] = None
+    local_range_position: Optional[float] = None
+    distance_to_1m_high_pct: Optional[float] = None
+    distance_to_1m_low_pct: Optional[float] = None
+    distance_to_3m_high_pct: Optional[float] = None
+    distance_to_3m_low_pct: Optional[float] = None
+    distance_to_12m_high_pct: Optional[float] = None
+    distance_to_12m_low_pct: Optional[float] = None
+    distance_from_ema20_pct: Optional[float] = None
+    distance_from_sma50_pct: Optional[float] = None
+    distance_from_sma100_pct: Optional[float] = None
+    distance_from_sma200_pct: Optional[float] = None
+    recent_expansion_state: Optional[str] = None
+    recent_compression_state: Optional[str] = None
+    breakout_extension_state: Optional[str] = None
+    historical_range_context: Optional[str] = None
+    price_location_context: Optional[str] = None
+    setup_type: Optional[str] = None
+    catalyst_signals: List[str] = Field(default_factory=list)
+    news_directional_bias: Optional[str] = None
+    catalyst_strength_score: Optional[float] = None
+    catalyst_recency_score: Optional[float] = None
+    chart_news_alignment: Optional[str] = None
+    news_supports_continuation: Optional[bool] = None
+    news_supports_rebound: Optional[bool] = None
+    news_conflicts_with_chart: Optional[bool] = None
+    news_neutral: Optional[bool] = None
+    sector_regime: Optional[str] = None
+    macro_sensitivity_tag: Optional[str] = None
+    macro_alignment_score: Optional[float] = None
+    macro_context_label: Optional[str] = None
+    setup_scenario: Optional[str] = None
+    continuation_vs_reversion_bias: Optional[str] = None
+    news_regime_alignment: Optional[str] = None
+    tp_aggressiveness: Optional[str] = None
+    sl_tolerance: Optional[str] = None
+    expected_move_profile: Optional[str] = None
+    scenario_confidence: Optional[float] = None
+    scenario_rationale: Optional[str] = None
+    setup_context_summary: Optional[str] = None
+    location_context_summary: Optional[str] = None
     support_zone_1: Optional[dict] = None
     support_zone_2: Optional[dict] = None
     resistance_zone_1: Optional[dict] = None
@@ -233,6 +276,10 @@ class PlanRowOut(BaseModel):
     reward_risk_score: Optional[float] = None
     historical_analogue_score: Optional[float] = None
     llm_quality_score: Optional[float] = None
+    context_score: Optional[float] = None
+    catalyst_score: Optional[float] = None
+    macro_score: Optional[float] = None
+    scenario_score: Optional[float] = None
     composite_score: Optional[float] = None
     llm_review: Optional[dict] = None
     quant_action: Optional[str] = None
@@ -508,6 +555,49 @@ def _to_plan_row_out(r) -> PlanRowOut:
         risk_tuning_reason=getattr(r, "risk_tuning_reason", None),
         current_price=getattr(r, "current_price", None),
         trend_state=getattr(r, "trend_state", None),
+        range_position_1m=getattr(r, "range_position_1m", None),
+        range_position_3m=getattr(r, "range_position_3m", None),
+        range_position_12m=getattr(r, "range_position_12m", None),
+        local_range_position=getattr(r, "local_range_position", None),
+        distance_to_1m_high_pct=getattr(r, "distance_to_1m_high_pct", None),
+        distance_to_1m_low_pct=getattr(r, "distance_to_1m_low_pct", None),
+        distance_to_3m_high_pct=getattr(r, "distance_to_3m_high_pct", None),
+        distance_to_3m_low_pct=getattr(r, "distance_to_3m_low_pct", None),
+        distance_to_12m_high_pct=getattr(r, "distance_to_12m_high_pct", None),
+        distance_to_12m_low_pct=getattr(r, "distance_to_12m_low_pct", None),
+        distance_from_ema20_pct=getattr(r, "distance_from_ema20_pct", None),
+        distance_from_sma50_pct=getattr(r, "distance_from_sma50_pct", None),
+        distance_from_sma100_pct=getattr(r, "distance_from_sma100_pct", None),
+        distance_from_sma200_pct=getattr(r, "distance_from_sma200_pct", None),
+        recent_expansion_state=getattr(r, "recent_expansion_state", None),
+        recent_compression_state=getattr(r, "recent_compression_state", None),
+        breakout_extension_state=getattr(r, "breakout_extension_state", None),
+        historical_range_context=getattr(r, "historical_range_context", None),
+        price_location_context=getattr(r, "price_location_context", None),
+        setup_type=getattr(r, "setup_type", None),
+        catalyst_signals=list(getattr(r, "catalyst_signals", []) or []),
+        news_directional_bias=getattr(r, "news_directional_bias", None),
+        catalyst_strength_score=getattr(r, "catalyst_strength_score", None),
+        catalyst_recency_score=getattr(r, "catalyst_recency_score", None),
+        chart_news_alignment=getattr(r, "chart_news_alignment", None),
+        news_supports_continuation=getattr(r, "news_supports_continuation", None),
+        news_supports_rebound=getattr(r, "news_supports_rebound", None),
+        news_conflicts_with_chart=getattr(r, "news_conflicts_with_chart", None),
+        news_neutral=getattr(r, "news_neutral", None),
+        sector_regime=getattr(r, "sector_regime", None),
+        macro_sensitivity_tag=getattr(r, "macro_sensitivity_tag", None),
+        macro_alignment_score=getattr(r, "macro_alignment_score", None),
+        macro_context_label=getattr(r, "macro_context_label", None),
+        setup_scenario=getattr(r, "setup_scenario", None),
+        continuation_vs_reversion_bias=getattr(r, "continuation_vs_reversion_bias", None),
+        news_regime_alignment=getattr(r, "news_regime_alignment", None),
+        tp_aggressiveness=getattr(r, "tp_aggressiveness", None),
+        sl_tolerance=getattr(r, "sl_tolerance", None),
+        expected_move_profile=getattr(r, "expected_move_profile", None),
+        scenario_confidence=getattr(r, "scenario_confidence", None),
+        scenario_rationale=getattr(r, "scenario_rationale", None),
+        setup_context_summary=getattr(r, "setup_context_summary", None),
+        location_context_summary=getattr(r, "location_context_summary", None),
         support_zone_1=getattr(r, "support_zone_1", None),
         support_zone_2=getattr(r, "support_zone_2", None),
         resistance_zone_1=getattr(r, "resistance_zone_1", None),
@@ -559,6 +649,10 @@ def _to_plan_row_out(r) -> PlanRowOut:
         reward_risk_score=getattr(r, "reward_risk_score", None),
         historical_analogue_score=getattr(r, "historical_analogue_score", None),
         llm_quality_score=getattr(r, "llm_quality_score", None),
+        context_score=getattr(r, "context_score", None),
+        catalyst_score=getattr(r, "catalyst_score", None),
+        macro_score=getattr(r, "macro_score", None),
+        scenario_score=getattr(r, "scenario_score", None),
         composite_score=getattr(r, "composite_score", None),
         llm_review=getattr(r, "llm_review", None),
         quant_action=getattr(r, "quant_action", None),
@@ -1153,6 +1247,11 @@ def _apply_prob_and_action(
             "reward_risk": getattr(row, "reward_risk", None),
             "earnings": getattr(row, "earnings", None),
             "volume_context": getattr(row, "volume_context", None),
+            "price_location_context": getattr(row, "price_location_context", None),
+            "setup_scenario": getattr(row, "setup_scenario", None),
+            "chart_news_alignment": getattr(row, "chart_news_alignment", None),
+            "macro_alignment_score": getattr(row, "macro_alignment_score", None),
+            "scenario_confidence": getattr(row, "scenario_confidence", None),
             "composite_score": getattr(row, "composite_score", None),
             "expected_return": probs["expected_return"],
             "prob_tp": probs["p_tp"],

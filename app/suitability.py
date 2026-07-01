@@ -43,6 +43,10 @@ def build_swing_trade_suitability(row, *, config: PlanningConfig) -> dict:
     rr = getattr(row, "reward_risk", None) or {}
     earnings = getattr(row, "earnings", None) or {}
     volume_context = getattr(row, "volume_context", None) or {}
+    price_location_context = str(getattr(row, "price_location_context", None) or "")
+    setup_scenario = str(getattr(row, "setup_scenario", None) or "")
+    news_regime_alignment = str(getattr(row, "news_regime_alignment", None) or "neutral")
+    macro_alignment_score = _safe_float(getattr(row, "macro_alignment_score", None), 5.0)
 
     trend_suitability = _safe_float(getattr(row, "trend_quality_score", None))
     if trend_state == "pullback_in_uptrend":
@@ -103,7 +107,22 @@ def build_swing_trade_suitability(row, *, config: PlanningConfig) -> dict:
         timing_suitability += 0.5 if int(monitor_window_days) <= 6 else 0.0
     if market_regime == "risk_off" and trend_state in {"weak_breakdown_risk", "downtrend"}:
         timing_suitability -= 1.0
+    if price_location_context in {"near_high_but_supported", "mid_range_constructive", "reversal_from_low"}:
+        timing_suitability += 0.45
+    elif price_location_context in {"extended_near_high", "weak_near_low", "damaged_mid_range"}:
+        timing_suitability -= 0.65
     timing_suitability = _clip(timing_suitability)
+
+    contextual_bonus = 0.0
+    if setup_scenario in {"strong_continuation_pullback", "supported_high_range_continuation", "range_rebound_candidate", "rebound_repair_candidate"}:
+        contextual_bonus += 0.45
+    elif setup_scenario in {"extension_needs_reset", "conflicted_setup", "structure_still_damaged"}:
+        contextual_bonus -= 0.65
+    if news_regime_alignment == "aligned_bullish":
+        contextual_bonus += 0.35
+    elif news_regime_alignment in {"aligned_bearish", "conflicted"}:
+        contextual_bonus -= 0.45
+    contextual_bonus += (macro_alignment_score - 5.0) * 0.08
 
     suitability_score = round(
         (
@@ -116,8 +135,9 @@ def build_swing_trade_suitability(row, *, config: PlanningConfig) -> dict:
             + relative_strength_suitability * 1.0
             + event_risk_suitability * 0.75
             + timing_suitability * 0.75
+            + (5.0 + contextual_bonus) * 0.9
         )
-        / 8.5,
+        / 9.4,
         4,
     )
     suitability_label = _label(suitability_score, config)

@@ -93,6 +93,25 @@ class PlanningConfig:
     execution_deeper_zone_drop_overlap_pct: float = 0.72
     execution_reanchor_above_prior_trigger_pct: float = 0.014
     execution_reanchor_above_range_pct: float = 0.018
+    context_range_window_1m: int = 21
+    context_range_window_3m: int = 63
+    context_range_window_12m: int = 252
+    context_local_range_window: int = 20
+    context_expansion_window: int = 10
+    context_near_high_position: float = 0.82
+    context_near_low_position: float = 0.22
+    context_extended_from_ema20_pct: float = 0.06
+    context_compression_range_atr: float = 2.4
+    context_expansion_range_atr: float = 4.5
+    context_strong_catalyst_score: float = 6.2
+    context_macro_alignment_supportive: float = 5.8
+    context_macro_alignment_conflict: float = 4.2
+    scenario_tp_aggressive_mult: float = 1.12
+    scenario_tp_moderate_high_mult: float = 1.05
+    scenario_tp_conservative_mult: float = 0.9
+    scenario_stop_tight_mult: float = 0.9
+    scenario_stop_tight_to_moderate_mult: float = 0.96
+    scenario_stop_moderate_to_wide_mult: float = 1.08
     avoid_severity_threshold: float = 5.0
     avoid_severity_threshold_risk_off: float = 4.8
     avoid_bad_composite_gap: float = 1.7
@@ -158,6 +177,10 @@ class PlanningConfig:
             "historical_analogue": 0.75,
             "entry_quality": 1.1,
             "llm_quality": 0.8,
+            "context_score": 0.85,
+            "catalyst_score": 0.7,
+            "macro_score": 0.65,
+            "scenario_score": 0.8,
         }
     )
 

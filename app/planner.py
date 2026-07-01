@@ -5,6 +5,7 @@ from typing import Callable
 import pandas as pd
 
 from .config import DEFAULT_PLANNING_CONFIG, PlanningConfig
+from .context_scenarios import build_market_context
 from .entry_engine import build_entry_candidates, choose_preferred_entry
 from .indicators import add_indicator_columns, bars_to_frame, latest_value
 from .llm_reasoning import review_setup
@@ -78,6 +79,7 @@ def generate_structured_plan(
     ticker: str,
     current_price: float,
     bars: list[dict],
+    news_items: list[dict] | None,
     news_score: int,
     earnings_score: int,
     earnings_context: dict | None,
@@ -86,6 +88,8 @@ def generate_structured_plan(
     avoid_threshold: int,
     history_stats: dict | None = None,
     benchmark_bars: dict[str, list[dict]] | None = None,
+    ticker_meta: dict | None = None,
+    sector_relative_strength: float | None = None,
     llm_provider: str | None = None,
     llm_model: str | None = None,
     llm_style: str | None = None,
@@ -145,6 +149,24 @@ def generate_structured_plan(
         volume_context=volume_context,
         config=config,
     )
+    earnings = _earnings_payload(earnings_context)
+    context = build_market_context(
+        ticker=ticker,
+        current_price=current_price,
+        frame=frame,
+        trend_state=structure.trend_state,
+        moving_averages=moving_averages,
+        atr=atr_val,
+        volume_context=volume_context,
+        relative_strength=rs,
+        market_regime=market_regime,
+        news_items=news_items,
+        news_score=news_score,
+        earnings=earnings,
+        ticker_meta=ticker_meta,
+        sector_relative_strength=sector_relative_strength,
+        config=config,
+    )
 
     recent_swing_low = structure.swing_lows[-1].price if structure.swing_lows else None
     recent_swing_high = structure.swing_highs[-1].price if structure.swing_highs else None
@@ -156,6 +178,8 @@ def generate_structured_plan(
         atr=atr_val,
         current_price=current_price,
         trend_state=structure.trend_state,
+        sl_tolerance=context["sl_tolerance"],
+        setup_scenario=context["setup_scenario"],
         config=config,
     )
     historical_hold_days = None
@@ -178,6 +202,9 @@ def generate_structured_plan(
         atr=atr_val,
         hold_days_hint=hold["max_hold_days"],
         trend_state=structure.trend_state,
+        tp_aggressiveness=context["tp_aggressiveness"],
+        expected_move_profile=context["expected_move_profile"],
+        price_location_context=context["price_location_context"],
         config=config,
     )
     final_hold = estimate_hold_window(
@@ -199,6 +226,9 @@ def generate_structured_plan(
             atr=atr_val,
             hold_days_hint=hold["max_hold_days"],
             trend_state=structure.trend_state,
+            tp_aggressiveness=context["tp_aggressiveness"],
+            expected_move_profile=context["expected_move_profile"],
+            price_location_context=context["price_location_context"],
             config=config,
         )
     else:
@@ -219,7 +249,6 @@ def generate_structured_plan(
     else:
         level_geometry_flag = "balanced"
 
-    earnings = _earnings_payload(earnings_context)
     reward_risk = {
         "tp1": targets["expected_reward_risk_to_tp1"],
         "tp2": targets["expected_reward_risk_to_tp2"],
@@ -237,6 +266,18 @@ def generate_structured_plan(
         "volume_context": volume_context,
         "reward_risk": reward_risk,
         "earnings": earnings,
+        "price_location_context": context["price_location_context"],
+        "setup_type": context["setup_type"],
+        "setup_scenario": context["setup_scenario"],
+        "continuation_vs_reversion_bias": context["continuation_vs_reversion_bias"],
+        "news_regime_alignment": context["news_regime_alignment"],
+        "chart_news_alignment": context["chart_news_alignment"],
+        "macro_alignment_score": context["macro_alignment_score"],
+        "tp_aggressiveness": context["tp_aggressiveness"],
+        "sl_tolerance": context["sl_tolerance"],
+        "expected_move_profile": context["expected_move_profile"],
+        "scenario_confidence": context["scenario_confidence"],
+        "scenario_rationale": context["scenario_rationale"],
         "stop_too_tight_flag": stop["stop_too_tight_flag"],
         "tp_too_optimistic_flag": targets["tp_too_optimistic_flag"],
         "composite_score": 0.0,
@@ -260,6 +301,8 @@ def generate_structured_plan(
         entry_quality_score=preferred["entry_quality_score"],
         history_stats=history_stats,
         llm_quality_score=float(llm_review["llm_quality_score"]),
+        context=context,
+        sector_relative_strength=sector_relative_strength,
         config=config,
     )
 
@@ -270,6 +313,10 @@ def generate_structured_plan(
         "volume_confirmation_score": scores["volume_confirmation_score"],
         "earnings_risk_score": scores["earnings_risk_score"],
         "composite_score": scores["composite_score"],
+        "context_score": scores["context_score"],
+        "catalyst_score": scores["catalyst_score"],
+        "macro_score": scores["macro_score"],
+        "scenario_score": scores["scenario_score"],
     }
     llm_review = review_setup(
         payload=composite_payload,
@@ -290,6 +337,8 @@ def generate_structured_plan(
         entry_quality_score=preferred["entry_quality_score"],
         history_stats=history_stats,
         llm_quality_score=float(llm_review["llm_quality_score"]),
+        context=context,
+        sector_relative_strength=sector_relative_strength,
         config=config,
     )
 
@@ -352,12 +401,17 @@ def generate_structured_plan(
         "reward_risk_score": scores["reward_risk_score"],
         "historical_analogue_score": scores["historical_analogue_score"],
         "llm_quality_score": scores["llm_quality_score"],
+        "context_score": scores["context_score"],
+        "catalyst_score": scores["catalyst_score"],
+        "macro_score": scores["macro_score"],
+        "scenario_score": scores["scenario_score"],
         "composite_score": scores["composite_score"],
+        **context,
         "llm_review": {k: v for k, v in llm_review.items() if k not in {"prompt_preview", "provider", "model", "style", "llm_quality_score"}},
         "strategy_action": strategy_action,
         "signal_score": signal_score,
         "strategy_reason": (
-            f"trend={structure.trend_state}; entry={preferred['preferred_entry_type']}; rr1={reward_risk['tp1']:.2f}; "
+            f"trend={structure.trend_state}; setup={context['setup_scenario']}; entry={preferred['preferred_entry_type']}; rr1={reward_risk['tp1']:.2f}; "
             f"earnings_days={earnings['days_to_earnings']}; composite={scores['composite_score']:.2f}; llm={llm_review['llm_action']}"
         ),
         "risk_tuning_reason": llm_review["risk_tuning_reason"],

@@ -31,13 +31,21 @@ def _zone_upper(zone: dict | None) -> float | None:
     return float(zone["upper"])
 
 
-def _zone_actionable_target(zone: dict | None, atr: float) -> float | None:
+def _zone_actionable_target(zone: dict | None, atr: float, tp_aggressiveness: str | None = None) -> float | None:
     lower = _zone_lower(zone)
     upper = _zone_upper(zone)
     if lower is None or upper is None:
         return None
     width = max(upper - lower, 0.0)
-    actionable_offset = min(width * 0.25, atr * 0.35)
+    normalized = (tp_aggressiveness or "").strip().lower()
+    slice_fraction = 0.25
+    if normalized == "moderate_to_high":
+        slice_fraction = 0.4
+    elif normalized == "high":
+        slice_fraction = 0.48
+    elif normalized == "conservative":
+        slice_fraction = 0.18
+    actionable_offset = min(width * slice_fraction, atr * 0.45)
     return lower + actionable_offset
 
 
@@ -70,6 +78,28 @@ def _trend_reachability_factor(trend_state: str | None) -> float:
     return 0.84
 
 
+def _scenario_stop_mult(*, sl_tolerance: str | None, config: PlanningConfig) -> float:
+    normalized = (sl_tolerance or "").strip().lower()
+    if normalized == "tight":
+        return config.scenario_stop_tight_mult
+    if normalized == "tight_to_moderate":
+        return config.scenario_stop_tight_to_moderate_mult
+    if normalized == "moderate_to_wide":
+        return config.scenario_stop_moderate_to_wide_mult
+    return 1.0
+
+
+def _scenario_tp_mult(*, tp_aggressiveness: str | None, config: PlanningConfig) -> float:
+    normalized = (tp_aggressiveness or "").strip().lower()
+    if normalized == "high":
+        return config.scenario_tp_aggressive_mult
+    if normalized == "moderate_to_high":
+        return config.scenario_tp_moderate_high_mult
+    if normalized == "conservative":
+        return config.scenario_tp_conservative_mult
+    return 1.0
+
+
 def _format_pct(distance: float, base: float) -> float:
     return float(round(distance / max(base, 1e-9) * 100.0, 3))
 
@@ -83,12 +113,17 @@ def build_stop_loss(
     atr: float,
     current_price: float,
     trend_state: str | None,
+    sl_tolerance: str | None = None,
+    setup_scenario: str | None = None,
     config: PlanningConfig,
 ) -> dict:
     atr = max(float(atr or 0.0), max(current_price * 0.01, 0.01))
     buffer = atr * config.stop_buffer_atr_mult
     max_valid_stop = preferred_entry - max(atr * 0.35, current_price * 0.0035)
     max_width_pct, max_width_atr = _stop_caps(trend_state=trend_state, config=config)
+    stop_mult = _scenario_stop_mult(sl_tolerance=sl_tolerance, config=config)
+    max_width_pct *= stop_mult
+    max_width_atr *= stop_mult
 
     candidates: list[dict] = []
 
@@ -138,11 +173,13 @@ def build_stop_loss(
             stop_loss = capped_stop
             swing_realism_flag = "compressed"
             risk_width_flag = "capped_for_swing"
-            stop_generation_reason = f"{selected['basis']}; compressed to swing-risk envelope"
+            scenario_suffix = f"; scenario={setup_scenario}" if setup_scenario else ""
+            stop_generation_reason = f"{selected['basis']}; compressed to swing-risk envelope{scenario_suffix}"
         else:
             swing_realism_flag = "flagged"
             risk_width_flag = "too_wide_for_swing"
-            stop_generation_reason = f"{selected['basis']}; broad structure exceeds normal swing width"
+            scenario_suffix = f"; scenario={setup_scenario}" if setup_scenario else ""
+            stop_generation_reason = f"{selected['basis']}; broad structure exceeds normal swing width{scenario_suffix}"
 
     if stop_loss >= preferred_entry:
         stop_loss = fallback_stop
@@ -178,6 +215,9 @@ def build_take_profits(
     atr: float,
     hold_days_hint: int,
     trend_state: str,
+    tp_aggressiveness: str | None = None,
+    expected_move_profile: str | None = None,
+    price_location_context: str | None = None,
     config: PlanningConfig,
 ) -> dict:
     atr = max(float(atr or 0.0), max(preferred_entry * 0.01, 0.01))
@@ -186,11 +226,20 @@ def build_take_profits(
     reachability_factor = _trend_reachability_factor(trend_state)
     reachable_move = atr * hold_days * config.hold_window_reachability_factor * reachability_factor
     max_tp1_pct, max_tp1_atr = _tp1_caps(trend_state=trend_state, config=config)
+    tp_mult = _scenario_tp_mult(tp_aggressiveness=tp_aggressiveness, config=config)
+    max_tp1_pct *= tp_mult
+    max_tp1_atr *= tp_mult
+    if (price_location_context or "").strip().lower() == "extended_near_high":
+        max_tp1_pct *= 0.92
+        max_tp1_atr *= 0.92
+    if (expected_move_profile or "").strip().lower() in {"repair_bounce_not_full_recovery", "limited_rebound_only"}:
+        max_tp1_pct *= 0.88
+        max_tp1_atr *= 0.9
     max_tp1_distance = min(preferred_entry * max_tp1_pct, atr * max_tp1_atr, reachable_move)
     min_tp1_distance = max(atr * 0.45, risk_per_share * 0.65)
 
     candidates: list[dict] = []
-    resistance_1_target = _zone_actionable_target(resistance_zone_1, atr)
+    resistance_1_target = _zone_actionable_target(resistance_zone_1, atr, tp_aggressiveness=tp_aggressiveness)
     if resistance_1_target is not None and resistance_1_target > preferred_entry:
         candidates.append({"price": resistance_1_target, "basis": "tp1 near first actionable resistance slice"})
     if recent_swing_high is not None and float(recent_swing_high) > preferred_entry:
@@ -212,7 +261,8 @@ def build_take_profits(
     tp1_generation_reason = str(raw_tp1_candidate["basis"])
     if raw_tp1_distance > tp1_distance_cap + 1e-9:
         target_reachability_flag = "capped_to_hold_window"
-        tp1_generation_reason = f"{raw_tp1_candidate['basis']}; compressed to first reachable swing target"
+        profile_suffix = f"; profile={expected_move_profile}" if expected_move_profile else ""
+        tp1_generation_reason = f"{raw_tp1_candidate['basis']}; compressed to first reachable swing target{profile_suffix}"
     elif raw_tp1_distance < min_tp1_distance:
         target_reachability_flag = "minimal_target"
         tp1_generation_reason = f"{raw_tp1_candidate['basis']}; nearest reasonable target remains close"

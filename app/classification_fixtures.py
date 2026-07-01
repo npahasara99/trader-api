@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import pandas as pd
 
 from .config import DEFAULT_PLANNING_CONFIG
 from .actionability import build_actionability_soon
+from .context_scenarios import build_market_context
 from .execution_view import build_chart_execution_view
 from .llm_reasoning import classify_final_action, reconcile_actions
 from .monitoring import build_wait_monitoring_plan
@@ -1273,6 +1275,20 @@ def evaluate_swing_realism_fixtures() -> list[dict]:
         atr=3.0,
         current_price=99.5,
         trend_state="weak_breakdown_risk",
+        sl_tolerance="moderate_to_wide",
+        setup_scenario="rebound_repair_candidate",
+        config=config,
+    )
+    continuation_stop = build_stop_loss(
+        preferred_entry=100.0,
+        support_zone_1={"lower": 93.6, "upper": 94.8, "source_tags": ["ema20", "pivot_low"]},
+        support_zone_2={"lower": 90.8, "upper": 92.4, "source_tags": ["sma50"]},
+        recent_swing_low=94.1,
+        atr=2.6,
+        current_price=101.5,
+        trend_state="uptrend",
+        sl_tolerance="tight_to_moderate",
+        setup_scenario="supported_high_range_continuation",
         config=config,
     )
 
@@ -1293,6 +1309,9 @@ def evaluate_swing_realism_fixtures() -> list[dict]:
         atr=2.0,
         hold_days_hint=6,
         trend_state="pullback_in_uptrend",
+        tp_aggressiveness="conservative",
+        expected_move_profile="repair_bounce_not_full_recovery",
+        price_location_context="weak_near_low",
         config=config,
     )
     broad_tp = build_take_profits(
@@ -1304,6 +1323,9 @@ def evaluate_swing_realism_fixtures() -> list[dict]:
         atr=2.4,
         hold_days_hint=12,
         trend_state="uptrend",
+        tp_aggressiveness="moderate_to_high",
+        expected_move_profile="breakout_can_extend_if_confirmed",
+        price_location_context="near_high_but_supported",
         config=config,
     )
 
@@ -1321,10 +1343,16 @@ def evaluate_swing_realism_fixtures() -> list[dict]:
             "name": "repair_setups_can_run_wider_but_stay_bounded",
             "pass": (
                 repair_stop["stop_width_pct"] <= config.max_stop_width_pct_repair * 100.0 + 0.01
-                and repair_stop["stop_width_pct"] > config.max_stop_width_pct_default * 100.0
+                and repair_stop["stop_width_pct"] > continuation_stop["stop_width_pct"]
             ),
             "stop_width_pct": repair_stop["stop_width_pct"],
             "swing_realism_flag": repair_stop["swing_realism_flag"],
+        },
+        {
+            "name": "continuation_setup_uses_tighter_stop_tolerance_than_repair",
+            "pass": continuation_stop["stop_width_pct"] < repair_stop["stop_width_pct"],
+            "continuation_stop_width_pct": continuation_stop["stop_width_pct"],
+            "repair_stop_width_pct": repair_stop["stop_width_pct"],
         },
         {
             "name": "hold_window_reachability_compresses_far_tp1",
@@ -1349,5 +1377,135 @@ def evaluate_swing_realism_fixtures() -> list[dict]:
             "name": "hold_window_estimate_stays_consistent_with_near_term_target",
             "pass": initial_hold["max_hold_days"] <= config.max_hold_days_max,
             "max_hold_days": initial_hold["max_hold_days"],
+        },
+    ]
+
+
+def evaluate_market_context_fixtures() -> list[dict]:
+    config = DEFAULT_PLANNING_CONFIG
+
+    def _frame(closes: list[float], volumes: list[int]) -> pd.DataFrame:
+        return pd.DataFrame({"close": closes, "volume": volumes})
+
+    lin_context = build_market_context(
+        ticker="LIN",
+        current_price=486.0,
+        frame=_frame(
+            closes=[440.0, 444.0, 448.0, 451.0, 455.0, 459.0, 462.0, 466.0, 470.0, 473.0, 476.0, 480.0, 483.0, 485.5, 486.0],
+            volumes=[100, 102, 98, 104, 103, 106, 101, 109, 110, 108, 112, 115, 116, 114, 113],
+        ),
+        trend_state="pullback_in_uptrend",
+        moving_averages={"ema20": 474.0, "sma50": 466.0, "sma100": 452.0, "sma200": 430.0},
+        atr=7.0,
+        volume_context={"selloff_volume_state": "light_pullback", "reversal_volume_state": "confirmed_bounce"},
+        relative_strength={"vs_spy": 0.06, "vs_qqq": 0.04},
+        market_regime="neutral",
+        news_items=[{"headline": "LIN upgraded after strong demand outlook", "summary": "Analysts raised targets after constructive guidance.", "datetime": "2026-06-30T12:00:00+00:00"}],
+        news_score=5,
+        earnings={"days_to_earnings": 25, "earnings_risk_flag": False},
+        ticker_meta={"sector": "materials", "industry": "industrial gases"},
+        sector_relative_strength=0.05,
+        config=config,
+    )
+
+    extended_context = build_market_context(
+        ticker="AMD",
+        current_price=226.0,
+        frame=_frame(
+            closes=[182.0, 186.0, 191.0, 197.0, 202.0, 207.0, 212.0, 217.0, 221.0, 224.0, 226.0],
+            volumes=[100, 99, 102, 105, 107, 111, 113, 115, 116, 118, 117],
+        ),
+        trend_state="uptrend",
+        moving_averages={"ema20": 208.0, "sma50": 198.0, "sma100": 184.0, "sma200": 170.0},
+        atr=4.3,
+        volume_context={"selloff_volume_state": "normal_pullback", "reversal_volume_state": "confirmed_bounce"},
+        relative_strength={"vs_spy": 0.03, "vs_qqq": -0.01},
+        market_regime="risk_off",
+        news_items=[{"headline": "AMD faces target cut after stretched rally", "summary": "Analysts warned valuation looks rich after the recent move.", "datetime": "2026-06-30T12:00:00+00:00"}],
+        news_score=-4,
+        earnings={"days_to_earnings": 29, "earnings_risk_flag": False},
+        ticker_meta={"sector": "technology", "industry": "semiconductors"},
+        sector_relative_strength=-0.02,
+        config=config,
+    )
+
+    rebound_context = build_market_context(
+        ticker="NVDA",
+        current_price=132.0,
+        frame=_frame(
+            closes=[171.0, 166.0, 159.0, 151.0, 145.0, 139.0, 133.0, 128.0, 124.0, 126.0, 129.0, 132.0],
+            volumes=[118, 120, 124, 126, 128, 132, 135, 130, 122, 118, 116, 114],
+        ),
+        trend_state="weak_breakdown_risk",
+        moving_averages={"ema20": 140.0, "sma50": 149.0, "sma100": 161.0, "sma200": 175.0},
+        atr=6.2,
+        volume_context={"selloff_volume_state": "normal_pullback", "reversal_volume_state": "confirmed_bounce"},
+        relative_strength={"vs_spy": -0.02, "vs_qqq": 0.01},
+        market_regime="neutral",
+        news_items=[{"headline": "NVDA wins new AI platform contract", "summary": "The deal supports demand recovery after a weak period.", "datetime": "2026-06-30T12:00:00+00:00"}],
+        news_score=4,
+        earnings={"days_to_earnings": 41, "earnings_risk_flag": False},
+        ticker_meta={"sector": "technology", "industry": "semiconductors"},
+        sector_relative_strength=0.03,
+        config=config,
+    )
+
+    weak_low_context = build_market_context(
+        ticker="PFE",
+        current_price=24.8,
+        frame=_frame(
+            closes=[32.0, 31.4, 30.8, 29.9, 28.7, 27.8, 26.9, 26.0, 25.4, 25.0, 24.8],
+            volumes=[100, 101, 99, 102, 104, 107, 109, 111, 114, 116, 118],
+        ),
+        trend_state="weak_breakdown_risk",
+        moving_averages={"ema20": 27.4, "sma50": 28.9, "sma100": 30.6, "sma200": 33.1},
+        atr=1.1,
+        volume_context={"selloff_volume_state": "heavy_distribution", "reversal_volume_state": "no_confirmation"},
+        relative_strength={"vs_spy": -0.05, "vs_qqq": -0.04},
+        market_regime="risk_off",
+        news_items=[],
+        news_score=-1,
+        earnings={"days_to_earnings": 18, "earnings_risk_flag": False},
+        ticker_meta={"sector": "health care", "industry": "biopharma"},
+        sector_relative_strength=-0.03,
+        config=config,
+    )
+
+    return [
+        {
+            "name": "high_range_constructive_setup_can_still_be_continuation_favored",
+            "pass": (
+                lin_context["price_location_context"] == "near_high_but_supported"
+                and lin_context["continuation_vs_reversion_bias"] == "continuation_favored"
+                and lin_context["setup_scenario"] in {"strong_continuation_pullback", "supported_high_range_continuation", "controlled_high_range_continuation"}
+            ),
+            "context": lin_context,
+        },
+        {
+            "name": "high_range_conflicted_extension_gets_downgraded",
+            "pass": (
+                extended_context["price_location_context"] == "extended_near_high"
+                and extended_context["continuation_vs_reversion_bias"] == "mean_reversion_favored"
+                and extended_context["news_regime_alignment"] in {"aligned_bearish", "conflicted"}
+            ),
+            "context": extended_context,
+        },
+        {
+            "name": "low_range_with_reversal_and_catalyst_can_be_rebound_candidate",
+            "pass": (
+                rebound_context["setup_type"] in {"deep_rebound_attempt", "repair_after_breakdown"}
+                and rebound_context["continuation_vs_reversion_bias"] == "rebound_candidate"
+                and rebound_context["news_regime_alignment"] == "aligned_bullish"
+            ),
+            "context": rebound_context,
+        },
+        {
+            "name": "low_range_without_supportive_context_is_not_false_bullish",
+            "pass": (
+                weak_low_context["price_location_context"] in {"weak_near_low", "deep_in_lower_range"}
+                and weak_low_context["news_regime_alignment"] != "aligned_bullish"
+                and weak_low_context["continuation_vs_reversion_bias"] != "continuation_favored"
+            ),
+            "context": weak_low_context,
         },
     ]

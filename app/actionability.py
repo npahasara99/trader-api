@@ -123,6 +123,8 @@ def build_actionability_soon(row, *, config: PlanningConfig) -> dict | None:
     trade_shape = str(execution_view.get("trade_shape") or "")
     execution_bias = str(execution_view.get("execution_bias") or "")
     trend_state = str(getattr(row, "trend_state", None) or "")
+    setup_scenario = str(getattr(row, "setup_scenario", None) or "")
+    news_regime_alignment = str(getattr(row, "news_regime_alignment", None) or "neutral")
     watch_priority = str(getattr(row, "watch_priority", None) or "").lower()
     watchlist_tier = str(getattr(row, "watchlist_tier", None) or "").lower()
     monitorable_setup = bool(getattr(row, "monitorable_setup", False))
@@ -160,6 +162,14 @@ def build_actionability_soon(row, *, config: PlanningConfig) -> dict | None:
         structure_readiness_score += 0.5
     elif watchlist_tier == "primary":
         structure_readiness_score += 0.35
+    if setup_scenario in {"strong_continuation_pullback", "supported_high_range_continuation", "range_rebound_candidate"}:
+        structure_readiness_score += 0.45
+    elif setup_scenario in {"structure_still_damaged", "extension_needs_reset", "conflicted_setup"}:
+        structure_readiness_score -= 0.55
+    if news_regime_alignment == "aligned_bullish":
+        structure_readiness_score += 0.35
+    elif news_regime_alignment in {"aligned_bearish", "conflicted"}:
+        structure_readiness_score -= 0.45
     structure_readiness_score = _clip(structure_readiness_score)
 
     days_to_action_estimate = _estimate_days_to_action(

@@ -29,6 +29,8 @@ def build_watchlist_profile(row, *, config: PlanningConfig) -> dict:
     composite_score = _safe_float(getattr(row, "composite_score", None))
     relative_strength_score = _safe_float(getattr(row, "relative_strength_score", None))
     avoid_reason = getattr(row, "avoid_reason", None)
+    setup_scenario = str(getattr(row, "setup_scenario", None) or "")
+    news_regime_alignment = str(getattr(row, "news_regime_alignment", None) or "neutral")
 
     suitability = getattr(row, "swing_trade_suitability", None) or {}
     suitability_score = _safe_float(suitability.get("suitability_score"))
@@ -42,6 +44,7 @@ def build_watchlist_profile(row, *, config: PlanningConfig) -> dict:
         trend_state == "pullback_in_uptrend"
         or relative_strength_score >= config.watchlist_primary_min_relative_strength_score
         or len(constructive_traits) >= 3
+        or setup_scenario in {"strong_continuation_pullback", "supported_high_range_continuation", "range_rebound_candidate", "rebound_repair_candidate"}
     )
     primary_ready = bool(
         final_action in {"BUY", "WAIT"}
@@ -54,6 +57,7 @@ def build_watchlist_profile(row, *, config: PlanningConfig) -> dict:
         and not avoid_reason
         and not not_suitable_reason
         and (final_action == "BUY" or watch_priority == "high")
+        and news_regime_alignment != "aligned_bearish"
     )
 
     secondary_ready = bool(
