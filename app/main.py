@@ -1841,14 +1841,17 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
     if not ranked and planner_crashed_rows:
         preview = ", ".join(planner_crashed_tickers[:6])
         suffix = "..." if len(planner_crashed_tickers) > 6 else ""
+        reason_preview = " | ".join(planner_crash_reasons[:3])
         selection_message = (
             f"No ranked setups were produced because the structured planner crashed for "
-            f"{len(planner_crashed_rows)} tickers. Affected names: {preview}{suffix}."
+            f"{len(planner_crashed_rows)} tickers. Affected names: {preview}{suffix}. "
+            f"Crash details: {reason_preview}"
         )
     elif planner_crashed_rows:
+        reason_preview = " | ".join(planner_crash_reasons[:2])
         selection_message = (
             f"{selection_message} Structured planner crashes were isolated for "
-            f"{len(planner_crashed_rows)} tickers."
+            f"{len(planner_crashed_rows)} tickers. Crash details: {reason_preview}"
         )
 
     out_rows: list[RankedPlanOut] = []
