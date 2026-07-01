@@ -434,6 +434,7 @@ class Sp100WorkflowResponse(BaseModel):
     selection_message: Optional[str] = None
     planner_crash_count: int = 0
     planner_crashed_tickers: List[str] = Field(default_factory=list)
+    planner_crash_reasons: List[str] = Field(default_factory=list)
     selected_tickers: List[str] = Field(default_factory=list)
     best_immediate_tickers: List[str] = Field(default_factory=list)
     best_watchlist_tickers: List[str] = Field(default_factory=list)
@@ -1718,6 +1719,7 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
             selection_message="No SP100 stocks matched the requested sector/industry filter.",
             planner_crash_count=0,
             planner_crashed_tickers=[],
+            planner_crash_reasons=[],
             selected_tickers=[],
             best_immediate_tickers=[],
             best_watchlist_tickers=[],
@@ -1766,6 +1768,10 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         if str(getattr(r, "scan_rejection_reason", None) or "") == "planner_crashed"
     ]
     planner_crashed_tickers = [r.ticker for r in planner_crashed_rows]
+    planner_crash_reasons = [
+        f"{r.ticker}: {getattr(r, 'strategy_reason', 'planner crashed')}"
+        for r in planner_crashed_rows[:12]
+    ]
 
     ranked: list[dict] = []
     skipped_rows: list = []
@@ -1944,6 +1950,7 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         selection_message=selection_message,
         planner_crash_count=len(planner_crashed_rows),
         planner_crashed_tickers=planner_crashed_tickers,
+        planner_crash_reasons=planner_crash_reasons,
         selected_tickers=selected_tickers,
         best_immediate_tickers=best_immediate_tickers,
         best_watchlist_tickers=best_watchlist_tickers,
