@@ -458,6 +458,7 @@ def parse_llm_response(raw: str) -> dict | None:
 
 def deterministic_review(*, payload: dict, config: PlanningConfig) -> LLMReviewResult:
     trend_state = str(payload.get("trend_state") or "range")
+    setup_type = str(payload.get("setup_type") or trend_state)
     price_location_context = str(payload.get("price_location_context") or "mid_range_constructive")
     continuation_vs_reversion_bias = str(payload.get("continuation_vs_reversion_bias") or "balanced")
     news_regime_alignment = str(payload.get("news_regime_alignment") or "neutral")
