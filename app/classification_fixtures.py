@@ -13,6 +13,7 @@ from .ranking import build_ranking_profile
 from .risk_engine import build_stop_loss, build_take_profits, estimate_hold_window
 from .scanner import build_pre_scan_profile
 from .suitability import build_swing_trade_suitability
+from .live_plan_consistency import evaluate_live_plan_consistency
 from .what_to_watch import build_what_to_watch
 from .watchlist import build_watchlist_profile
 
@@ -1509,3 +1510,106 @@ def evaluate_market_context_fixtures() -> list[dict]:
             "context": weak_low_context,
         },
     ]
+
+
+def evaluate_live_plan_consistency_fixtures() -> list[dict]:
+    fixtures = [
+        {
+            "name": "continuation_modestly_above_entry_stays_live_but_extended",
+            "payload": {
+                "live_price": 102.2,
+                "preferred_entry": 100.0,
+                "stop_loss": 95.0,
+                "take_profit_1": 107.5,
+                "setup_scenario": "supported_high_range_continuation",
+                "continuation_vs_reversion_bias": "continuation_favored",
+            },
+            "expected": {
+                "entry_status": "above_entry_zone",
+                "plan_freshness_status": "live_but_extended",
+                "live_vs_plan_alignment": "continuation_extended",
+                "replan_needed": False,
+            },
+        },
+        {
+            "name": "continuation_above_tp1_marks_target_already_hit",
+            "payload": {
+                "live_price": 110.8,
+                "preferred_entry": 100.0,
+                "stop_loss": 95.0,
+                "take_profit_1": 107.0,
+                "setup_scenario": "supported_high_range_continuation",
+                "continuation_vs_reversion_bias": "continuation_favored",
+            },
+            "expected": {
+                "tp1_status": "tp1_exceeded",
+                "plan_freshness_status": "stale_for_live_price",
+                "live_vs_plan_alignment": "target_already_hit",
+                "replan_needed": True,
+            },
+        },
+        {
+            "name": "pullback_entry_far_above_becomes_entry_missed",
+            "payload": {
+                "live_price": 106.5,
+                "preferred_entry": 100.0,
+                "stop_loss": 95.0,
+                "take_profit_1": 111.0,
+                "setup_scenario": "pullback_candidate",
+                "continuation_vs_reversion_bias": "mean_reversion_balanced",
+            },
+            "expected": {
+                "entry_status": "extended_beyond_entry",
+                "plan_freshness_status": "stale_for_live_price",
+                "live_vs_plan_alignment": "entry_missed",
+                "replan_needed": True,
+            },
+        },
+        {
+            "name": "live_price_near_stop_flags_near_invalidation",
+            "payload": {
+                "live_price": 95.6,
+                "preferred_entry": 100.0,
+                "stop_loss": 95.0,
+                "take_profit_1": 107.0,
+                "setup_scenario": "constructive_pullback",
+            },
+            "expected": {
+                "stop_status": "at_risk_of_invalidation",
+                "plan_freshness_status": "partially_stale",
+                "live_vs_plan_alignment": "near_invalidation",
+                "replan_needed": False,
+            },
+        },
+        {
+            "name": "repair_bounce_beyond_target_needs_refresh",
+            "payload": {
+                "live_price": 109.4,
+                "preferred_entry": 100.0,
+                "stop_loss": 94.0,
+                "take_profit_1": 106.5,
+                "setup_scenario": "rebound_repair_candidate",
+                "continuation_vs_reversion_bias": "rebound_candidate",
+            },
+            "expected": {
+                "tp1_status": "tp1_exceeded",
+                "plan_freshness_status": "stale_for_live_price",
+                "live_vs_plan_alignment": "rebound_already_moved",
+                "replan_needed": True,
+            },
+        },
+    ]
+
+    results: list[dict] = []
+    for fixture in fixtures:
+        outcome = evaluate_live_plan_consistency(fixture["payload"])
+        checks = {key: outcome.get(key) == value for key, value in fixture["expected"].items()}
+        results.append(
+            {
+                "name": fixture["name"],
+                "pass": all(checks.values()),
+                "checks": checks,
+                "actual": {key: outcome.get(key) for key in fixture["expected"].keys()},
+            }
+        )
+    return results

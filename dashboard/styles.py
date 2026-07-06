@@ -209,6 +209,18 @@ def inject_styles() -> None:
         .badge.medium { background: linear-gradient(180deg, rgba(59,130,246,0.22), rgba(29,78,216,0.15)); color: #bfdbfe; border-color: rgba(96,165,250,0.30); }
         .badge.low { background: linear-gradient(180deg, rgba(249,115,22,0.22), rgba(154,52,18,0.14)); color: #fed7aa; border-color: rgba(251,146,60,0.28); }
         .badge.unsuitable { background: linear-gradient(180deg, rgba(239,68,68,0.22), rgba(127,29,29,0.16)); color: #fecaca; border-color: rgba(248,113,113,0.32); }
+        .badge.fresh,
+        .badge.aligned { background: linear-gradient(180deg, rgba(16,185,129,0.24), rgba(5,150,105,0.16)); color: #baf7db; border-color: rgba(45,212,191,0.32); box-shadow: 0 10px 24px rgba(16,185,129,0.10); }
+        .badge.live-but-extended,
+        .badge.continuation-extended { background: linear-gradient(180deg, rgba(59,130,246,0.24), rgba(37,99,235,0.16)); color: #c7ddff; border-color: rgba(96,165,250,0.34); box-shadow: 0 10px 24px rgba(59,130,246,0.10); }
+        .badge.partially-stale,
+        .badge.near-invalidation { background: linear-gradient(180deg, rgba(245,158,11,0.22), rgba(180,83,9,0.16)); color: #fde68a; border-color: rgba(245,158,11,0.32); box-shadow: 0 10px 24px rgba(245,158,11,0.10); }
+        .badge.entry-missed,
+        .badge.rebound-already-moved,
+        .badge.target-already-hit { background: linear-gradient(180deg, rgba(249,115,22,0.22), rgba(154,52,18,0.15)); color: #fed7aa; border-color: rgba(251,146,60,0.30); }
+        .badge.stale-for-live-price,
+        .badge.invalidated,
+        .badge.needs-refresh { background: linear-gradient(180deg, rgba(239,68,68,0.22), rgba(127,29,29,0.16)); color: #fecaca; border-color: rgba(248,113,113,0.32); box-shadow: 0 10px 24px rgba(239,68,68,0.10); }
         .badge.muted { background: linear-gradient(180deg, rgba(71,85,105,0.20), rgba(30,41,59,0.16)); color: #d1d9e5; border-color: rgba(100,116,139,0.24); }
 
         .ticker-chip {

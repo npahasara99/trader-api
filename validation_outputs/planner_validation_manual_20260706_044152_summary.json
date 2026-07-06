@@ -1,0 +1,32 @@
+{
+  "basket_name": "manual",
+  "planned_at": "2026-07-06T04:41:52.598296+00:00",
+  "market_regime": "risk_on",
+  "ticker_count": 3,
+  "continuation_favored_count": 2,
+  "rebound_candidate_count": 1,
+  "repair_count": 1,
+  "buy_count": 0,
+  "wait_count": 2,
+  "avoid_count": 1,
+  "planner_crashed_count": 0,
+  "avg_stop_width_pct": 5.496,
+  "avg_tp1_distance_pct": 5.9957,
+  "avg_hold_window_reachability_score": 10.0,
+  "realism_flag_counts": {
+    "realistic": 2,
+    "compressed": 1
+  },
+  "action_counts": {
+    "WAIT": 2,
+    "AVOID": 1
+  },
+  "setup_scenario_counts": {
+    "supported_high_range_continuation": 1,
+    "strong_continuation_pullback": 1,
+    "rebound_repair_candidate": 1
+  },
+  "planner_status_counts": {
+    "ok": 3
+  }
+}

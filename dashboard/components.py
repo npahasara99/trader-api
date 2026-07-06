@@ -22,6 +22,34 @@ def _badge_class(kind: str, value) -> str:
         return {"ready-soon": "ready-soon", "monitor": "monitor", "background": "background"}.get(value_slug, "muted")
     if kind == "suitability":
         return {"high": "high", "medium": "medium", "low": "low", "unsuitable": "unsuitable"}.get(value_slug, "muted")
+    if kind == "consistency":
+        return {
+            "fresh": "fresh",
+            "live-but-extended": "live-but-extended",
+            "partially-stale": "partially-stale",
+            "stale-for-live-price": "stale-for-live-price",
+            "invalidated": "invalidated",
+            "aligned": "aligned",
+            "continuation-extended": "continuation-extended",
+            "rebound-already-moved": "rebound-already-moved",
+            "entry-missed": "entry-missed",
+            "near-invalidation": "near-invalidation",
+            "target-already-hit": "target-already-hit",
+            "needs-refresh": "needs-refresh",
+            "below-entry-zone": "muted",
+            "in-entry-zone": "fresh",
+            "above-entry-zone": "continuation-extended",
+            "extended-beyond-entry": "entry-missed",
+            "below-tp1": "muted",
+            "near-tp1": "partially-stale",
+            "at-tp1": "target-already-hit",
+            "above-tp1": "target-already-hit",
+            "tp1-exceeded": "stale-for-live-price",
+            "far-from-stop": "muted",
+            "near-stop": "partially-stale",
+            "at-risk-of-invalidation": "near-invalidation",
+            "below-stop": "invalidated",
+        }.get(value_slug, "muted")
     return "muted"
 
 
@@ -35,6 +63,19 @@ def badge_html(kind: str, value) -> str:
     label = pretty_label(value)
     css_class = _badge_class(kind, value)
     return f'<span class="badge {css_class}">{html.escape(label)}</span>'
+
+
+def render_live_consistency_badges(row) -> str:
+    values = []
+    if row.get("plan_freshness_status"):
+        values.append(badge_html("consistency", row.get("plan_freshness_status")))
+    if row.get("entry_status"):
+        values.append(badge_html("consistency", row.get("entry_status")))
+    if row.get("tp1_status"):
+        values.append(badge_html("consistency", row.get("tp1_status")))
+    if row.get("replan_needed"):
+        values.append(badge_html("consistency", "needs_refresh"))
+    return "".join(values)
 
 
 def render_header(*, latest_run_ts: str, latest_data_ts: str | None) -> None:
@@ -125,14 +166,17 @@ def render_top_watch_card(row) -> None:
             badge_html("actionability", row.get("actionability_label")),
         ]
     )
+    consistency_badges = render_live_consistency_badges(row)
     summary = summary_from_row(row)
     live_price = format_price(row.get("live_price")) if row.get("live_price_available") else "N/A"
     live_asof = format_ts(row.get("live_price_asof")) if row.get("live_price_available") else "Unavailable"
+    live_summary = row.get("live_consistency_summary") or summary
     st.markdown(
         f"""
         <div class="watch-card">
             <h4>{html.escape(str(row.get("ticker") or "-"))}</h4>
             <div class="badge-row">{badges}</div>
+            <div class="badge-row">{consistency_badges}</div>
             <div class="mini-grid">
                 <div><div class="mini-label">Trend</div><div class="mini-value">{html.escape(pretty_label(row.get("trend_state")))}</div></div>
                 <div><div class="mini-label">Live Price</div><div class="mini-value">{html.escape(live_price)}</div></div>
@@ -142,7 +186,7 @@ def render_top_watch_card(row) -> None:
                 <div><div class="mini-label">Dist to Entry</div><div class="mini-value">{html.escape(format_pct(row.get("distance_to_entry_pct")))}</div></div>
             </div>
             <div class="section-caption">Live price as of: {html.escape(live_asof)} | Planner snapshot: {html.escape(format_ts(row.get("updated_at")))}</div>
-            <div class="summary-note">{html.escape(summary)}</div>
+            <div class="summary-note">{html.escape(str(live_summary))}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -158,7 +202,10 @@ def render_badge_row(snapshot_row) -> None:
             badge_html("suitability", snapshot_row.get("suitability_label")),
         ]
     )
+    consistency_badges = render_live_consistency_badges(snapshot_row)
     st.markdown(f'<div class="detail-chip-grid">{badges}</div>', unsafe_allow_html=True)
+    if consistency_badges:
+        st.markdown(f'<div class="detail-chip-grid">{consistency_badges}</div>', unsafe_allow_html=True)
 
 
 def render_key_value_grid(items: list[tuple[str, object]], *, columns: int = 4) -> None:
@@ -279,6 +326,11 @@ def format_watchlist_display(df):
     for column in ["distance_to_entry_pct", "distance_to_stop_pct", "distance_to_tp1_pct"]:
         if column in out.columns:
             out[column] = out[column].apply(format_pct)
+    for column in ["entry_status", "tp1_status", "plan_freshness_status", "live_vs_plan_alignment"]:
+        if column in out.columns:
+            out[column] = out[column].apply(pretty_label)
+    if "replan_needed" in out.columns:
+        out["replan_needed"] = out["replan_needed"].apply(lambda value: "Yes" if value else "No")
     out = out.rename(
         columns={
             "ticker": "Ticker",
@@ -290,6 +342,11 @@ def format_watchlist_display(df):
             "trend_state": "Trend State",
             "live_price": "Live Price",
             "live_price_asof": "Live Price As Of",
+            "entry_status": "Entry Status",
+            "tp1_status": "TP1 Status",
+            "plan_freshness_status": "Plan Freshness",
+            "live_vs_plan_alignment": "Live Alignment",
+            "replan_needed": "Replan Needed",
             "distance_to_entry_pct": "Dist to Entry %",
             "distance_to_stop_pct": "Dist to Stop %",
             "distance_to_tp1_pct": "Dist to TP1 %",

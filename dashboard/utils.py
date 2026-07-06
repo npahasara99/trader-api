@@ -4,12 +4,29 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+from pathlib import Path
+import sys
 
 import pandas as pd
+
+try:
+    from app.live_plan_consistency import enrich_live_plan_consistency_df
+except ImportError:
+    repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from app.live_plan_consistency import enrich_live_plan_consistency_df
 
 
 WATCH_PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 ACTIONABILITY_ORDER = {"ready_soon": 0, "monitor": 1, "background": 2}
+PLAN_FRESHNESS_ORDER = {
+    "fresh": 0,
+    "live_but_extended": 1,
+    "partially_stale": 2,
+    "stale_for_live_price": 3,
+    "invalidated": 4,
+}
 
 
 def safe_json(value):
@@ -31,6 +48,11 @@ def sort_watchlist_table(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["watch_priority_sort"] = out["watch_priority"].map(WATCH_PRIORITY_ORDER).fillna(3)
     out["actionability_sort"] = out["actionability_label"].map(ACTIONABILITY_ORDER).fillna(3)
+    plan_freshness = out["plan_freshness_status"] if "plan_freshness_status" in out.columns else pd.Series([None] * len(out), index=out.index)
+    live_alignment = out["live_vs_plan_alignment"] if "live_vs_plan_alignment" in out.columns else pd.Series([None] * len(out), index=out.index)
+    replan_needed = out["replan_needed"] if "replan_needed" in out.columns else pd.Series([False] * len(out), index=out.index)
+    watchlist_tier = out["watchlist_tier"] if "watchlist_tier" in out.columns else pd.Series([None] * len(out), index=out.index)
+    out["plan_freshness_sort"] = plan_freshness.map(PLAN_FRESHNESS_ORDER).fillna(5)
     out["actionability_score"] = pd.to_numeric(out["actionability_score"], errors="coerce")
     distance_to_entry = out["distance_to_entry_pct"] if "distance_to_entry_pct" in out.columns else pd.Series([None] * len(out), index=out.index)
     distance_to_stop = out["distance_to_stop_pct"] if "distance_to_stop_pct" in out.columns else pd.Series([None] * len(out), index=out.index)
@@ -44,26 +66,50 @@ def sort_watchlist_table(df: pd.DataFrame) -> pd.DataFrame:
     stop_pressure_penalty = out["distance_to_stop_pct_sort"].apply(
         lambda value: 10.0 if pd.notna(value) and value <= 1.5 else (4.0 if pd.notna(value) and value <= 4.0 else 0.0)
     )
-    tier_bonus = out.get("watchlist_tier").map({"primary": 3.0, "secondary": 1.0}).fillna(0.0)
+    freshness_bonus = plan_freshness.map(
+        {
+            "fresh": 9.0,
+            "live_but_extended": 4.5,
+            "partially_stale": -4.0,
+            "stale_for_live_price": -14.0,
+            "invalidated": -22.0,
+        }
+    ).fillna(0.0)
+    alignment_penalty = live_alignment.map(
+        {
+            "continuation_extended": 1.0,
+            "entry_missed": 8.0,
+            "near_invalidation": 12.0,
+            "target_already_hit": 13.0,
+            "rebound_already_moved": 11.0,
+            "needs_refresh": 18.0,
+        }
+    ).fillna(0.0)
+    replan_penalty = replan_needed.fillna(False).astype(int) * 8.0
+    tier_bonus = watchlist_tier.map({"primary": 3.0, "secondary": 1.0}).fillna(0.0)
     live_bonus = out["live_price_available_sort"] * 2.5
     out["active_rank_score"] = (
         out["actionability_score"].fillna(0.0) * 100.0
         + proximity_bonus
+        + freshness_bonus
         + tier_bonus
         + live_bonus
         - extension_penalty
         - stop_pressure_penalty
+        - alignment_penalty
+        - replan_penalty
     )
 
     out = out.sort_values(
-        by=["actionability_sort", "active_rank_score", "watch_priority_sort", "updated_at", "ticker"],
-        ascending=[True, False, True, False, True],
+        by=["plan_freshness_sort", "actionability_sort", "active_rank_score", "watch_priority_sort", "updated_at", "ticker"],
+        ascending=[True, True, False, True, False, True],
         na_position="last",
     )
     return out.drop(
         columns=[
             "watch_priority_sort",
             "actionability_sort",
+            "plan_freshness_sort",
             "distance_to_entry_abs",
             "distance_to_stop_pct_sort",
             "live_price_available_sort",
@@ -261,4 +307,4 @@ def build_active_market_view(snapshot_df: pd.DataFrame, live_quotes_df: pd.DataF
     out["distance_to_entry_pct"] = out.apply(lambda row: _pct_from_level(row.get("live_price"), row.get("preferred_entry")), axis=1)
     out["distance_to_stop_pct"] = out.apply(lambda row: _pct_from_level(row.get("live_price"), row.get("stop_loss")), axis=1)
     out["distance_to_tp1_pct"] = out.apply(lambda row: _pct_to_target(row.get("live_price"), row.get("take_profit_1")), axis=1)
-    return out
+    return enrich_live_plan_consistency_df(out)

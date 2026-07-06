@@ -20,6 +20,7 @@ from api_client import (
 from components import (
     format_run_history_display,
     format_watchlist_display,
+    pretty_label,
     render_actionability,
     render_badge_row,
     render_chart_execution_view,
@@ -652,7 +653,7 @@ with scanner_tab:
 
 with active_tab:
     st.markdown("### Overview")
-    st.caption("Planner state comes from the latest non-expired watchlist snapshots. Live Price comes from runtime quote fetches through the trader API and falls back to the most recent close when a live quote is unavailable, such as when markets are closed.")
+    st.caption("Planner state comes from the latest non-expired watchlist snapshots. Live Price comes from runtime quote fetches through the trader API and falls back to the most recent close when a live quote is unavailable, such as when markets are closed. A separate runtime consistency layer checks whether the saved plan is still fresh, extended, stale, or invalidated at the current price.")
     if latest_snapshot_updated_at:
         now_ts = pd.Timestamp(datetime.utcnow())
         snapshot_ts = pd.to_datetime(latest_snapshot_updated_at, errors="coerce")
@@ -693,14 +694,14 @@ with active_tab:
         render_kpi_card("Snapshot Updated", latest_data_ts or "-", small=True)
 
     st.markdown("### Top 5 Active Watch")
-    st.caption("The highest-priority names from the active snapshot set, now reordered with live proximity in mind. Live Price comes from the API at dashboard runtime and may use the most recent close fallback when markets are closed.")
+    st.caption("The highest-priority names from the active snapshot set, now reordered with live proximity and plan freshness in mind. Live Price comes from the API at dashboard runtime and may use the most recent close fallback when markets are closed.")
     top_watch_cols = st.columns(5)
     for idx, (_, row) in enumerate(active_market_df.head(5).iterrows()):
         with top_watch_cols[idx % 5]:
             render_top_watch_card(row)
 
     st.markdown("### Latest Watchlist")
-    st.caption("These rows use the latest applicable non-expired planner snapshot per ticker, merged with live quotes at runtime. If a live quote is unavailable, the dashboard uses the most recent close instead of leaving the active price blank.")
+    st.caption("These rows use the latest applicable non-expired planner snapshot per ticker, merged with live quotes at runtime. The saved plan stays fixed; the dashboard adds a separate live-consistency layer so you can see whether the original entry is still fresh, extended, stale, or invalidated.")
     filter_container = st.container(border=True)
     with filter_container:
         filter_cols = st.columns([1, 1, 1, 2])
@@ -736,6 +737,11 @@ with active_tab:
         "trend_state",
         "live_price",
         "live_price_asof",
+        "entry_status",
+        "tp1_status",
+        "plan_freshness_status",
+        "live_vs_plan_alignment",
+        "replan_needed",
         "distance_to_entry_pct",
         "distance_to_stop_pct",
         "distance_to_tp1_pct",
@@ -745,8 +751,9 @@ with active_tab:
         "max_hold_date",
         "updated_at",
     ]
+    display_watchlist_cols = [column for column in watchlist_table_cols if column in filtered_active_df.columns]
     st.dataframe(
-        format_watchlist_display(filtered_active_df[watchlist_table_cols]),
+        format_watchlist_display(filtered_active_df[display_watchlist_cols]),
         use_container_width=True,
         hide_index=True,
     )
@@ -801,6 +808,11 @@ with active_tab:
                         ("Live Price", format_price(snapshot_row.get("live_price")) if snapshot_row.get("live_price_available") else "N/A"),
                         ("Live Price As Of", format_ts(snapshot_row.get("live_price_asof")) if snapshot_row.get("live_price_available") else "Unavailable"),
                         ("Live Price Source", str(snapshot_row.get("live_price_source") or "unavailable").replace("_", " ").title()),
+                        ("Entry Status", pretty_label(snapshot_row.get("entry_status"))),
+                        ("TP1 Status", pretty_label(snapshot_row.get("tp1_status"))),
+                        ("Plan Freshness", pretty_label(snapshot_row.get("plan_freshness_status"))),
+                        ("Live Alignment", pretty_label(snapshot_row.get("live_vs_plan_alignment"))),
+                        ("Replan Needed", "Yes" if snapshot_row.get("replan_needed") else "No"),
                         ("Distance to Entry", format_pct(snapshot_row.get("distance_to_entry_pct"))),
                         ("Distance to Stop", format_pct(snapshot_row.get("distance_to_stop_pct"))),
                         ("Distance to TP1", format_pct(snapshot_row.get("distance_to_tp1_pct"))),
@@ -813,6 +825,7 @@ with active_tab:
                     columns=3,
                 )
                 st.caption("Live Price above comes from the trader API at dashboard runtime and may fall back to the most recent close when live quotes are unavailable. Planner levels below remain fixed to the saved active snapshot and are not overwritten by live quotes.")
+                st.caption(snapshot_row.get("live_consistency_summary") or "No live consistency summary available.")
                 st.caption(summary_from_row(snapshot_row))
 
         with execution_tab:
