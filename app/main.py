@@ -863,30 +863,46 @@ def _rank_pre_scan_universe(
         if sector_symbol:
             sector_symbols.add(sector_symbol)
 
-    benchmark_bars = {
-        symbol: daily_bars_loader(symbol)
-        for symbol in sorted(benchmark_symbols | sector_symbols)
-    }
+    benchmark_bars = {}
+    for symbol in sorted(benchmark_symbols | sector_symbols):
+        try:
+            benchmark_bars[symbol] = daily_bars_loader(symbol)
+        except Exception as exc:
+            print(f"Pre-scan benchmark load failed for {symbol}: {exc}")
+            benchmark_bars[symbol] = []
 
     for sym in symbols:
-        last = get_last_price_or_recent_close(sym, daily_closes_loader=daily_closes_loader)
-        earnings_score, earnings_context = compute_earnings_signal(
-            sym,
-            last,
-            daily_closes_loader=daily_closes_loader,
-        )
-        _ = earnings_score
-        bars = daily_bars_loader(sym)
-        profile = build_pre_scan_profile(
-            ticker=sym,
-            current_price=last,
-            bars=bars,
-            benchmark_bars=benchmark_bars,
-            sector_benchmark_symbol=sector_benchmark_symbol_for_meta(SP100_CLASSIFICATION.get(sym)),
-            earnings_context=earnings_context,
-            config=DEFAULT_PLANNING_CONFIG,
-        )
-        ranked.append(profile)
+        try:
+            last = get_last_price_or_recent_close(sym, daily_closes_loader=daily_closes_loader)
+            earnings_score, earnings_context = compute_earnings_signal(
+                sym,
+                last,
+                daily_closes_loader=daily_closes_loader,
+            )
+            _ = earnings_score
+            bars = daily_bars_loader(sym)
+            profile = build_pre_scan_profile(
+                ticker=sym,
+                current_price=last,
+                bars=bars,
+                benchmark_bars=benchmark_bars,
+                sector_benchmark_symbol=sector_benchmark_symbol_for_meta(SP100_CLASSIFICATION.get(sym)),
+                earnings_context=earnings_context,
+                config=DEFAULT_PLANNING_CONFIG,
+            )
+            ranked.append(profile)
+        except Exception as exc:
+            print(f"Pre-scan crashed for {sym}: {exc}")
+            ranked.append(
+                {
+                    "ticker": sym,
+                    "pre_scan_score": -9999.0,
+                    "pre_scan_reason_tags": ["prescan_crashed"],
+                    "scan_rejection_reason": "prescan_crashed",
+                    "prescan_error": f"{type(exc).__name__}: {exc}",
+                    "sector_relative_strength": None,
+                }
+            )
 
     ranked.sort(key=lambda item: float(item.get("pre_scan_score", 0.0)), reverse=True)
     return ranked
@@ -1738,16 +1754,48 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
     pre_scan_by_ticker = {
         item["ticker"]: {
             **item,
-            "scan_shortlisted": True,
-            "scan_rejection_reason": None,
+            "scan_shortlisted": str(item.get("scan_rejection_reason") or "") != "prescan_crashed",
+            "scan_rejection_reason": item.get("scan_rejection_reason"),
         }
         for item in shortlist
     }
 
-    regime_snapshot = detect_market_regime(universe[:20], daily_closes_loader=daily_closes_loader)
-    perf = _rolling_performance_snapshot(db, lookback_days=lookback_days)
+    try:
+        regime_snapshot = detect_market_regime(universe[:20], daily_closes_loader=daily_closes_loader)
+    except Exception as exc:
+        print(f"Market regime detection failed during SP100 workflow: {exc}")
+        regime_snapshot = {
+            "as_of": planned_at,
+            "regime": "neutral",
+            "score": 0.0,
+            "spy_price": None,
+            "spy_ma20": None,
+            "spy_ma50": None,
+            "breadth_ratio": None,
+            "breadth_samples": 0,
+        }
+
+    try:
+        perf = _rolling_performance_snapshot(db, lookback_days=lookback_days)
+    except Exception as exc:
+        print(f"Rolling performance snapshot failed during SP100 workflow: {exc}")
+        perf = {
+            "overall_samples": 0,
+            "overall_avg_return": 0.0,
+            "overall_abs_return": 0.0,
+            "overall_win_rate": 0.0,
+            "buy_samples": 0,
+            "buy_avg_return": 0.0,
+            "buy_win_rate": 0.0,
+        }
+
     thresholds = _compute_dynamic_thresholds(regime_snapshot["regime"], perf)
-    history_stats = _history_stats_by_ticker(db, lookback_days=lookback_days)
+
+    try:
+        history_stats = _history_stats_by_ticker(db, lookback_days=lookback_days)
+    except Exception as exc:
+        print(f"History stats lookup failed during SP100 workflow: {exc}")
+        history_stats = {}
 
     rows = build_swing_plan(
         universe,
