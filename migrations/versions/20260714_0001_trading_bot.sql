@@ -1,0 +1,25 @@
+-- Trading bot schema bootstrap for repos that review/apply SQL migrations manually.
+-- The runtime app still uses SQLAlchemy metadata create_all() for compatibility.
+-- This file documents the intended schema introduction for the trading bot tables.
+
+-- See app/models.py for the authoritative SQLAlchemy model definitions.
+-- New tables introduced:
+--   bot_configurations
+--   bot_runs
+--   bot_events
+--   bot_health_snapshots
+--   broker_accounts
+--   trade_candidates
+--   candidate_score_components
+--   trade_proposals
+--   broker_orders
+--   broker_order_events
+--   executions
+--   commissions
+--   positions
+--   position_events
+--   trade_reviews
+--   trade_memory_statistics
+--   daily_performance
+--   reconciliation_runs
+--   kill_switch_events

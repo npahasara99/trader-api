@@ -10,3 +10,5 @@ yfinance==0.2.43
 requests==2.32.3
 python-dateutil==2.9.0.post0
 streamlit==1.44.1
+ib-insync==0.9.86
+pytest==8.3.3

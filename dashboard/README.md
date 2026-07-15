@@ -11,6 +11,7 @@ Dashboard and runner for the Supabase reporting database used by workflow scan o
 - Scan run history with per-run ticker results
 - Latest top-5 active watch names
 - Scanner / Runner controls that call the live trader API
+- Trading Bot controls and visibility for broker status, candidates, proposals, orders, positions, journal and memory
 
 ## Environment
 

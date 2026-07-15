@@ -40,6 +40,7 @@ from .market_data import (
     backfill_universe_daily_bars,
     fetch_finnhub_daily_bars_with_meta,
 )
+from .bot.api import router as bot_router
 
 
 DEFAULT_BAR_LOOKBACK_DAYS = 320
@@ -97,6 +98,9 @@ def require_bearer_token(authorization: Optional[str] = Header(default=None)):
     token = authorization.removeprefix("Bearer ").strip()
     if token != expected:
         raise HTTPException(status_code=403, detail="Invalid token")
+
+
+app.include_router(bot_router, dependencies=[Depends(require_bearer_token)])
 
 
 # --- Requests/Responses ---

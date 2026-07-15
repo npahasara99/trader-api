@@ -10,12 +10,18 @@ import streamlit as st
 from api_client import (
     TraderAPIError,
     api_config_status,
+    bot_action,
     fetch_earnings_calendar,
     fetch_earnings_detail,
     fetch_live_quotes,
+    fetch_bot_config,
+    fetch_bot_payload,
+    fetch_bot_rows,
+    fetch_bot_status,
     run_manual_basket,
     run_single_stock_workflow,
     run_sp100_workflow,
+    update_bot_config,
 )
 from components import (
     format_run_history_display,
@@ -431,7 +437,7 @@ render_header(
     latest_data_ts=latest_data_ts,
 )
 
-scanner_tab, active_tab, earnings_tab, history_tab = st.tabs(["Run Scanner", "Active Dashboard", "Earnings", "History"])
+scanner_tab, bot_tab, active_tab, earnings_tab, history_tab = st.tabs(["Run Scanner", "Trading Bot", "Active Dashboard", "Earnings", "History"])
 
 with scanner_tab:
     st.markdown("### Scanner / Runner")
@@ -650,6 +656,236 @@ with scanner_tab:
                         market_regime=response.get("market_regime"),
                     )
                     st.info("Manual basket runs do not currently update the active watchlist in Supabase. The Active Dashboard reflects the latest persisted watchlist workflow, which is currently the SP100 workflow path.")
+
+with bot_tab:
+    st.markdown("### Trading Bot")
+    st.caption("Paper-safe bot controls and visibility for broker health, watchlist candidates, trade proposals, orders, positions, journal, memory and risk controls.")
+
+    bot_status = {}
+    bot_config = {}
+    bot_status_error = None
+    try:
+        bot_status = fetch_bot_status()
+        bot_config = fetch_bot_config().get("config") or {}
+    except TraderAPIError as exc:
+        bot_status_error = str(exc)
+
+    if bot_status_error:
+        st.error(bot_status_error)
+    else:
+        status_cols = st.columns(6)
+        with status_cols[0]:
+            render_kpi_card("Bot State", str(bot_status.get("state") or "-"), small=True)
+        with status_cols[1]:
+            render_kpi_card("Trading Mode", str(bot_status.get("trading_mode") or "-"), small=True)
+        with status_cols[2]:
+            render_kpi_card("Broker State", str(bot_status.get("broker_state") or "-"), small=True)
+        with status_cols[3]:
+            render_kpi_card("Auto Execution", "On" if bot_status.get("auto_execution") else "Off", small=True)
+        with status_cols[4]:
+            render_kpi_card("Kill Switch", "Active" if bot_status.get("kill_switch_active") else "Off", small=True)
+        with status_cols[5]:
+            render_kpi_card("Reconcile Lock", "Yes" if bot_status.get("reconciliation_required") else "No", small=True)
+
+        control_cols = st.columns(7)
+        if control_cols[0].button("Start Bot", use_container_width=True):
+            st.session_state["bot_action_result"] = bot_action("/bot/start")
+            st.rerun()
+        if control_cols[1].button("Pause", use_container_width=True):
+            st.session_state["bot_action_result"] = bot_action("/bot/pause")
+            st.rerun()
+        if control_cols[2].button("Resume", use_container_width=True):
+            st.session_state["bot_action_result"] = bot_action("/bot/resume")
+            st.rerun()
+        if control_cols[3].button("Stop", use_container_width=True):
+            st.session_state["bot_action_result"] = bot_action("/bot/stop")
+            st.rerun()
+        if control_cols[4].button("Reconnect Broker", use_container_width=True):
+            st.session_state["bot_action_result"] = bot_action("/broker/reconnect")
+            st.rerun()
+        if control_cols[5].button("Reconcile", use_container_width=True):
+            st.session_state["bot_action_result"] = bot_action("/broker/reconcile")
+            st.rerun()
+        if control_cols[6].button("Refresh Watchlist", use_container_width=True):
+            st.session_state["bot_action_result"] = bot_action("/watchlist/refresh")
+            st.rerun()
+
+        if st.session_state.get("bot_action_result"):
+            result = st.session_state.get("bot_action_result")
+            if result.get("ok", True):
+                st.success(result.get("message") or "Action completed.")
+            else:
+                st.error(result.get("message") or "Action failed.")
+
+        with st.expander("Bot Configuration", expanded=False):
+            editable_keys = [
+                "trading_mode",
+                "auto_execution",
+                "trading_budget",
+                "risk_per_trade_pct",
+                "max_position_pct",
+                "max_open_positions",
+                "max_portfolio_risk_pct",
+                "max_daily_loss_pct",
+                "max_weekly_loss_pct",
+                "max_spread_pct",
+                "stale_quote_seconds",
+            ]
+            cfg_payload = {}
+            cfg_cols = st.columns(2)
+            for idx, key in enumerate(editable_keys):
+                value = bot_config.get(key)
+                with cfg_cols[idx % 2]:
+                    if isinstance(value, bool):
+                        cfg_payload[key] = st.checkbox(key.replace("_", " ").title(), value=bool(value), key=f"bot_cfg_{key}")
+                    else:
+                        cfg_payload[key] = st.text_input(key.replace("_", " ").title(), value="" if value is None else str(value), key=f"bot_cfg_{key}")
+            if st.button("Save Bot Config", type="secondary"):
+                normalized = {}
+                for key, value in cfg_payload.items():
+                    if isinstance(bot_config.get(key), bool):
+                        normalized[key] = bool(value)
+                    elif isinstance(bot_config.get(key), int):
+                        normalized[key] = int(value)
+                    elif isinstance(bot_config.get(key), float):
+                        normalized[key] = float(value)
+                    else:
+                        normalized[key] = value
+                st.session_state["bot_action_result"] = update_bot_config(normalized)
+                st.rerun()
+
+        bot_overview_tab, candidates_tab, proposals_tab, orders_tab, positions_tab, journal_tab, memory_tab, safety_tab = st.tabs(
+            ["Overview", "Candidates", "Proposals", "Orders", "Positions", "Journal", "Memory", "Safety"]
+        )
+
+        with bot_overview_tab:
+            try:
+                broker_account = fetch_bot_payload("/broker/account")
+            except Exception:
+                broker_account = {}
+            st.caption(
+                f"Last heartbeat: {format_ts(bot_status.get('last_heartbeat'))} | "
+                f"Last scan: {format_ts(bot_status.get('last_scan_time'))} | "
+                f"Last broker sync: {format_ts(bot_status.get('last_broker_sync'))}"
+            )
+            overview_cols = st.columns(4)
+            with overview_cols[0]:
+                render_kpi_card("Account Type", str(broker_account.get("account_type") or "-"), small=True)
+            with overview_cols[1]:
+                render_kpi_card("Buying Power", format_price(broker_account.get("buying_power")), small=True)
+            with overview_cols[2]:
+                render_kpi_card("Cash", format_price(broker_account.get("cash_balance")), small=True)
+            with overview_cols[3]:
+                render_kpi_card("Net Liq", format_price(broker_account.get("net_liquidation_value")), small=True)
+            st.json(bot_status)
+
+        with candidates_tab:
+            try:
+                candidate_rows = fetch_bot_rows("/candidates")
+            except TraderAPIError as exc:
+                st.error(str(exc))
+                candidate_rows = []
+            if candidate_rows:
+                candidate_df = pd.DataFrame(candidate_rows)
+                st.dataframe(candidate_df, use_container_width=True, hide_index=True)
+                selected_candidate = st.selectbox("Candidate Detail", options=[row["candidate_id"] for row in candidate_rows], key="bot_candidate_detail")
+                candidate_row = next((row for row in candidate_rows if row["candidate_id"] == selected_candidate), None)
+                if candidate_row:
+                    st.json(candidate_row)
+                    action_cols = st.columns(3)
+                    if action_cols[0].button("Preview Execution", key="bot_preview_candidate"):
+                        st.session_state["bot_preview_result"] = bot_action("/execution/preview", {"candidate_id": selected_candidate})
+                        st.rerun()
+                    if action_cols[1].button("Reject Candidate", key="bot_reject_candidate"):
+                        st.session_state["bot_action_result"] = bot_action(f"/candidates/{selected_candidate}/reject")
+                        st.rerun()
+            else:
+                st.caption("No bot candidates yet. Refresh the watchlist or start the bot.")
+
+        with proposals_tab:
+            st.caption("Execution previews are persisted as trade proposals.")
+            preview_result = st.session_state.get("bot_preview_result")
+            if preview_result:
+                st.json(preview_result)
+                proposal_id = preview_result.get("proposal_id")
+                if proposal_id:
+                    proposal_cols = st.columns(2)
+                    if proposal_cols[0].button("Approve / Submit Proposal", key="bot_submit_proposal"):
+                        st.session_state["bot_action_result"] = bot_action("/execution/submit", {"proposal_id": proposal_id})
+                        st.rerun()
+                    if proposal_cols[1].button("Approve Manual Proposal", key="bot_approve_proposal"):
+                        st.session_state["bot_action_result"] = bot_action(f"/execution/{proposal_id}/approve")
+                        st.rerun()
+            else:
+                st.caption("No previewed proposal in this session yet.")
+
+        with orders_tab:
+            try:
+                order_rows = fetch_bot_rows("/broker/orders")
+            except TraderAPIError as exc:
+                st.error(str(exc))
+                order_rows = []
+            if order_rows:
+                st.dataframe(pd.DataFrame(order_rows), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No open broker orders.")
+
+        with positions_tab:
+            try:
+                position_rows = fetch_bot_rows("/broker/positions")
+            except TraderAPIError as exc:
+                st.error(str(exc))
+                position_rows = []
+            if position_rows:
+                st.dataframe(pd.DataFrame(position_rows), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No open broker positions.")
+
+        with journal_tab:
+            try:
+                journal_rows = fetch_bot_rows("/journal/trades")
+            except TraderAPIError as exc:
+                st.error(str(exc))
+                journal_rows = []
+            if journal_rows:
+                st.dataframe(pd.DataFrame(journal_rows), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No journaled trades yet.")
+
+        with memory_tab:
+            try:
+                memory_rows = fetch_bot_rows("/memory/statistics")
+            except TraderAPIError as exc:
+                st.error(str(exc))
+                memory_rows = []
+            if st.button("Rebuild Memory", key="bot_rebuild_memory"):
+                st.session_state["bot_action_result"] = bot_action("/memory/rebuild")
+                st.rerun()
+            if memory_rows:
+                st.dataframe(pd.DataFrame(memory_rows), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No memory statistics yet.")
+
+        with safety_tab:
+            try:
+                risk_status = fetch_bot_payload("/risk/status")
+                risk_exposure = fetch_bot_payload("/risk/exposure")
+            except TraderAPIError as exc:
+                st.error(str(exc))
+                risk_status = {}
+                risk_exposure = {}
+            st.json(risk_status)
+            st.json(risk_exposure)
+            kill_cols = st.columns(2)
+            if kill_cols[0].button("Activate Kill Switch", type="secondary", key="bot_kill_switch"):
+                st.session_state["bot_action_result"] = bot_action("/risk/kill-switch", {"reason": "manual_dashboard_trigger"})
+                st.rerun()
+            if kill_cols[1].button("Reset Kill Switch", type="secondary", key="bot_kill_reset"):
+                st.session_state["bot_action_result"] = bot_action("/risk/kill-switch/reset")
+                st.rerun()
+            if st.button("Flatten All Positions", type="primary", key="bot_flatten_all"):
+                st.session_state["bot_action_result"] = bot_action("/execution/flatten")
+                st.rerun()
 
 with active_tab:
     st.markdown("### Overview")

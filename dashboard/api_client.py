@@ -148,6 +148,35 @@ def post_json(path: str, payload: dict[str, Any], *, timeout: int = 180) -> dict
     return data
 
 
+def put_json(path: str, payload: dict[str, Any], *, timeout: int = 180) -> dict[str, Any]:
+    base_url = get_api_base_url()
+    url = f"{base_url}{path}"
+    try:
+        response = requests.put(url, json=payload, headers=_headers(), timeout=timeout)
+    except requests.Timeout as exc:
+        raise TraderAPIError(
+            f"The trader API did not finish within {timeout} seconds for {path}."
+        ) from exc
+    except requests.RequestException as exc:
+        raise TraderAPIError(f"Could not reach the trader API at {url}: {exc}") from exc
+
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+
+    if not response.ok:
+        detail = data.get("detail") if isinstance(data, dict) else data
+        message = f"Trader API returned HTTP {response.status_code} for {path}."
+        if detail:
+            message = f"{message} {detail}"
+        raise TraderAPIError(message, status_code=response.status_code, detail=detail)
+
+    if not isinstance(data, dict):
+        raise TraderAPIError(f"Trader API returned a malformed response for {path}.")
+    return data
+
+
 def run_sp100_workflow(payload: dict[str, Any]) -> dict[str, Any]:
     return post_json(
         "/workflow/sp100/top10-log",
@@ -215,3 +244,29 @@ def fetch_live_quotes(tickers: list[str]) -> dict[str, Any]:
         params={"tickers": ",".join(normalized)},
         timeout=get_api_timeout_seconds(60),
     )
+
+
+def fetch_bot_status() -> dict[str, Any]:
+    return get_json("/bot/status", timeout=get_api_timeout_seconds(60))
+
+
+def fetch_bot_config() -> dict[str, Any]:
+    return get_json("/bot/config", timeout=get_api_timeout_seconds(60))
+
+
+def update_bot_config(payload: dict[str, Any]) -> dict[str, Any]:
+    return put_json("/bot/config", {"config": payload}, timeout=get_api_timeout_seconds(120))
+
+
+def bot_action(path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    return post_json(path, payload or {}, timeout=get_api_timeout_seconds(120))
+
+
+def fetch_bot_rows(path: str) -> list[dict[str, Any]]:
+    payload = get_json(path, timeout=get_api_timeout_seconds(120))
+    rows = payload.get("rows")
+    return rows if isinstance(rows, list) else []
+
+
+def fetch_bot_payload(path: str) -> dict[str, Any]:
+    return get_json(path, timeout=get_api_timeout_seconds(120))
