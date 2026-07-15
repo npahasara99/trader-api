@@ -1,7 +1,9 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # Keep core secrets in .env while allowing local broker settings to live in
+    # an independently ignored file. Later files override earlier ones.
+    model_config = SettingsConfigDict(env_file=(".env", ".env.bot"), extra="ignore")
     DATABASE_URL: str
     SUPABASE_DATABASE_URL: str | None = None
     OPENAI_API_KEY: str | None = None

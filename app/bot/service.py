@@ -222,9 +222,16 @@ class TradingBotService:
     def reconnect_broker(self) -> dict[str, Any]:
         try:
             self._broker.reconnect()
+            account = self._broker.account_summary()
+            self._validate_broker_account(account)
             self._broker_state = BrokerHealthState.CONNECTED
             self._last_broker_sync = datetime.now(timezone.utc)
-            return {"ok": True, "message": "Broker reconnected"}
+            return {
+                "ok": True,
+                "message": "Broker reconnected to verified paper account",
+                "account_id_masked": self._mask_account(account.account_id),
+                "is_paper": account.is_paper,
+            }
         except Exception as exc:
             self._broker_state = BrokerHealthState.DEGRADED
             return {"ok": False, "message": f"Broker reconnect failed: {exc}"}
@@ -237,6 +244,7 @@ class TradingBotService:
             db.flush()
             try:
                 account = self._broker.account_summary()
+                self._validate_broker_account(account)
                 db.add(
                     BrokerAccount(
                         account_id_masked=self._mask_account(account.account_id),
@@ -736,6 +744,7 @@ class TradingBotService:
         try:
             self._broker_state = BrokerHealthState.CONNECTING
             self._broker.connect()
+            self._validate_broker_account(self._broker.account_summary())
             self._broker_state = BrokerHealthState.CONNECTED
         except Exception:
             self._broker_state = BrokerHealthState.DEGRADED
@@ -805,6 +814,9 @@ class TradingBotService:
         if self._config.trading_mode == TradingMode.DISABLED:
             rejection_codes.append("trading_disabled")
             rejection_reasons.append("Trading mode is disabled.")
+        if self._config.ibkr_read_only:
+            rejection_codes.append("broker_read_only")
+            rejection_reasons.append("IBKR is connected in read-only mode; order submission is intentionally blocked.")
         if candidate.preferred_entry is None or candidate.stop_loss is None or candidate.take_profit_1 is None:
             rejection_codes.append("invalid_levels")
             rejection_reasons.append("Candidate does not have valid entry, stop and target levels.")
@@ -938,6 +950,14 @@ class TradingBotService:
         if not account_id:
             return "unknown"
         return f"***{account_id[-4:]}"
+
+    def _validate_broker_account(self, account: BrokerAccountSummary) -> None:
+        configured_account = (self._config.ibkr_account_id or "").strip().upper()
+        connected_account = (account.account_id or "").strip().upper()
+        if configured_account and connected_account != configured_account:
+            raise BrokerError("Connected IBKR account does not match IBKR_ACCOUNT_ID")
+        if self._config.ibkr_require_paper_account and not account.is_paper:
+            raise BrokerError("Paper-account safety check failed; connected account is not an IBKR paper account")
 
     def _load_active_watchlist_rows(self) -> list[dict[str, Any]]:
         db_url = settings.SUPABASE_DATABASE_URL
