@@ -13,8 +13,17 @@ def test_railway_port_wins_for_both_services(monkeypatch) -> None:
     assert resolve_api_port() == 9123
 
 
+def test_local_api_port_can_come_from_bot_env(monkeypatch) -> None:
+    monkeypatch.delenv("PORT", raising=False)
+    monkeypatch.delenv("UVICORN_PORT", raising=False)
+    monkeypatch.setenv("TRADER_API_PORT", "8081")
+
+    assert resolve_api_port() == 8081
+
+
 def test_invalid_literal_port_values_use_service_defaults(monkeypatch) -> None:
     monkeypatch.delenv("PORT", raising=False)
+    monkeypatch.delenv("TRADER_API_PORT", raising=False)
     monkeypatch.setenv("STREAMLIT_SERVER_PORT", "$PORT")
     monkeypatch.setenv("UVICORN_PORT", "$PORT")
 

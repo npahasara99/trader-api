@@ -51,8 +51,13 @@ Copy `.env.example` to `.env` and fill in:
 ## Run the API
 
 ```bash
-uvicorn app.main:app --reload
+python scripts/start_api.py
 ```
+
+For local TWS paper testing, set `TRADER_API_PORT=8081` in the ignored
+`.env.bot` file if port `8080` is already occupied. The launcher reads `.env`
+and `.env.bot` automatically; deployed environment variables still take
+precedence.
 
 ## Run the dashboard
 

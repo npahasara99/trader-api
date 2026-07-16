@@ -21,17 +21,20 @@ class TraderAPIError(RuntimeError):
 
 @lru_cache(maxsize=1)
 def _load_repo_env() -> None:
-    env_path = Path(__file__).resolve().parents[1] / ".env"
-    if not env_path.exists():
-        return
-
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+    repo_root = Path(__file__).resolve().parents[1]
+    file_values: dict[str, str] = {}
+    for filename in (".env", ".env.bot"):
+        env_path = repo_root / filename
+        if not env_path.exists():
             continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            file_values[key.strip()] = value.strip().strip('"').strip("'")
+    for key, value in file_values.items():
+        # Deployed service variables remain authoritative over repo-local files.
         os.environ.setdefault(key, value)
 
 

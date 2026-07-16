@@ -6,9 +6,29 @@ import os
 from pathlib import Path
 import sys
 
+from dotenv import dotenv_values
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_repo_env() -> None:
+    file_values: dict[str, str] = {}
+    for filename in (".env", ".env.bot"):
+        path = PROJECT_ROOT / filename
+        if not path.exists():
+            continue
+        file_values.update({key: value for key, value in dotenv_values(path).items() if value is not None})
+    for key, value in file_values.items():
+        # Railway/service variables remain authoritative over local files.
+        os.environ.setdefault(key, value)
+
+
+_load_repo_env()
+
 
 def _resolve_port() -> int:
-    for candidate in (os.getenv("PORT"), os.getenv("UVICORN_PORT"), "8080"):
+    for candidate in (os.getenv("PORT"), os.getenv("TRADER_API_PORT"), os.getenv("UVICORN_PORT"), "8080"):
         try:
             port = int(str(candidate).strip())
         except (TypeError, ValueError):
@@ -19,8 +39,7 @@ def _resolve_port() -> int:
 
 
 def main() -> None:
-    project_root = Path(__file__).resolve().parents[1]
-    os.chdir(project_root)
+    os.chdir(PROJECT_ROOT)
     port = _resolve_port()
 
     os.environ["UVICORN_PORT"] = str(port)
