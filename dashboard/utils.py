@@ -4,18 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
-from pathlib import Path
-import sys
 
 import pandas as pd
 
-try:
-    from app.live_plan_consistency import enrich_live_plan_consistency_df
-except ImportError:
-    repo_root = Path(__file__).resolve().parents[1]
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
-    from app.live_plan_consistency import enrich_live_plan_consistency_df
+from app.live_plan_consistency import enrich_live_plan_consistency_df
 
 
 WATCH_PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}

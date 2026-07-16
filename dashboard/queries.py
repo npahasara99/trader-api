@@ -7,10 +7,7 @@ import json
 import pandas as pd
 import streamlit as st
 
-try:
-    from .db import get_engine
-except ImportError:
-    from db import get_engine
+from .db import get_engine
 
 
 ACTIVE_SNAPSHOTS_CTE = """

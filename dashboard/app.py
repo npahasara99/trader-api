@@ -3,11 +3,23 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
+import sys
+
+
+# Streamlit adds the script directory to sys.path. Put the repository root
+# first so backend imports such as app.live_plan_consistency cannot resolve to
+# dashboard/app.py and create a circular import.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+project_root_text = str(PROJECT_ROOT)
+if project_root_text in sys.path:
+    sys.path.remove(project_root_text)
+sys.path.insert(0, project_root_text)
 
 import pandas as pd
 import streamlit as st
 
-from api_client import (
+from dashboard.api_client import (
     TraderAPIError,
     api_config_status,
     bot_action,
@@ -23,7 +35,7 @@ from api_client import (
     run_sp100_workflow,
     update_bot_config,
 )
-from components import (
+from dashboard.components import (
     format_run_history_display,
     format_watchlist_display,
     pretty_label,
@@ -42,15 +54,15 @@ from components import (
     render_what_to_watch,
     summary_from_row,
 )
-from queries import (
+from dashboard.queries import (
     fetch_latest_run_summary,
     fetch_latest_snapshots,
     fetch_latest_ticker_snapshot,
     fetch_run_history,
     fetch_run_results,
 )
-from styles import inject_styles
-from utils import (
+from dashboard.styles import inject_styles
+from dashboard.utils import (
     build_active_market_view,
     filter_watchlist_df,
     first_non_empty,
