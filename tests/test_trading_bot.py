@@ -87,6 +87,36 @@ class BotServicePreviewTests(unittest.TestCase):
         preview = service._build_execution_preview(candidate, side="BUY", order_type="LIMIT")
         self.assertIn("quantity_below_one", preview["rejection_codes"])
 
+    def test_low_reward_risk_reports_configured_minimum(self):
+        service = TradingBotService()
+        service._config = replace(
+            service._config,
+            trading_mode=TradingMode.MANUAL_PAPER,
+            ibkr_read_only=False,
+            min_reward_risk=2.0,
+        )
+        service._broker = MockBroker(cash_balance=10_000.0)
+        service._broker.connect()
+        service._broker.seed_quote("GE", last=342.75)
+        self._isolate_risk_queries(service)
+        candidate = TradeCandidate(
+            candidate_id="cand-low-rr",
+            ticker="GE",
+            basket="manual",
+            status="monitoring",
+            preferred_entry=342.73,
+            stop_loss=309.73,
+            take_profit_1=377.38,
+            take_profit_2=395.52,
+        )
+
+        preview = service._build_execution_preview(candidate, side="BUY", order_type="LIMIT")
+
+        self.assertFalse(preview["eligible"])
+        self.assertIn("low_reward_risk", preview["rejection_codes"])
+        self.assertEqual(preview["minimum_reward_to_risk"], 2.0)
+        self.assertAlmostEqual(preview["reward_to_risk"], 1.05, places=2)
+
     def test_required_paper_account_rejects_live_account(self):
         service = TradingBotService()
         live_account = BrokerAccountSummary(

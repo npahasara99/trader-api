@@ -728,6 +728,9 @@ with bot_tab:
                 st.success(result.get("message") or "Action completed.")
             else:
                 st.error(result.get("message") or "Action failed.")
+                rejection_reasons = result.get("rejection_reasons") or (result.get("preview") or {}).get("rejection_reasons") or []
+                if rejection_reasons:
+                    st.caption("Blocked by: " + " | ".join(str(reason) for reason in rejection_reasons))
 
         with st.expander("Bot Configuration", expanded=False):
             editable_keys = [
@@ -818,9 +821,34 @@ with bot_tab:
             st.caption("Execution previews are persisted as trade proposals.")
             preview_result = st.session_state.get("bot_preview_result")
             if preview_result:
-                st.json(preview_result)
+                eligible = bool(preview_result.get("eligible"))
+                rejection_reasons = preview_result.get("rejection_reasons") or []
+                if eligible:
+                    st.success("This proposal passed the configured execution checks.")
+                else:
+                    st.error("This proposal cannot be submitted because it failed one or more execution checks.")
+                    for reason in rejection_reasons:
+                        st.markdown(f"- {reason}")
+
+                target_prices = preview_result.get("target_prices") or []
+                preview_cols = st.columns(6)
+                with preview_cols[0]:
+                    render_kpi_card("Entry", format_price(preview_result.get("entry_price")), small=True)
+                with preview_cols[1]:
+                    render_kpi_card("Stop", format_price(preview_result.get("stop_price")), small=True)
+                with preview_cols[2]:
+                    render_kpi_card("TP1", format_price(target_prices[0] if target_prices else None), small=True)
+                with preview_cols[3]:
+                    render_kpi_card("Quantity", preview_result.get("quantity") or 0, small=True)
+                with preview_cols[4]:
+                    render_kpi_card("Reward / Risk", preview_result.get("reward_to_risk") or "-", small=True)
+                with preview_cols[5]:
+                    render_kpi_card("Required R / R", preview_result.get("minimum_reward_to_risk") or "-", small=True)
+
+                with st.expander("Execution Preview Details", expanded=False):
+                    st.json(preview_result)
                 proposal_id = preview_result.get("proposal_id")
-                if proposal_id:
+                if proposal_id and eligible:
                     proposal_cols = st.columns(2)
                     if proposal_cols[0].button("Approve / Submit Proposal", key="bot_submit_proposal"):
                         st.session_state["bot_action_result"] = bot_action("/execution/submit", {"proposal_id": proposal_id})
@@ -828,6 +856,8 @@ with bot_tab:
                     if proposal_cols[1].button("Approve Manual Proposal", key="bot_approve_proposal"):
                         st.session_state["bot_action_result"] = bot_action(f"/execution/{proposal_id}/approve")
                         st.rerun()
+                elif proposal_id:
+                    st.caption("Submission controls are hidden until a new preview passes every execution check.")
             else:
                 st.caption("No previewed proposal in this session yet.")
 

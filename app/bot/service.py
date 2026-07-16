@@ -400,7 +400,19 @@ class TradingBotService:
             if not preview.get("eligible"):
                 proposal.status = ProposalStatus.REJECTED.value
                 db.commit()
-                return {"ok": False, "message": "Proposal is not eligible", "preview": preview}
+                rejection_codes = preview.get("rejection_codes") or []
+                rejection_reasons = preview.get("rejection_reasons") or []
+                detail = "; ".join(str(reason) for reason in rejection_reasons if reason)
+                message = "Proposal is not eligible"
+                if detail:
+                    message = f"{message}: {detail}"
+                return {
+                    "ok": False,
+                    "message": message,
+                    "rejection_codes": rejection_codes,
+                    "rejection_reasons": rejection_reasons,
+                    "preview": preview,
+                }
             if self._config.trading_mode == TradingMode.DISABLED:
                 return {"ok": False, "message": "Trading mode is disabled"}
             if self._config.trading_mode == TradingMode.MANUAL_PAPER and not auto_approved:
@@ -874,6 +886,7 @@ class TradingBotService:
             "estimated_max_loss": round(estimated_max_loss, 2),
             "risk_percentage": round((planned_risk / max(self._config.trading_budget, 1e-9)) * 100.0, 2),
             "reward_to_risk": round(reward_risk, 4) if reward_risk is not None else None,
+            "minimum_reward_to_risk": self._config.min_reward_risk,
             "buying_power_before": self._broker.account_summary().buying_power if eligible else None,
             "buying_power_after": None if not eligible or candidate.preferred_entry is None else round(self._broker.account_summary().buying_power - candidate.preferred_entry * quantity, 2),
             "capital_utilization_before": round(self.exposure_status()["capital_utilization_pct"], 2),
