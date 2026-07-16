@@ -63,6 +63,16 @@ streamlit run dashboard/app.py
 For Railway, use `python dashboard/start.py` as the dashboard service start
 command so the injected `PORT` is validated without relying on shell expansion.
 
+Railway services using this repository must keep their start commands separate:
+
+| Service | Start command |
+| --- | --- |
+| Trader API | `python scripts/start_api.py` |
+| Streamlit dashboard | `python dashboard/start.py` |
+
+The API launcher validates Railway's `PORT` and enforces a single Uvicorn worker,
+which is required by the in-process bot and its persistent IBKR connection.
+
 The dashboard now includes a `Trading Bot` tab alongside the existing scanner and watchlist views.
 
 ## Apply schema updates

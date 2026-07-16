@@ -86,6 +86,11 @@ app = FastAPI(
 )
 
 
+@app.get("/health", include_in_schema=False)
+def health_check():
+    return {"status": "ok"}
+
+
 def require_bearer_token(authorization: Optional[str] = Header(default=None)):
     expected = os.getenv("API_BEARER_TOKEN")
     # If you haven't set a token, don't block (useful for local dev).
