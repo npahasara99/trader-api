@@ -60,6 +60,9 @@ uvicorn app.main:app --reload
 streamlit run dashboard/app.py
 ```
 
+For Railway, use `python dashboard/start.py` as the dashboard service start
+command so the injected `PORT` is validated without relying on shell expansion.
+
 The dashboard now includes a `Trading Bot` tab alongside the existing scanner and watchlist views.
 
 ## Apply schema updates

@@ -73,8 +73,11 @@ For a simple Streamlit deployment:
 5. Use the start command:
 
 ```bash
-streamlit run dashboard/app.py --server.port $PORT --server.address 0.0.0.0
+python dashboard/start.py
 ```
+
+The launcher reads Railway's numeric `PORT` value directly and replaces an
+invalid literal `STREAMLIT_SERVER_PORT=$PORT` value if one is configured.
 
 ## Notes
 
