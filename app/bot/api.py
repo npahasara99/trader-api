@@ -4,6 +4,7 @@ from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from .broker import BrokerError
 from .schemas import (
     ActionResponse,
     BotConfigResponse,
@@ -18,6 +19,18 @@ from .service import get_bot_service
 
 
 router = APIRouter(tags=["trading-bot"])
+
+
+def _broker_unavailable(exc: BrokerError, *, rows: bool = False) -> dict:
+    """Represent an expected disconnected broker without raising an API 500."""
+    payload = {
+        "available": False,
+        "connected": False,
+        "error": str(exc),
+    }
+    if rows:
+        payload["rows"] = []
+    return payload
 
 
 @router.get("/bot/status", response_model=BotStatusResponse)
@@ -83,22 +96,34 @@ def get_broker_health(service=Depends(get_bot_service)):
 
 @router.get("/broker/account")
 def get_broker_account(service=Depends(get_bot_service)):
-    return asdict(service.broker_account())
+    try:
+        return {**asdict(service.broker_account()), "available": True, "connected": True}
+    except BrokerError as exc:
+        return _broker_unavailable(exc)
 
 
 @router.get("/broker/positions")
 def get_broker_positions(service=Depends(get_bot_service)):
-    return {"rows": service.broker_positions()}
+    try:
+        return {"rows": service.broker_positions(), "available": True, "connected": True}
+    except BrokerError as exc:
+        return _broker_unavailable(exc, rows=True)
 
 
 @router.get("/broker/orders")
 def get_broker_orders(service=Depends(get_bot_service)):
-    return {"rows": service.broker_orders()}
+    try:
+        return {"rows": service.broker_orders(), "available": True, "connected": True}
+    except BrokerError as exc:
+        return _broker_unavailable(exc, rows=True)
 
 
 @router.get("/broker/executions")
 def get_broker_executions(service=Depends(get_bot_service)):
-    return {"rows": service.broker_executions()}
+    try:
+        return {"rows": service.broker_executions(), "available": True, "connected": True}
+    except BrokerError as exc:
+        return _broker_unavailable(exc, rows=True)
 
 
 @router.post("/broker/reconnect", response_model=ActionResponse)

@@ -751,7 +751,6 @@ def _get_daily_bars(
     ticker: str,
     *,
     daily_bars_loader: DailyBarsLoader | None = None,
-    timeframe_bars_loader: TimeframeBarsLoader | None = None,
     daily_closes_loader: DailyClosesLoader | None = None,
 ) -> list[dict]:
     """Load daily OHLCV bars, synthesizing from close-only history when needed."""
@@ -1043,6 +1042,7 @@ def build_swing_plan(
     avoid_threshold: int = -4,
     daily_closes_loader: DailyClosesLoader | None = None,
     daily_bars_loader: DailyBarsLoader | None = None,
+    timeframe_bars_loader: TimeframeBarsLoader | None = None,
     history_stats_by_ticker: dict[str, dict] | None = None,
     pre_scan_by_ticker: dict[str, dict] | None = None,
     llm_provider: str | None = None,

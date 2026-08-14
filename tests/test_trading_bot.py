@@ -4,8 +4,10 @@ from dataclasses import replace
 import unittest
 
 from app.bot.broker import BracketOrderRequest, BrokerAccountSummary, BrokerError, IBKRBroker, MockBroker
+from app.bot.api import get_broker_account, get_broker_executions, get_broker_orders, get_broker_positions
 from app.bot.enums import TradingMode
 from app.bot.service import TradingBotService
+from app.logic import build_swing_plan
 from app.models import TradeCandidate
 
 
@@ -39,6 +41,27 @@ class MockBrokerTests(unittest.TestCase):
         )
         self.assertGreaterEqual(len(orders), 3)
         self.assertTrue(any(order.child_role == "stop" for order in orders))
+
+    def test_disconnected_broker_reads_return_clean_unavailable_payloads(self):
+        service = TradingBotService()
+        service._broker = MockBroker()
+
+        account = get_broker_account(service)
+        self.assertFalse(account["available"])
+        self.assertFalse(account["connected"])
+        self.assertEqual(account["error"], "Broker is disconnected")
+
+        for endpoint in (get_broker_positions, get_broker_orders, get_broker_executions):
+            payload = endpoint(service)
+            self.assertEqual(payload["rows"], [])
+            self.assertFalse(payload["available"])
+            self.assertFalse(payload["connected"])
+
+    def test_public_planner_accepts_timeframe_loader(self):
+        self.assertEqual(
+            build_swing_plan([], timeframe_bars_loader=lambda _ticker, _timeframe: []),
+            [],
+        )
 
 
 class BotServicePreviewTests(unittest.TestCase):
