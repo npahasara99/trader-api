@@ -12,6 +12,12 @@ Dashboard and runner for the Supabase reporting database used by workflow scan o
 - Latest top-5 active watch names
 - Scanner / Runner controls that call the live trader API
 - Trading Bot controls and visibility for broker status, candidates, proposals, orders, positions, journal and memory
+- TradingView chart visualization beside API-grounded execution scenarios
+
+The selected ticker's **Execution** tab uses TradingView only for human visual
+verification. Daily/1-hour/30-minute context, scenario selection, and every
+entry/stop/target displayed beside it come from the trader API. Raw timeframe
+contexts and generated scenarios remain behind Debug expanders.
 
 ## Environment
 

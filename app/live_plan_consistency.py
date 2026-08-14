@@ -5,6 +5,8 @@ from typing import Any, Mapping
 
 import pandas as pd
 
+from .scenario_engine import evaluate_live_scenario_status
+
 
 @dataclass(frozen=True)
 class LivePlanConsistencyConfig:
@@ -107,6 +109,14 @@ def evaluate_live_plan_consistency(
     distance_to_stop_pct = _pct_from_level(live_price, stop_loss)
     distance_to_tp1_pct = _pct_to_target(live_price, tp1)
     distance_to_tp2_pct = _pct_to_target(live_price, tp2)
+    live_scenario = evaluate_live_scenario_status(
+        {
+            **raw_payload,
+            "preferred_scenario": row.get("preferred_scenario") or raw_payload.get("preferred_scenario"),
+            "execution_scenarios": row.get("execution_scenarios") or raw_payload.get("execution_scenarios"),
+        },
+        live_price,
+    )
 
     continuation_setup, rebound_or_repair_setup = _scenario_traits(
         {
@@ -168,6 +178,8 @@ def evaluate_live_plan_consistency(
             "plan_freshness_status": None,
             "live_vs_plan_alignment": None,
             "replan_needed": False,
+            "live_scenario_status": live_scenario["live_scenario_status"],
+            "preferred_scenario_changed": live_scenario["preferred_scenario_changed"],
             "live_consistency_summary": "Live price is unavailable, so plan freshness cannot be evaluated yet.",
         }
 
@@ -221,6 +233,17 @@ def evaluate_live_plan_consistency(
         live_vs_plan_alignment = "entry_missed" if not rebound_or_repair_setup else "rebound_already_moved"
         replan_needed = True
 
+    if live_scenario.get("replan_needed"):
+        replan_needed = True
+        if live_scenario.get("live_scenario_status") == "scenario_invalidated":
+            plan_freshness_status = "invalidated"
+            live_vs_plan_alignment = "needs_refresh"
+        elif live_scenario.get("live_scenario_status") in {"tp1_hit_replan", "preferred_entry_missed"}:
+            plan_freshness_status = "stale_for_live_price"
+        elif live_scenario.get("live_scenario_status") == "breakout_activated":
+            plan_freshness_status = "partially_stale"
+            live_vs_plan_alignment = "needs_refresh"
+
     if plan_freshness_status == "invalidated":
         summary = "Live price is at or below the saved stop area, so the original plan is invalidated and needs a refresh."
     elif live_vs_plan_alignment == "target_already_hit":
@@ -251,6 +274,8 @@ def evaluate_live_plan_consistency(
         "plan_freshness_status": plan_freshness_status,
         "live_vs_plan_alignment": live_vs_plan_alignment,
         "replan_needed": bool(replan_needed),
+        "live_scenario_status": live_scenario["live_scenario_status"],
+        "preferred_scenario_changed": live_scenario["preferred_scenario_changed"],
         "live_consistency_summary": summary,
     }
 

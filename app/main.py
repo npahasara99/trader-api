@@ -20,9 +20,11 @@ import os
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
+from sqlalchemy.exc import IntegrityError
 
-from .db import Base, engine, get_db
-from .models import SwingDecision, DailyBar
+from .db import Base, SessionLocal, engine, get_db
+from .models import SwingDecision, DailyBar, TradingViewSignalEvent
+from .settings import settings
 from .logic import (
     build_swing_plan,
     get_upcoming_earnings_calendar,
@@ -39,8 +41,10 @@ from .market_data import (
     ensure_cached_daily_closes,
     backfill_universe_daily_bars,
     fetch_finnhub_daily_bars_with_meta,
+    get_bars as get_timeframe_bars,
 )
 from .bot.api import router as bot_router
+from .tradingview_webhook import NormalizedTradingViewEvent, create_tradingview_router
 
 
 DEFAULT_BAR_LOOKBACK_DAYS = 320
@@ -106,6 +110,58 @@ def require_bearer_token(authorization: Optional[str] = Header(default=None)):
 
 
 app.include_router(bot_router, dependencies=[Depends(require_bearer_token)])
+
+
+def _persist_tradingview_monitoring_event(event: NormalizedTradingViewEvent) -> None:
+    """Persist or de-duplicate a signal; this path cannot submit broker orders."""
+    with SessionLocal() as db:
+        existing = (
+            db.query(TradingViewSignalEvent)
+            .filter(TradingViewSignalEvent.event_id == event.event_id)
+            .one_or_none()
+        )
+        if existing is not None:
+            return
+        db.add(
+            TradingViewSignalEvent(
+                event_id=event.event_id,
+                ticker=event.ticker,
+                timeframe=event.timeframe,
+                event_type=event.event_type.value,
+                price=event.price,
+                occurred_at=event.occurred_at,
+                received_at=event.received_at,
+                indicators_json=json.dumps(event.indicators, default=str),
+                payload_json=json.dumps(event.payload, default=str),
+                processed=False,
+                processing_status="pending_replan",
+                re_evaluation_requested=True,
+                execution_requested=False,
+            )
+        )
+        try:
+            db.commit()
+        except IntegrityError:
+            # TradingView may retry the same alert; deterministic event ids make
+            # duplicate delivery safe and idempotent.
+            db.rollback()
+            duplicate = (
+                db.query(TradingViewSignalEvent.id)
+                .filter(TradingViewSignalEvent.event_id == event.event_id)
+                .one_or_none()
+            )
+            if duplicate is None:
+                raise
+
+
+# TradingView cannot attach the normal bearer token, so this endpoint uses its
+# own dedicated secret. Accepted events only queue structured re-evaluation.
+app.include_router(
+    create_tradingview_router(
+        expected_secret=settings.TRADINGVIEW_WEBHOOK_SECRET,
+        event_sink=_persist_tradingview_monitoring_event,
+    )
+)
 
 
 # --- Requests/Responses ---
@@ -232,6 +288,23 @@ class PlanRowOut(BaseModel):
     expected_move_profile: Optional[str] = None
     scenario_confidence: Optional[float] = None
     scenario_rationale: Optional[str] = None
+    chart_context: Optional[dict] = None
+    timeframe_context: Optional[dict] = None
+    preferred_trade_shape: Optional[str] = None
+    execution_scenarios: Optional[dict] = None
+    enter_now_scenario: Optional[dict] = None
+    pullback_scenario: Optional[dict] = None
+    breakout_scenario: Optional[dict] = None
+    repair_scenario: Optional[dict] = None
+    preferred_scenario: Optional[str] = None
+    execution_action: Optional[str] = None
+    execution_scenario_confidence: Optional[float] = None
+    scenario_selection_reason: Optional[str] = None
+    pullback_entry_zone: Optional[dict] = None
+    breakout_trigger_zone: Optional[dict] = None
+    repair_trigger_zone: Optional[dict] = None
+    live_scenario_status: Optional[str] = None
+    replan_needed: Optional[bool] = None
     setup_context_summary: Optional[str] = None
     location_context_summary: Optional[str] = None
     support_zone_1: Optional[dict] = None
@@ -608,6 +681,23 @@ def _to_plan_row_out(r) -> PlanRowOut:
         expected_move_profile=getattr(r, "expected_move_profile", None),
         scenario_confidence=getattr(r, "scenario_confidence", None),
         scenario_rationale=getattr(r, "scenario_rationale", None),
+        chart_context=getattr(r, "chart_context", None),
+        timeframe_context=getattr(r, "timeframe_context", None),
+        preferred_trade_shape=getattr(r, "preferred_trade_shape", None),
+        execution_scenarios=getattr(r, "execution_scenarios", None),
+        enter_now_scenario=getattr(r, "enter_now_scenario", None),
+        pullback_scenario=getattr(r, "pullback_scenario", None),
+        breakout_scenario=getattr(r, "breakout_scenario", None),
+        repair_scenario=getattr(r, "repair_scenario", None),
+        preferred_scenario=getattr(r, "preferred_scenario", None),
+        execution_action=getattr(r, "execution_action", None),
+        execution_scenario_confidence=getattr(r, "execution_scenario_confidence", None),
+        scenario_selection_reason=getattr(r, "scenario_selection_reason", None),
+        pullback_entry_zone=getattr(r, "pullback_entry_zone", None),
+        breakout_trigger_zone=getattr(r, "breakout_trigger_zone", None),
+        repair_trigger_zone=getattr(r, "repair_trigger_zone", None),
+        live_scenario_status=getattr(r, "live_scenario_status", None),
+        replan_needed=getattr(r, "replan_needed", None),
         setup_context_summary=getattr(r, "setup_context_summary", None),
         location_context_summary=getattr(r, "location_context_summary", None),
         support_zone_1=getattr(r, "support_zone_1", None),
@@ -1317,6 +1407,15 @@ def _apply_prob_and_action(
     row.llm_action = llm_action
     row.reconciled_action = action
     row.final_action = action
+    scenario_action = str(getattr(row, "execution_action", None) or "MONITOR")
+    if action == "AVOID":
+        row.execution_action = "AVOID"
+    elif action == "BUY" and scenario_action == "BUY_NOW":
+        row.execution_action = "BUY_NOW"
+    elif scenario_action == "BUY_NOW":
+        row.execution_action = "MONITOR"
+    else:
+        row.execution_action = scenario_action
     row.action_alignment = str(reconciled["action_alignment"])
     row.action_reason_bucket = classification["action_reason_bucket"]
     row.monitorable_setup = bool(classification["monitorable_setup"])
@@ -1640,6 +1739,7 @@ def plan_swing(req: PlanRequest, db: Session = Depends(get_db), _=Depends(requir
             avoid_threshold=thresholds["avoid_threshold"],
             daily_closes_loader=daily_closes_loader,
             daily_bars_loader=daily_bars_loader,
+            timeframe_bars_loader=get_timeframe_bars,
             history_stats_by_ticker=ticker_hist,
             pre_scan_by_ticker=pre_scan_by_ticker,
             llm_provider=req.llm_provider,
@@ -1813,6 +1913,7 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         avoid_threshold=thresholds["avoid_threshold"],
         daily_closes_loader=daily_closes_loader,
         daily_bars_loader=daily_bars_loader,
+        timeframe_bars_loader=get_timeframe_bars,
         history_stats_by_ticker=history_stats,
         pre_scan_by_ticker=pre_scan_by_ticker,
         llm_provider=req.llm_provider,

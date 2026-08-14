@@ -1,8 +1,10 @@
 from datetime import datetime, timezone, timedelta, date
 import csv
 import io
+import threading
 import time
 import requests
+from typing import Protocol
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
 
@@ -22,6 +24,39 @@ YAHOO_REQUEST_HEADERS = {
 STOOQ_DAILY_URL = "https://stooq.com/q/d/l/"
 
 _LAST_YAHOO_REQUEST_TS = 0.0
+_TIMEFRAME_CACHE: dict[tuple[str, str, int], tuple[float, list[dict]]] = {}
+_TIMEFRAME_CACHE_LOCK = threading.Lock()
+
+TIMEFRAME_ALIASES = {
+    "d": "daily",
+    "1d": "daily",
+    "daily": "daily",
+    "h": "hourly",
+    "1h": "hourly",
+    "60m": "hourly",
+    "hourly": "hourly",
+    "30": "thirty_minute",
+    "30m": "thirty_minute",
+    "thirty_minute": "thirty_minute",
+}
+
+YAHOO_INTERVALS = {
+    "daily": "1d",
+    "hourly": "60m",
+    "thirty_minute": "30m",
+}
+
+DEFAULT_TIMEFRAME_LOOKBACK_DAYS = {
+    "daily": 320,
+    "hourly": 90,
+    "thirty_minute": 30,
+}
+
+
+class StructuredMarketDataProvider(Protocol):
+    """Provider-neutral interface consumed by chart-context planning."""
+
+    def get_bars(self, ticker: str, timeframe: str, lookback_days: int | None = None) -> list[dict]: ...
 
 
 def _normalize_symbol_for_yahoo(symbol: str) -> str:
@@ -46,6 +81,144 @@ def _yahoo_pace(min_interval_sec: float = 0.9) -> None:
     if delta < min_interval_sec:
         time.sleep(min_interval_sec - delta)
     _LAST_YAHOO_REQUEST_TS = time.time()
+
+
+def normalize_timeframe(timeframe: str) -> str:
+    normalized = TIMEFRAME_ALIASES.get(str(timeframe or "").strip().lower())
+    if normalized is None:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+    return normalized
+
+
+def _fetch_yahoo_interval_payload(
+    symbol: str,
+    *,
+    timeframe: str,
+    lookback_days: int,
+    max_attempts: int = 2,
+) -> tuple[dict | None, str]:
+    normalized = normalize_timeframe(timeframe)
+    interval = YAHOO_INTERVALS[normalized]
+    now = datetime.now(timezone.utc)
+    params = {
+        "period1": int((now - timedelta(days=max(1, int(lookback_days)))).timestamp()),
+        "period2": int(now.timestamp()) + 60,
+        "interval": interval,
+        "events": "history",
+        "includeAdjustedClose": "true",
+    }
+    yahoo_symbol = _normalize_symbol_for_yahoo(symbol)
+    last_status = "yahoo_fetch_failed"
+    for attempt in range(max_attempts):
+        for base in YAHOO_CHART_BASES:
+            try:
+                _yahoo_pace()
+                response = requests.get(
+                    f"{base}/{yahoo_symbol}",
+                    params=params,
+                    headers=YAHOO_REQUEST_HEADERS,
+                    timeout=12,
+                )
+                payload = response.json() if response.content else None
+                if response.status_code == 200 and isinstance(payload, dict):
+                    chart = payload.get("chart") or {}
+                    if chart.get("result"):
+                        return payload, "ok"
+                    error = chart.get("error") or {}
+                    last_status = str(error.get("description") or "yahoo_empty_result")[:120]
+                else:
+                    last_status = f"http_{response.status_code}"
+            except (requests.RequestException, ValueError):
+                last_status = "request_exception"
+        if attempt < max_attempts - 1:
+            time.sleep(0.3 * (attempt + 1))
+    return None, last_status
+
+
+def _normalized_bars_from_yahoo_payload(symbol: str, timeframe: str, data: dict) -> list[dict]:
+    chart = data.get("chart") or {}
+    results = chart.get("result") or []
+    if not results:
+        return []
+    result = results[0] or {}
+    timestamps = result.get("timestamp") or []
+    indicators = result.get("indicators") or {}
+    quote = (indicators.get("quote") or [{}])[0] or {}
+    output: list[dict] = []
+    for index, timestamp in enumerate(timestamps):
+        try:
+            close = (quote.get("close") or [])[index]
+            if close is None:
+                continue
+
+            def value(name: str):
+                values = quote.get(name) or []
+                return float(values[index]) if index < len(values) and values[index] is not None else None
+
+            output.append(
+                {
+                    "symbol": symbol.upper(),
+                    "date": datetime.fromtimestamp(int(timestamp), tz=timezone.utc),
+                    "open": value("open"),
+                    "high": value("high"),
+                    "low": value("low"),
+                    "close": float(close),
+                    "volume": value("volume"),
+                    "timeframe": normalize_timeframe(timeframe),
+                    "source": "yahoo",
+                }
+            )
+        except (IndexError, TypeError, ValueError, OverflowError):
+            continue
+    return output
+
+
+def get_bars(
+    ticker: str,
+    timeframe: str,
+    lookback_days: int | None = None,
+    *,
+    cache_ttl_seconds: int = 900,
+) -> list[dict]:
+    """Return provider-normalized bars without exposing vendor payload shapes.
+
+    Failures intentionally return an empty list so the chart-context engine can
+    report a missing timeframe without crashing the structured swing plan.
+    """
+    symbol = str(ticker or "").strip().upper()
+    if not symbol:
+        return []
+    normalized = normalize_timeframe(timeframe)
+    requested_lookback = int(lookback_days or DEFAULT_TIMEFRAME_LOOKBACK_DAYS[normalized])
+    cache_key = (symbol, normalized, requested_lookback)
+    now = time.time()
+    with _TIMEFRAME_CACHE_LOCK:
+        cached = _TIMEFRAME_CACHE.get(cache_key)
+        if cached and now - cached[0] <= max(0, cache_ttl_seconds):
+            return [dict(bar) for bar in cached[1]]
+
+    if normalized == "daily":
+        end = datetime.now(timezone.utc).date()
+        start = end - timedelta(days=requested_lookback)
+        bars, _ = fetch_finnhub_daily_bars_with_meta(symbol, start, end)
+    else:
+        payload, status = _fetch_yahoo_interval_payload(
+            symbol,
+            timeframe=normalized,
+            lookback_days=requested_lookback,
+        )
+        bars = _normalized_bars_from_yahoo_payload(symbol, normalized, payload) if payload and status == "ok" else []
+
+    with _TIMEFRAME_CACHE_LOCK:
+        _TIMEFRAME_CACHE[cache_key] = (now, [dict(bar) for bar in bars])
+    return bars
+
+
+class DefaultStructuredMarketDataProvider:
+    """Default cached provider used by planner adapters and future replacements."""
+
+    def get_bars(self, ticker: str, timeframe: str, lookback_days: int | None = None) -> list[dict]:
+        return get_bars(ticker, timeframe, lookback_days)
 
 
 def _fetch_finnhub_candles_payload(symbol: str, frm: date, to: date, *, max_attempts: int = 3) -> tuple[dict | None, str]:

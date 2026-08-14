@@ -381,3 +381,28 @@ class KillSwitchEvent(Base):
     reason: Mapped[str] = mapped_column(Text)
     triggered_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class TradingViewSignalEvent(Base):
+    """Monitoring-only TradingView signal queued for structured re-evaluation."""
+
+    __tablename__ = "tradingview_signal_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_tradingview_signal_events_event_id"),
+        Index("ix_tradingview_signal_events_monitor", "ticker", "processed", "received_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String(80), index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    event_type: Mapped[str] = mapped_column(String(40), index=True)
+    price: Mapped[float] = mapped_column(Float)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    indicators_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    processed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    processing_status: Mapped[str] = mapped_column(String(40), default="pending_replan", index=True)
+    re_evaluation_requested: Mapped[bool] = mapped_column(Boolean, default=True)
+    execution_requested: Mapped[bool] = mapped_column(Boolean, default=False)

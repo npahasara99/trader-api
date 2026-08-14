@@ -254,6 +254,54 @@ def render_chart_execution_view(payload) -> None:
         st.caption(data.get("chart_execution_summary"))
 
 
+def render_execution_scenario_panel(payload, snapshot_row=None) -> None:
+    """Render the selected quant scenario without deriving any new levels."""
+    data = safe_json(payload) or {}
+    snapshot = snapshot_row or {}
+    scenarios = safe_json(data.get("execution_scenarios")) or {}
+    preferred = str(data.get("preferred_scenario") or "none")
+    selected = scenarios.get(preferred) if isinstance(scenarios, dict) else None
+    selected = selected if isinstance(selected, dict) else {}
+    review = safe_json(data.get("llm_review")) or {}
+    live_price = snapshot.get("live_price") if snapshot.get("live_price_available") else data.get("current_price")
+
+    st.markdown(f"#### {html.escape(str(data.get('ticker') or snapshot.get('ticker') or '-'))} - {html.escape(pretty_label(data.get('execution_action')))}")
+    render_key_value_grid(
+        [
+            ("Live / Latest Price", format_price(live_price)),
+            ("Final Action", pretty_label(snapshot.get("final_action") or data.get("final_action"))),
+            ("Execution Action", pretty_label(data.get("execution_action"))),
+            ("Trend", pretty_label(data.get("trend_state"))),
+            ("Price Location", pretty_label(data.get("price_location_context"))),
+            ("Preferred Scenario", pretty_label(preferred)),
+            ("Enter Now", pretty_label(review.get("enter_now_assessment"))),
+            ("Scenario Confidence", format_pct((data.get("execution_scenario_confidence") or 0) * 100.0)),
+        ],
+        columns=2,
+    )
+    render_key_value_grid(
+        [
+            ("Scenario Entry Zone", zone_display(selected.get("entry_zone"))),
+            ("Pullback Zone", zone_display(data.get("pullback_entry_zone"))),
+            ("Breakout Trigger", zone_display(data.get("breakout_trigger_zone"))),
+            ("Repair Trigger", zone_display(data.get("repair_trigger_zone"))),
+            ("Stop Loss", format_price(selected.get("stop_loss") or data.get("stop_loss"))),
+            ("TP1", format_price(selected.get("take_profit_1") or data.get("take_profit_1"))),
+            ("TP2", format_price(selected.get("take_profit_2") or data.get("take_profit_2"))),
+            ("Plan Freshness", pretty_label(snapshot.get("plan_freshness_status") or data.get("live_scenario_status"))),
+        ],
+        columns=2,
+    )
+    if data.get("scenario_selection_reason"):
+        st.caption(data.get("scenario_selection_reason"))
+    reasons = list(review.get("scenario_why") or selected.get("reasons") or [])
+    if reasons:
+        render_bullets("Why This Scenario", reasons)
+    watch = safe_json(data.get("what_to_watch")) or {}
+    if watch.get("watch_summary_short"):
+        st.info(watch.get("watch_summary_short"))
+
+
 def render_what_to_watch(payload) -> None:
     data = safe_json(payload) or {}
     render_key_value_grid(

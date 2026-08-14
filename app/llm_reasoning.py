@@ -24,6 +24,11 @@ class LLMReviewResult:
     expected_move_profile: str
     scenario_confidence: float
     scenario_rationale: str
+    preferred_scenario: str
+    enter_now_assessment: str
+    pullback_assessment: str
+    breakout_assessment: str
+    scenario_why: list[str]
     confidence: float
     consensus_view: str
     entry_assessment: str
@@ -436,10 +441,12 @@ def build_llm_prompt(payload: dict) -> str:
         "Treat no_confirmation + negative expectancy + weak relative strength as AVOID. "
         "Interpret structured price-location, catalyst, and macro context to decide whether continuation or rebound is credible. "
         "Do not guess price targets. Numeric levels remain fixed by the quant engine. "
+        "Select only among the supplied deterministic execution scenarios and never alter their numeric levels. "
         "Return JSON only with fields: "
         "llm_action, setup_type, price_location_context, continuation_vs_reversion_bias, news_regime_alignment, "
         "setup_scenario, tp_aggressiveness, sl_tolerance, expected_move_profile, scenario_confidence, "
-        "scenario_rationale, confidence, consensus_view, entry_assessment, stop_assessment, "
+        "scenario_rationale, preferred_scenario, enter_now_assessment, pullback_assessment, "
+        "breakout_assessment, scenario_why, confidence, consensus_view, entry_assessment, stop_assessment, "
         "take_profit_assessment, rationale, confirmation_needed, key_risk, risk_tuning_reason. "
         f"Input={compact}"
     )
@@ -468,6 +475,19 @@ def deterministic_review(*, payload: dict, config: PlanningConfig) -> LLMReviewR
     expected_move_profile = str(payload.get("expected_move_profile") or "first_resistance_test")
     scenario_confidence = _to_float(payload.get("scenario_confidence"), 0.55)
     scenario_rationale = str(payload.get("scenario_rationale") or "")
+    execution_scenarios = payload.get("execution_scenarios") or {}
+    preferred_scenario = str(payload.get("preferred_scenario") or "none")
+
+    def scenario_assessment(name: str) -> str:
+        candidate = execution_scenarios.get(name) if isinstance(execution_scenarios, dict) else None
+        if not isinstance(candidate, dict) or not candidate.get("eligible"):
+            return "not_valid"
+        if candidate.get("activated"):
+            return "active"
+        return "valid_alternative" if name != preferred_scenario else "preferred"
+
+    selected_scenario = execution_scenarios.get(preferred_scenario) if isinstance(execution_scenarios, dict) else None
+    scenario_why = list((selected_scenario or {}).get("reasons") or [])[:4] if isinstance(selected_scenario, dict) else []
     reward_risk = payload.get("reward_risk") or {}
     earnings = payload.get("earnings") or {}
     entry_quality = _to_float(payload.get("entry_quality_score"))
@@ -569,6 +589,11 @@ def deterministic_review(*, payload: dict, config: PlanningConfig) -> LLMReviewR
         expected_move_profile=expected_move_profile,
         scenario_confidence=round(max(0.0, min(1.0, scenario_confidence)), 3),
         scenario_rationale=scenario_rationale,
+        preferred_scenario=preferred_scenario,
+        enter_now_assessment=scenario_assessment("enter_now"),
+        pullback_assessment=scenario_assessment("pullback"),
+        breakout_assessment=scenario_assessment("breakout"),
+        scenario_why=scenario_why,
         confidence=round(max(0.0, min(1.0, confidence)), 3),
         consensus_view=consensus_view,
         entry_assessment=entry_assessment,
@@ -606,6 +631,11 @@ def review_setup(*, payload: dict, config: PlanningConfig, provider: str | None 
         "expected_move_profile": review.expected_move_profile,
         "scenario_confidence": review.scenario_confidence,
         "scenario_rationale": review.scenario_rationale,
+        "preferred_scenario": review.preferred_scenario,
+        "enter_now_assessment": review.enter_now_assessment,
+        "pullback_assessment": review.pullback_assessment,
+        "breakout_assessment": review.breakout_assessment,
+        "scenario_why": review.scenario_why,
         "confidence": review.confidence,
         "consensus_view": review.consensus_view,
         "entry_assessment": review.entry_assessment,

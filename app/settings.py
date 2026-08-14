@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     SUPABASE_DATABASE_URL: str | None = None
     OPENAI_API_KEY: str | None = None
     API_BEARER_TOKEN: str | None = None
+    TRADINGVIEW_WEBHOOK_SECRET: str | None = None
     ENV: str = "prod"
 
     TRADING_MODE: str = "disabled"

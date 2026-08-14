@@ -19,6 +19,7 @@ os.chdir(REPO_ROOT)
 
 from app.db import SessionLocal
 from app.logic import build_swing_plan, detect_market_regime, get_sp100_universe
+from app.market_data import get_bars as get_timeframe_bars
 from app.main import (
     _apply_prob_and_action,
     _build_daily_bars_loader,
@@ -44,6 +45,10 @@ DETAIL_COLUMNS = [
     "price_location_context",
     "setup_type",
     "setup_scenario",
+    "preferred_trade_shape",
+    "preferred_scenario",
+    "execution_action",
+    "available_timeframes",
     "continuation_vs_reversion_bias",
     "news_regime_alignment",
     "preferred_entry",
@@ -71,6 +76,9 @@ COMPARE_COLUMNS = [
     "price_location_context",
     "setup_type",
     "setup_scenario",
+    "preferred_trade_shape",
+    "preferred_scenario",
+    "execution_action",
     "continuation_vs_reversion_bias",
     "news_regime_alignment",
     "preferred_entry",
@@ -253,6 +261,10 @@ def _extract_detail_record(
         "price_location_context": row_data.get("price_location_context"),
         "setup_type": row_data.get("setup_type"),
         "setup_scenario": row_data.get("setup_scenario"),
+        "preferred_trade_shape": row_data.get("preferred_trade_shape"),
+        "preferred_scenario": row_data.get("preferred_scenario"),
+        "execution_action": row_data.get("execution_action"),
+        "available_timeframes": ",".join(((row_data.get("chart_context") or {}).get("available_timeframes") or [])),
         "continuation_vs_reversion_bias": row_data.get("continuation_vs_reversion_bias"),
         "news_regime_alignment": row_data.get("news_regime_alignment"),
         "preferred_entry": row_data.get("preferred_entry"),
@@ -398,6 +410,7 @@ def _run_validation(args: argparse.Namespace) -> tuple[pd.DataFrame, dict[str, A
             tickers,
             daily_closes_loader=daily_closes_loader,
             daily_bars_loader=daily_bars_loader,
+            timeframe_bars_loader=get_timeframe_bars,
         )
         pre_scan_by_ticker = {
             item["ticker"]: {

@@ -42,6 +42,7 @@ from dashboard.components import (
     render_actionability,
     render_badge_row,
     render_chart_execution_view,
+    render_execution_scenario_panel,
     render_header,
     render_chip_list,
     render_key_value_grid,
@@ -62,6 +63,7 @@ from dashboard.queries import (
     fetch_run_results,
 )
 from dashboard.styles import inject_styles
+from dashboard.tradingview_chart import render_tradingview_chart
 from dashboard.utils import (
     build_active_market_view,
     filter_watchlist_df,
@@ -1064,6 +1066,7 @@ with active_tab:
         chart_execution_payload = _snapshot_payload(detail_row, "chart_execution_view")
         what_to_watch_payload = _snapshot_payload(detail_row, "what_to_watch")
         actionability_payload = _snapshot_payload(detail_row, "actionability_soon")
+        raw_plan_payload = (detail_row.get("raw_result_json") if detail_row is not None else None) or {}
 
         if snapshot_row is not None:
             render_badge_row(snapshot_row)
@@ -1110,7 +1113,25 @@ with active_tab:
             if detail_row is None:
                 st.caption("No execution data available.")
             else:
-                render_chart_execution_view(chart_execution_payload)
+                interval = st.radio(
+                    "Chart Interval",
+                    options=["D", "60", "30"],
+                    format_func=lambda value: {"D": "Daily", "60": "1 Hour", "30": "30 Minute"}[value],
+                    horizontal=True,
+                    key=f"tradingview_interval_{selected_ticker}",
+                )
+                chart_col, analysis_col = st.columns([3, 2], gap="large")
+                with chart_col:
+                    render_tradingview_chart(
+                        selected_ticker,
+                        exchange=raw_plan_payload.get("exchange"),
+                        interval=interval,
+                        height=650,
+                    )
+                with analysis_col:
+                    render_execution_scenario_panel(raw_plan_payload, snapshot_row)
+                with st.expander("Legacy Execution View", expanded=False):
+                    render_chart_execution_view(chart_execution_payload)
 
         with watch_tab:
             if detail_row is None:
@@ -1132,6 +1153,21 @@ with active_tab:
                 render_raw_json_block("Raw JSON: Chart Execution View", chart_execution_payload)
                 render_raw_json_block("Raw JSON: What To Watch", what_to_watch_payload)
                 render_raw_json_block("Raw JSON: Actionability Soon", actionability_payload)
+                chart_context_payload = raw_plan_payload.get("chart_context") or {}
+                timeframe_payload = chart_context_payload.get("timeframes") or raw_plan_payload.get("timeframe_context") or {}
+                render_raw_json_block("Raw Daily Context", timeframe_payload.get("daily"))
+                render_raw_json_block("Raw 1H Context", timeframe_payload.get("hourly"))
+                render_raw_json_block("Raw 30m Context", timeframe_payload.get("thirty_minute"))
+                render_raw_json_block("Generated Execution Scenarios", raw_plan_payload.get("execution_scenarios"))
+                render_raw_json_block(
+                    "Scenario Selection",
+                    {
+                        "preferred_scenario": raw_plan_payload.get("preferred_scenario"),
+                        "execution_action": raw_plan_payload.get("execution_action"),
+                        "scenario_confidence": raw_plan_payload.get("execution_scenario_confidence"),
+                        "why": (raw_plan_payload.get("llm_review") or {}).get("scenario_why"),
+                    },
+                )
 
 with earnings_tab:
     st.markdown("### Earnings")

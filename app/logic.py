@@ -81,6 +81,23 @@ class PlanRow:
     expected_move_profile: str | None = None
     scenario_confidence: float | None = None
     scenario_rationale: str | None = None
+    chart_context: dict | None = None
+    timeframe_context: dict | None = None
+    preferred_trade_shape: str | None = None
+    execution_scenarios: dict | None = None
+    enter_now_scenario: dict | None = None
+    pullback_scenario: dict | None = None
+    breakout_scenario: dict | None = None
+    repair_scenario: dict | None = None
+    preferred_scenario: str | None = None
+    execution_action: str | None = None
+    execution_scenario_confidence: float | None = None
+    scenario_selection_reason: str | None = None
+    pullback_entry_zone: dict | None = None
+    breakout_trigger_zone: dict | None = None
+    repair_trigger_zone: dict | None = None
+    live_scenario_status: str | None = None
+    replan_needed: bool | None = None
     setup_context_summary: str | None = None
     location_context_summary: str | None = None
     support_zone_1: dict | None = None
@@ -404,6 +421,7 @@ def get_sp100_universe(
 
 DailyClosesLoader = Callable[[str, date, date], dict[date, float]]
 DailyBarsLoader = Callable[[str], list[dict]]
+TimeframeBarsLoader = Callable[[str, str], list[dict]]
 
 def scan_swing_candidates_largecaps(universe: list[str], top_n: int = 8) -> list[str]:
     # TODO: replace with your existing scan logic
@@ -733,6 +751,7 @@ def _get_daily_bars(
     ticker: str,
     *,
     daily_bars_loader: DailyBarsLoader | None = None,
+    timeframe_bars_loader: TimeframeBarsLoader | None = None,
     daily_closes_loader: DailyClosesLoader | None = None,
 ) -> list[dict]:
     """Load daily OHLCV bars, synthesizing from close-only history when needed."""
@@ -1119,10 +1138,18 @@ def build_swing_plan(
             continue
 
         try:
+            timeframe_bars: dict[str, list[dict]] = {"daily": bars}
+            if timeframe_bars_loader is not None:
+                for timeframe in ("hourly", "thirty_minute"):
+                    try:
+                        timeframe_bars[timeframe] = timeframe_bars_loader(t, timeframe) or []
+                    except Exception:
+                        timeframe_bars[timeframe] = []
             structured = generate_structured_plan(
                 ticker=t,
                 current_price=float(last),
                 bars=bars,
+                timeframe_bars=timeframe_bars,
                 news_items=news,
                 news_score=news_score,
                 earnings_score=earnings_score,
@@ -1259,6 +1286,23 @@ def build_swing_plan(
                 expected_move_profile=structured.get("expected_move_profile"),
                 scenario_confidence=structured.get("scenario_confidence"),
                 scenario_rationale=structured.get("scenario_rationale"),
+                chart_context=structured.get("chart_context"),
+                timeframe_context=structured.get("timeframe_context"),
+                preferred_trade_shape=structured.get("preferred_trade_shape"),
+                execution_scenarios=structured.get("execution_scenarios"),
+                enter_now_scenario=structured.get("enter_now_scenario"),
+                pullback_scenario=structured.get("pullback_scenario"),
+                breakout_scenario=structured.get("breakout_scenario"),
+                repair_scenario=structured.get("repair_scenario"),
+                preferred_scenario=structured.get("preferred_scenario"),
+                execution_action=structured.get("execution_action"),
+                execution_scenario_confidence=structured.get("execution_scenario_confidence"),
+                scenario_selection_reason=structured.get("scenario_selection_reason"),
+                pullback_entry_zone=structured.get("pullback_entry_zone"),
+                breakout_trigger_zone=structured.get("breakout_trigger_zone"),
+                repair_trigger_zone=structured.get("repair_trigger_zone"),
+                live_scenario_status=structured.get("live_scenario_status"),
+                replan_needed=bool(structured.get("replan_needed", False)),
                 setup_context_summary=structured.get("setup_context_summary"),
                 location_context_summary=structured.get("location_context_summary"),
                 support_zone_1=structured["support_zone_1"],

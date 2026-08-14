@@ -5,11 +5,13 @@ from typing import Callable
 import pandas as pd
 
 from .config import DEFAULT_PLANNING_CONFIG, PlanningConfig
+from .chart_context import build_chart_context
 from .context_scenarios import build_market_context
 from .entry_engine import build_entry_candidates, choose_preferred_entry
 from .indicators import add_indicator_columns, bars_to_frame, latest_value
 from .llm_reasoning import review_setup
 from .risk_engine import build_stop_loss, build_take_profits, estimate_hold_window
+from .scenario_engine import generate_execution_scenarios
 from .scoring import score_setup
 from .structure import summarize_structure
 from .zones import build_support_resistance_zones, fibonacci_levels
@@ -79,6 +81,7 @@ def generate_structured_plan(
     ticker: str,
     current_price: float,
     bars: list[dict],
+    timeframe_bars: dict[str, list[dict]] | None = None,
     news_items: list[dict] | None,
     news_score: int,
     earnings_score: int,
@@ -165,6 +168,13 @@ def generate_structured_plan(
         earnings=earnings,
         ticker_meta=ticker_meta,
         sector_relative_strength=sector_relative_strength,
+        config=config,
+    )
+    normalized_timeframes = dict(timeframe_bars or {})
+    normalized_timeframes["daily"] = bars
+    chart_context = build_chart_context(
+        normalized_timeframes,
+        current_price=current_price,
         config=config,
     )
 
@@ -254,6 +264,26 @@ def generate_structured_plan(
         "tp2": targets["expected_reward_risk_to_tp2"],
         "final": targets["expected_reward_risk_to_final"],
     }
+    relative_strength_values = [value for value in rs.values() if value is not None]
+    average_relative_strength = (
+        sum(float(value) for value in relative_strength_values) / len(relative_strength_values)
+        if relative_strength_values
+        else 0.0
+    )
+    scenario_bundle = generate_execution_scenarios(
+        chart_context=chart_context,
+        current_price=current_price,
+        atr=atr_val,
+        support_zone_1=zones["support_zone_1"],
+        support_zone_2=zones["support_zone_2"],
+        resistance_zone_1=zones["resistance_zone_1"],
+        resistance_zone_2=zones["resistance_zone_2"],
+        trend_state=structure.trend_state,
+        relative_strength_score=5.0 + average_relative_strength * 20.0,
+        macro_alignment_score=context.get("macro_alignment_score"),
+        news_regime_alignment=context.get("news_regime_alignment"),
+        config=config,
+    )
 
     preliminary_payload = {
         "ticker": ticker,
@@ -278,6 +308,10 @@ def generate_structured_plan(
         "expected_move_profile": context["expected_move_profile"],
         "scenario_confidence": context["scenario_confidence"],
         "scenario_rationale": context["scenario_rationale"],
+        "chart_context": chart_context,
+        "execution_scenarios": scenario_bundle["execution_scenarios"],
+        "preferred_scenario": scenario_bundle["preferred_scenario"],
+        "execution_action": scenario_bundle["execution_action"],
         "stop_too_tight_flag": stop["stop_too_tight_flag"],
         "tp_too_optimistic_flag": targets["tp_too_optimistic_flag"],
         "composite_score": 0.0,
@@ -341,6 +375,25 @@ def generate_structured_plan(
         sector_relative_strength=sector_relative_strength,
         config=config,
     )
+
+    # The reasoning layer may select only among eligible deterministic
+    # scenarios. It cannot supply or alter any numeric scenario level.
+    reviewed_preference = str(llm_review.get("preferred_scenario") or scenario_bundle["preferred_scenario"])
+    reviewed_candidate = scenario_bundle["execution_scenarios"].get(reviewed_preference)
+    if reviewed_preference == "none" or (reviewed_candidate and reviewed_candidate.get("eligible")):
+        scenario_bundle["preferred_scenario"] = reviewed_preference
+    selected_preference = scenario_bundle["preferred_scenario"]
+    if selected_preference == "enter_now":
+        scenario_bundle["execution_action"] = "BUY_NOW"
+    elif selected_preference == "pullback":
+        scenario_bundle["execution_action"] = "WAIT_FOR_PULLBACK"
+    elif selected_preference == "breakout":
+        breakout_candidate = scenario_bundle["execution_scenarios"]["breakout"]
+        scenario_bundle["execution_action"] = "BUY_NOW" if breakout_candidate.get("activated") else "WAIT_FOR_BREAKOUT"
+    elif selected_preference == "repair":
+        scenario_bundle["execution_action"] = "WAIT_FOR_REPAIR"
+    else:
+        scenario_bundle["execution_action"] = "MONITOR"
 
     signal_score = int(news_score + earnings_score)
     strategy_action = str(llm_review["llm_action"])
@@ -409,6 +462,23 @@ def generate_structured_plan(
         **context,
         "llm_review": {k: v for k, v in llm_review.items() if k not in {"prompt_preview", "provider", "model", "style", "llm_quality_score"}},
         "strategy_action": strategy_action,
+        "chart_context": chart_context,
+        "timeframe_context": chart_context.get("timeframes") or {},
+        "preferred_trade_shape": chart_context.get("preferred_trade_shape"),
+        "execution_scenarios": scenario_bundle["execution_scenarios"],
+        "enter_now_scenario": scenario_bundle["enter_now_scenario"],
+        "pullback_scenario": scenario_bundle["pullback_scenario"],
+        "breakout_scenario": scenario_bundle["breakout_scenario"],
+        "repair_scenario": scenario_bundle["repair_scenario"],
+        "preferred_scenario": scenario_bundle["preferred_scenario"],
+        "execution_action": scenario_bundle["execution_action"],
+        "execution_scenario_confidence": scenario_bundle["scenario_confidence"],
+        "scenario_selection_reason": scenario_bundle["scenario_selection_reason"],
+        "pullback_entry_zone": scenario_bundle["pullback_entry_zone"],
+        "breakout_trigger_zone": scenario_bundle["breakout_trigger_zone"],
+        "repair_trigger_zone": scenario_bundle["repair_trigger_zone"],
+        "live_scenario_status": "plan_generated",
+        "replan_needed": False,
         "signal_score": signal_score,
         "strategy_reason": (
             f"trend={structure.trend_state}; setup={context['setup_scenario']}; entry={preferred['preferred_entry_type']}; rr1={reward_risk['tp1']:.2f}; "
