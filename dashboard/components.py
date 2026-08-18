@@ -257,7 +257,8 @@ def render_chart_execution_view(payload) -> None:
 def render_execution_scenario_panel(payload, snapshot_row=None) -> None:
     """Render the selected quant scenario without deriving any new levels."""
     data = safe_json(payload) or {}
-    snapshot = snapshot_row or {}
+    snapshot = safe_json(snapshot_row)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
     scenarios = safe_json(data.get("execution_scenarios")) or {}
     preferred = str(data.get("preferred_scenario") or "none")
     selected = scenarios.get(preferred) if isinstance(scenarios, dict) else None

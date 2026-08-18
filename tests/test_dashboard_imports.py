@@ -13,3 +13,13 @@ def test_dashboard_components_import_backend_app_package() -> None:
     assert backend_module != dashboard_script.resolve()
     assert backend_module.parent.name == "app"
     assert callable(components.format_run_history_display)
+
+
+def test_safe_json_converts_pandas_series_to_mapping() -> None:
+    import pandas as pd
+
+    from dashboard.utils import safe_json
+
+    result = safe_json(pd.Series({"ticker": "AMD", "final_action": "WAIT"}))
+
+    assert result == {"ticker": "AMD", "final_action": "WAIT"}

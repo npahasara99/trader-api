@@ -24,6 +24,8 @@ PLAN_FRESHNESS_ORDER = {
 def safe_json(value):
     if value is None:
         return None
+    if isinstance(value, pd.Series):
+        return value.to_dict()
     if isinstance(value, (dict, list)):
         return value
     if isinstance(value, str):
