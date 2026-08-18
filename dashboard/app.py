@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 import sys
 
@@ -1119,10 +1118,10 @@ with active_tab:
     st.markdown("### Overview")
     st.caption("Planner state comes from the latest non-expired watchlist snapshots. Live Price comes from runtime quote fetches through the trader API and falls back to the most recent close when a live quote is unavailable, such as when markets are closed. A separate runtime consistency layer checks whether the saved plan is still fresh, extended, stale, or invalidated at the current price.")
     if latest_snapshot_updated_at:
-        now_ts = pd.Timestamp(datetime.utcnow())
-        snapshot_ts = pd.to_datetime(latest_snapshot_updated_at, errors="coerce")
+        now_ts = pd.Timestamp.now(tz="UTC")
+        snapshot_ts = pd.to_datetime(latest_snapshot_updated_at, errors="coerce", utc=True)
         if pd.notna(snapshot_ts):
-            age = now_ts - snapshot_ts.tz_localize(None) if getattr(snapshot_ts, "tzinfo", None) is not None else now_ts - snapshot_ts
+            age = now_ts - snapshot_ts
             if age.days >= 1:
                 st.warning(
                     f"Active watchlist data is stale. Latest persisted watchlist snapshot is from {format_ts(latest_snapshot_updated_at)}. "

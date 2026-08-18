@@ -288,9 +288,9 @@ def build_active_market_view(snapshot_df: pd.DataFrame, live_quotes_df: pd.DataF
         merged = out.merge(live_quotes_df, on="ticker", how="left", suffixes=("", "_live"))
         out = merged
         if "live_price_live" in out.columns:
-            out["live_price"] = out["live_price_live"].combine_first(out.get("live_price"))
+            out["live_price"] = pd.to_numeric(out["live_price_live"], errors="coerce")
         if "live_price_asof_live" in out.columns:
-            out["live_price_asof"] = out["live_price_asof_live"].combine_first(out.get("live_price_asof"))
+            out["live_price_asof"] = pd.to_datetime(out["live_price_asof_live"], errors="coerce", utc=True)
         if "available" in out.columns:
             out["live_price_available"] = out["available"].fillna(False)
         if "status" in out.columns:
