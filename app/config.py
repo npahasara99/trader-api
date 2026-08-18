@@ -64,6 +64,62 @@ class PlanningConfig:
     pre_scan_shortlist_size: int = 30
     pre_scan_min_history_bars: int = 60
     pre_scan_min_avg_dollar_volume: float = 20_000_000.0
+    sp500_universe_url: str = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    sp500_universe_cache_seconds: int = 21_600
+    sp500_prescan_limit: int = 75
+    sp500_deep_analysis_limit: int = 30
+    best_setups_count: int = 10
+    best_trades_today_max: int = 2
+    next_to_trigger_count: int = 5
+    target_actionable_trades_per_day: int = 2
+    min_required_trades_per_day: int = 0
+    min_raw_setup_score: float = 8.0
+    min_actionability_score: float = 8.0
+    min_portfolio_fit_score: float = 6.5
+    min_actionable_grade: str = "A-"
+    max_open_positions_per_sector: int = 2
+    max_open_positions_per_correlation_group: int = 2
+    max_new_trades_per_day: int = 2
+    actionability_min_current_rr: float = 1.25
+    actionability_missed_current_rr: float = 0.75
+    actionability_entry_near_atr: float = 0.75
+    actionability_extended_atr: float = 1.25
+    actionability_extended_pct: float = 0.035
+    raw_setup_weights: dict[str, float] = field(
+        default_factory=lambda: {
+            "trend": 0.15,
+            "price_location": 0.13,
+            "support_confluence": 0.12,
+            "multi_timeframe": 0.10,
+            "relative_strength": 0.10,
+            "volatility": 0.08,
+            "liquidity": 0.07,
+            "target_realism": 0.10,
+            "reward_risk": 0.08,
+            "catalyst_macro": 0.04,
+            "confirmation": 0.03,
+        }
+    )
+    daily_actionability_weights: dict[str, float] = field(
+        default_factory=lambda: {
+            "confirmation": 0.28,
+            "entry_proximity": 0.20,
+            "current_reward_risk": 0.17,
+            "target_reachability": 0.10,
+            "market_alignment": 0.08,
+            "sector_alignment": 0.07,
+            "volume_confirmation": 0.06,
+            "liquidity": 0.04,
+        }
+    )
+    trade_today_weights: dict[str, float] = field(
+        default_factory=lambda: {
+            "raw_setup": 0.35,
+            "actionability": 0.40,
+            "portfolio_fit": 0.20,
+            "market_sector_alignment": 0.05,
+        }
+    )
     buy_min_entry_quality: float = 6.2
     buy_min_relative_strength_score: float = 5.2
     buy_min_support_quality_score: float = 5.2

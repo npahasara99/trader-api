@@ -276,8 +276,9 @@ def _prune_expired_watchlist_snapshots(session, *, table: Table, planned_at) -> 
     )
 
 
-def persist_sp100_workflow_to_supabase(
+def persist_scan_workflow_to_supabase(
     *,
+    workflow_type: str,
     workflow_request,
     workflow_response,
     selected_rows: list,
@@ -298,7 +299,7 @@ def persist_sp100_workflow_to_supabase(
         response_payload = workflow_response.model_dump(mode="json")
         scan_run_id = save_supabase_scan_run(
             session,
-            workflow_type="sp100_top10_log",
+            workflow_type=workflow_type,
             planned_at=workflow_response.planned_at,
             request_payload=request_payload,
             response_payload=response_payload,
@@ -325,7 +326,7 @@ def persist_sp100_workflow_to_supabase(
     except Exception as exc:
         if "session" in locals():
             session.rollback()
-        logger.warning("Supabase scan persistence failed for sp100 workflow: %s", exc)
+        logger.warning("Supabase scan persistence failed for %s workflow: %s", workflow_type, exc)
         return {
             "persisted": False,
             "scan_run_id": None,
@@ -334,3 +335,19 @@ def persist_sp100_workflow_to_supabase(
     finally:
         if "session" in locals():
             session.close()
+
+
+def persist_sp100_workflow_to_supabase(
+    *,
+    workflow_request,
+    workflow_response,
+    selected_rows: list,
+) -> dict[str, Any]:
+    """Backward-compatible wrapper for the existing SP100 reporting path."""
+
+    return persist_scan_workflow_to_supabase(
+        workflow_type="sp100_top10_log",
+        workflow_request=workflow_request,
+        workflow_response=workflow_response,
+        selected_rows=selected_rows,
+    )

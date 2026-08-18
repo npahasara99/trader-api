@@ -276,6 +276,21 @@ class PlanRow:
     one_hour_trend: str | None = None
     thirty_minute_trend: str | None = None
     multi_timeframe_alignment_score: float | None = None
+    sector: str | None = None
+    industry: str | None = None
+    correlation_group: str | None = None
+    raw_setup_score: float | None = None
+    trade_grade: str | None = None
+    actionability_score: float | None = None
+    actionability_state: str | None = None
+    current_reward_risk: float | None = None
+    distance_to_preferred_entry_pct: float | None = None
+    waiting_for: list[dict] = field(default_factory=list)
+    portfolio_fit_score: float | None = None
+    sector_concentration_penalty: float | None = None
+    correlation_penalty: float | None = None
+    trade_today_score: float | None = None
+    daily_exclusion_reasons: list[str] = field(default_factory=list)
 
 
 # Static S&P 100-like liquid large-cap universe for API-side scanning.
@@ -1105,6 +1120,7 @@ def build_swing_plan(
     timeframe_bars_loader: TimeframeBarsLoader | None = None,
     history_stats_by_ticker: dict[str, dict] | None = None,
     pre_scan_by_ticker: dict[str, dict] | None = None,
+    ticker_metadata_by_ticker: dict[str, dict] | None = None,
     llm_provider: str | None = None,
     llm_model: str | None = None,
     llm_style: str | None = None,
@@ -1122,6 +1138,7 @@ def build_swing_plan(
 
     for t in tickers:
         pre_scan = (pre_scan_by_ticker or {}).get(t, {}) or {}
+        ticker_meta = (ticker_metadata_by_ticker or {}).get(t) or SP100_CLASSIFICATION.get(t) or {}
         last = get_last_price_or_recent_close(t, daily_closes_loader=daily_closes_loader)
         news = get_company_news_summary(t, days=7, limit=5)
         news_score = compute_news_score(news)
@@ -1219,7 +1236,7 @@ def build_swing_plan(
                 avoid_threshold=avoid_threshold,
                 history_stats=(history_stats_by_ticker or {}).get(t),
                 benchmark_bars=benchmark_bars,
-                ticker_meta=SP100_CLASSIFICATION.get(t),
+                ticker_meta=ticker_meta,
                 sector_relative_strength=pre_scan.get("sector_relative_strength"),
                 llm_provider=llm_provider,
                 llm_model=llm_model,
@@ -1494,6 +1511,8 @@ def build_swing_plan(
                 one_hour_trend=structured.get("one_hour_trend"),
                 thirty_minute_trend=structured.get("thirty_minute_trend"),
                 multi_timeframe_alignment_score=structured.get("multi_timeframe_alignment_score"),
+                sector=ticker_meta.get("sector"),
+                industry=ticker_meta.get("industry"),
             )
         )
 

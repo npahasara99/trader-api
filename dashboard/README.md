@@ -92,6 +92,7 @@ invalid literal `STREAMLIT_SERVER_PORT=$PORT` value if one is configured.
 - If Supabase is unavailable, the UI shows a clear error instead of crashing silently.
 - The dashboard is intentionally read-only for reporting data and does not touch the main `DATABASE_URL` path.
 - Supported runner routes currently include:
+  - `/workflow/sp500/daily-opportunities`
   - `/workflow/swing-plan-log`
   - `/workflow/sp100/top10-log`
   - `/plan/swing`

@@ -3,6 +3,7 @@ from fastapi import FastAPI, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 from datetime import datetime, timezone, timedelta, date
+from collections import Counter
 from .logic import bucket_news, classify_assumption
 from .config import DEFAULT_PLANNING_CONFIG
 from .actionability import build_actionability_soon
@@ -12,7 +13,9 @@ from .monitoring import build_wait_monitoring_plan
 from .ranking import build_ranking_profile
 from .scanner import build_pre_scan_profile, sector_benchmark_symbol_for_meta
 from .suitability import build_swing_trade_suitability
-from .supabase_reporting import persist_sp100_workflow_to_supabase
+from .supabase_reporting import persist_scan_workflow_to_supabase, persist_sp100_workflow_to_supabase
+from .opportunity_ranking import build_portfolio_snapshot, rank_daily_opportunities
+from .universe import get_sp500_universe
 from .what_to_watch import build_what_to_watch
 from .watchlist import build_watchlist_profile
 import json
@@ -23,7 +26,8 @@ from sqlalchemy import text, func
 from sqlalchemy.exc import IntegrityError
 
 from .db import Base, SessionLocal, engine, get_db
-from .models import SwingDecision, DailyBar, TradingViewSignalEvent
+from .models import ManagedPosition, SwingDecision, DailyBar, TradingViewSignalEvent
+from .bot.enums import PositionStatus
 from .settings import settings
 from .logic import (
     build_swing_plan,
@@ -483,6 +487,21 @@ class PlanRowOut(BaseModel):
     one_hour_trend: Optional[str] = None
     thirty_minute_trend: Optional[str] = None
     multi_timeframe_alignment_score: Optional[float] = None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    correlation_group: Optional[str] = None
+    raw_setup_score: Optional[float] = None
+    trade_grade: Optional[str] = None
+    actionability_score: Optional[float] = None
+    actionability_state: Optional[str] = None
+    current_reward_risk: Optional[float] = None
+    distance_to_preferred_entry_pct: Optional[float] = None
+    waiting_for: List[dict] = Field(default_factory=list)
+    portfolio_fit_score: Optional[float] = None
+    sector_concentration_penalty: Optional[float] = None
+    correlation_penalty: Optional[float] = None
+    trade_today_score: Optional[float] = None
+    daily_exclusion_reasons: List[str] = Field(default_factory=list)
 
     llm_action: Optional[str] = None
     llm_rationale: Optional[str] = None
@@ -554,6 +573,88 @@ class RankedPlanOut(BaseModel):
     history_win_rate: Optional[float] = None
     history_avg_return: Optional[float] = None
     row: PlanRowOut
+
+
+class Sp500DailyOpportunitiesRequest(BaseModel):
+    prescan_limit: int = DEFAULT_PLANNING_CONFIG.sp500_prescan_limit
+    deep_analysis_limit: int = DEFAULT_PLANNING_CONFIG.sp500_deep_analysis_limit
+    best_setups_count: int = DEFAULT_PLANNING_CONFIG.best_setups_count
+    best_trades_today_max: int = DEFAULT_PLANNING_CONFIG.best_trades_today_max
+    next_to_trigger_count: int = DEFAULT_PLANNING_CONFIG.next_to_trigger_count
+    lookback_days: int = 180
+    min_history_samples: int = 3
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    mode: str = "sp500_daily_opportunities"
+    llm_provider: Optional[str] = "chatgpt-actions"
+    llm_model: Optional[str] = None
+    llm_style: Optional[str] = "sp500_daily_ranker_v1"
+    compact_response: bool = False
+
+
+class DailyOpportunityOut(BaseModel):
+    rank: int
+    ticker: str
+    company_name: Optional[str] = None
+    sector: str
+    industry: str
+    correlation_group: str
+    setup_type: Optional[str] = None
+    grade: str
+    action: str
+    planner_action: Optional[str] = None
+    raw_setup_score: float
+    actionability_score: float
+    portfolio_fit_score: float
+    trade_today_score: float
+    actionability_state: str
+    confirmation_status: str
+    current_price: Optional[float] = None
+    preferred_entry: Optional[float] = None
+    confirmation_trigger: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit_1: Optional[float] = None
+    take_profit_2: Optional[float] = None
+    risk_reward: Optional[dict] = None
+    current_reward_risk: Optional[float] = None
+    distance_to_preferred_entry_pct: Optional[float] = None
+    waiting_for: List[dict] = Field(default_factory=list)
+    exclusion_reasons: List[str] = Field(default_factory=list)
+    raw_setup_components: dict = Field(default_factory=dict)
+    actionability_components: dict = Field(default_factory=dict)
+    sector_concentration_penalty: float = 0.0
+    correlation_penalty: float = 0.0
+    position_limit_penalty: float = 0.0
+    row: Optional[PlanRowOut] = None
+
+
+class Sp500DailyOpportunitiesResponse(BaseModel):
+    planned_at: datetime
+    market_regime: str
+    universe_name: str = "SP500"
+    universe_size: int
+    universe_as_of: str
+    universe_source: str
+    universe_used_fallback: bool = False
+    universe_warning: Optional[str] = None
+    scanned_universe_size: int
+    pre_scanned_count: int
+    pre_scan_shortlist_count: int
+    candidates_with_price: int
+    eligible_count: int
+    selected_count: int
+    rows_logged: int
+    selection_message: str
+    scan_summary: dict
+    portfolio_summary: dict
+    scoring_configuration: dict
+    best_setups: List[DailyOpportunityOut] = Field(default_factory=list)
+    best_trades_today: List[DailyOpportunityOut] = Field(default_factory=list)
+    next_to_trigger: List[DailyOpportunityOut] = Field(default_factory=list)
+    diagnostics: dict = Field(default_factory=dict)
+    supabase_persisted: bool = False
+    supabase_scan_run_id: Optional[str] = None
+    supabase_persistence_error: Optional[str] = None
 
 
 class Sp100WorkflowResponse(BaseModel):
@@ -936,6 +1037,21 @@ def _to_plan_row_out(r) -> PlanRowOut:
         one_hour_trend=getattr(r, "one_hour_trend", None),
         thirty_minute_trend=getattr(r, "thirty_minute_trend", None),
         multi_timeframe_alignment_score=getattr(r, "multi_timeframe_alignment_score", None),
+        sector=getattr(r, "sector", None),
+        industry=getattr(r, "industry", None),
+        correlation_group=getattr(r, "correlation_group", None),
+        raw_setup_score=getattr(r, "raw_setup_score", None),
+        trade_grade=getattr(r, "trade_grade", None),
+        actionability_score=getattr(r, "actionability_score", None),
+        actionability_state=getattr(r, "actionability_state", None),
+        current_reward_risk=getattr(r, "current_reward_risk", None),
+        distance_to_preferred_entry_pct=getattr(r, "distance_to_preferred_entry_pct", None),
+        waiting_for=list(getattr(r, "waiting_for", []) or []),
+        portfolio_fit_score=getattr(r, "portfolio_fit_score", None),
+        sector_concentration_penalty=getattr(r, "sector_concentration_penalty", None),
+        correlation_penalty=getattr(r, "correlation_penalty", None),
+        trade_today_score=getattr(r, "trade_today_score", None),
+        daily_exclusion_reasons=list(getattr(r, "daily_exclusion_reasons", []) or []),
         news=[NewsItem(**n) for n in (getattr(r, "news", None) or [])],
     )
 
@@ -1071,6 +1187,9 @@ def _rank_pre_scan_universe(
     *,
     daily_closes_loader,
     daily_bars_loader,
+    ticker_metadata_by_ticker: dict[str, dict] | None = None,
+    include_earnings: bool = True,
+    prefer_bar_close: bool = False,
 ) -> List[dict]:
     """Cheap swing pre-scan used to shortlist names before full planning."""
 
@@ -1078,7 +1197,8 @@ def _rank_pre_scan_universe(
     benchmark_symbols = {"SPY", "QQQ"}
     sector_symbols: set[str] = set()
     for sym in symbols:
-        sector_symbol = sector_benchmark_symbol_for_meta(SP100_CLASSIFICATION.get(sym))
+        metadata = (ticker_metadata_by_ticker or {}).get(sym) or SP100_CLASSIFICATION.get(sym)
+        sector_symbol = sector_benchmark_symbol_for_meta(metadata)
         if sector_symbol:
             sector_symbols.add(sector_symbol)
 
@@ -1092,20 +1212,26 @@ def _rank_pre_scan_universe(
 
     for sym in symbols:
         try:
-            last = get_last_price_or_recent_close(sym, daily_closes_loader=daily_closes_loader)
-            earnings_score, earnings_context = compute_earnings_signal(
-                sym,
-                last,
-                daily_closes_loader=daily_closes_loader,
-            )
-            _ = earnings_score
             bars = daily_bars_loader(sym)
+            last = None
+            if prefer_bar_close and bars:
+                last = bars[-1].get("close")
+            if last is None:
+                last = get_last_price_or_recent_close(sym, daily_closes_loader=daily_closes_loader)
+            earnings_context = None
+            if include_earnings:
+                _, earnings_context = compute_earnings_signal(
+                    sym,
+                    last,
+                    daily_closes_loader=daily_closes_loader,
+                )
+            metadata = (ticker_metadata_by_ticker or {}).get(sym) or SP100_CLASSIFICATION.get(sym)
             profile = build_pre_scan_profile(
                 ticker=sym,
                 current_price=last,
                 bars=bars,
                 benchmark_bars=benchmark_bars,
-                sector_benchmark_symbol=sector_benchmark_symbol_for_meta(SP100_CLASSIFICATION.get(sym)),
+                sector_benchmark_symbol=sector_benchmark_symbol_for_meta(metadata),
                 earnings_context=earnings_context,
                 config=DEFAULT_PLANNING_CONFIG,
             )
@@ -1929,6 +2055,353 @@ def plan_swing(req: PlanRequest, db: Session = Depends(get_db), _=Depends(requir
         "avoid_threshold": thresholds["avoid_threshold"],
         "rows": out,
     }
+
+
+def _apply_daily_opportunity_fields(candidate: dict) -> None:
+    """Expose daily ranking fields on the underlying planner row for logging/debugging."""
+
+    row = candidate["row"]
+    row.sector = candidate["sector"]
+    row.industry = candidate["industry"]
+    row.correlation_group = candidate["correlation_group"]
+    row.raw_setup_score = candidate["raw_setup_score"]
+    row.trade_grade = candidate["grade"]
+    row.actionability_score = candidate["actionability_score"]
+    row.actionability_state = candidate["actionability_state"]
+    row.current_reward_risk = candidate["current_reward_risk"]
+    row.distance_to_preferred_entry_pct = candidate["distance_to_preferred_entry_pct"]
+    row.waiting_for = list(candidate["waiting_for"] or [])
+    row.portfolio_fit_score = candidate["portfolio_fit_score"]
+    row.sector_concentration_penalty = candidate["sector_concentration_penalty"]
+    row.correlation_penalty = candidate["correlation_penalty"]
+    row.trade_today_score = candidate["trade_today_score"]
+    row.daily_exclusion_reasons = list(candidate["exclusion_reasons"] or [])
+
+
+def _daily_opportunity_out(candidate: dict, *, compact: bool) -> DailyOpportunityOut:
+    _apply_daily_opportunity_fields(candidate)
+    return DailyOpportunityOut(
+        rank=int(candidate["rank"]),
+        ticker=candidate["ticker"],
+        company_name=candidate.get("company_name"),
+        sector=candidate["sector"],
+        industry=candidate["industry"],
+        correlation_group=candidate["correlation_group"],
+        setup_type=candidate.get("setup_type"),
+        grade=candidate["grade"],
+        action=candidate["action"],
+        planner_action=candidate.get("planner_action"),
+        raw_setup_score=candidate["raw_setup_score"],
+        actionability_score=candidate["actionability_score"],
+        portfolio_fit_score=candidate["portfolio_fit_score"],
+        trade_today_score=candidate["trade_today_score"],
+        actionability_state=candidate["actionability_state"],
+        confirmation_status=candidate["confirmation_status"],
+        current_price=candidate.get("current_price"),
+        preferred_entry=candidate.get("preferred_entry"),
+        confirmation_trigger=candidate.get("confirmation_trigger"),
+        stop_loss=candidate.get("stop_loss"),
+        take_profit_1=candidate.get("take_profit_1"),
+        take_profit_2=candidate.get("take_profit_2"),
+        risk_reward=candidate.get("risk_reward"),
+        current_reward_risk=candidate.get("current_reward_risk"),
+        distance_to_preferred_entry_pct=candidate.get("distance_to_preferred_entry_pct"),
+        waiting_for=list(candidate.get("waiting_for") or []),
+        exclusion_reasons=list(candidate.get("exclusion_reasons") or []),
+        raw_setup_components=dict(candidate.get("raw_setup_components") or {}),
+        actionability_components=dict(candidate.get("actionability_components") or {}),
+        sector_concentration_penalty=float(candidate.get("sector_concentration_penalty") or 0.0),
+        correlation_penalty=float(candidate.get("correlation_penalty") or 0.0),
+        position_limit_penalty=float(candidate.get("position_limit_penalty") or 0.0),
+        row=None if compact else _to_plan_row_out(candidate["row"]),
+    )
+
+
+@app.post("/workflow/sp500/daily-opportunities", response_model=Sp500DailyOpportunitiesResponse)
+def workflow_sp500_daily_opportunities(
+    req: Sp500DailyOpportunitiesRequest,
+    db: Session = Depends(get_db),
+    _=Depends(require_bearer_token),
+):
+    """Run the staged S&P 500 scan and return three distinct daily leaderboards."""
+
+    planned_at = datetime.now(timezone.utc)
+    prescan_limit = max(10, min(int(req.prescan_limit), 200))
+    deep_limit = max(1, min(int(req.deep_analysis_limit), prescan_limit, 75))
+    best_setups_count = max(1, min(int(req.best_setups_count), deep_limit, 25))
+    best_trades_max = max(0, min(int(req.best_trades_today_max), 5))
+    next_to_trigger_count = max(1, min(int(req.next_to_trigger_count), 10))
+    lookback_days = max(30, min(int(req.lookback_days), 720))
+    min_history_samples = max(1, min(int(req.min_history_samples), 20))
+
+    base_universe, universe_snapshot, metadata_by_ticker = get_sp500_universe(
+        sector=req.sector,
+        industry=req.industry,
+    )
+    daily_closes_loader = _build_daily_closes_loader(db)
+    daily_bars_loader = _build_daily_bars_loader(db)
+    ranked_prescan = _rank_pre_scan_universe(
+        base_universe,
+        daily_closes_loader=daily_closes_loader,
+        daily_bars_loader=daily_bars_loader,
+        ticker_metadata_by_ticker=metadata_by_ticker,
+        include_earnings=False,
+        prefer_bar_close=True,
+    )
+    prescan_failures = [item for item in ranked_prescan if item.get("prescan_error")]
+    prescan_rejected = [
+        item for item in ranked_prescan
+        if item.get("scan_rejection_reason") and not item.get("prescan_error")
+    ]
+    prescan_passed = [item for item in ranked_prescan if not item.get("scan_rejection_reason")]
+    prescan_ranked = prescan_passed[:prescan_limit]
+    shortlist = prescan_ranked[:deep_limit]
+    deep_universe = [item["ticker"] for item in shortlist]
+    pre_scan_by_ticker = {
+        item["ticker"]: {**item, "scan_shortlisted": True}
+        for item in shortlist
+    }
+
+    try:
+        regime_snapshot = detect_market_regime(deep_universe[:20], daily_closes_loader=daily_closes_loader)
+    except Exception as exc:
+        regime_snapshot = {
+            "regime": "neutral",
+            "score": 0.0,
+            "spy_price": None,
+            "spy_ma20": None,
+            "spy_ma50": None,
+            "breadth_ratio": None,
+            "breadth_samples": 0,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    try:
+        perf = _rolling_performance_snapshot(db, lookback_days=lookback_days)
+    except Exception:
+        perf = {
+            "overall_samples": 0,
+            "overall_avg_return": 0.0,
+            "overall_abs_return": 0.0,
+            "overall_win_rate": 0.0,
+            "buy_samples": 0,
+            "buy_avg_return": 0.0,
+            "buy_win_rate": 0.0,
+        }
+    thresholds = _compute_dynamic_thresholds(regime_snapshot["regime"], perf)
+    try:
+        history_stats = _history_stats_by_ticker(db, lookback_days=lookback_days)
+    except Exception:
+        history_stats = {}
+
+    rows = build_swing_plan(
+        deep_universe,
+        regime=regime_snapshot["regime"],
+        buy_threshold=thresholds["buy_threshold"],
+        avoid_threshold=thresholds["avoid_threshold"],
+        daily_closes_loader=daily_closes_loader,
+        daily_bars_loader=daily_bars_loader,
+        timeframe_bars_loader=get_timeframe_bars,
+        history_stats_by_ticker=history_stats,
+        pre_scan_by_ticker=pre_scan_by_ticker,
+        ticker_metadata_by_ticker=metadata_by_ticker,
+        llm_provider=req.llm_provider,
+        llm_model=req.llm_model,
+        llm_style=req.llm_style,
+    )
+
+    candidates_with_price = 0
+    for row in rows:
+        if row.entry is None or row.stop is None or row.take_profit is None:
+            continue
+        candidates_with_price += 1
+        stats = history_stats.get(row.ticker) or {}
+        _apply_prob_and_action(
+            row,
+            regime=regime_snapshot["regime"],
+            buy_threshold=thresholds["buy_threshold"],
+            avoid_threshold=thresholds["avoid_threshold"],
+            history_win_rate=(float(stats["win_rate"]) if stats.get("samples", 0) >= min_history_samples else None),
+            history_samples=int(stats.get("samples", 0)),
+        )
+
+    portfolio_error = None
+    try:
+        active_statuses = {
+            PositionStatus.OPEN.value,
+            PositionStatus.EXTERNAL.value,
+            PositionStatus.RECONCILIATION_REQUIRED.value,
+        }
+        position_rows = db.query(ManagedPosition).filter(ManagedPosition.status.in_(active_statuses)).all()
+        position_payloads = [
+            {
+                "ticker": position.ticker,
+                "status": position.status,
+                "quantity": position.quantity,
+                "average_entry_price": position.average_entry_price,
+            }
+            for position in position_rows
+        ]
+    except Exception as exc:
+        position_payloads = []
+        portfolio_error = f"{type(exc).__name__}: {exc}"
+
+    portfolio = build_portfolio_snapshot(
+        position_payloads,
+        metadata_by_ticker=metadata_by_ticker,
+        max_positions=int(settings.MAX_OPEN_POSITIONS),
+        trading_budget=float(settings.TRADING_BUDGET),
+    )
+    ranking = rank_daily_opportunities(
+        rows,
+        metadata_by_ticker=metadata_by_ticker,
+        market_regime=regime_snapshot["regime"],
+        portfolio=portfolio,
+        best_setups_count=best_setups_count,
+        best_trades_max=best_trades_max,
+        next_to_trigger_count=next_to_trigger_count,
+    )
+    for candidate in ranking["all_candidates"]:
+        _apply_daily_opportunity_fields(candidate)
+
+    best_setups = [_daily_opportunity_out(item, compact=req.compact_response) for item in ranking["best_setups"]]
+    best_trades_today = [_daily_opportunity_out(item, compact=req.compact_response) for item in ranking["best_trades_today"]]
+    next_to_trigger = [_daily_opportunity_out(item, compact=req.compact_response) for item in ranking["next_to_trigger"]]
+
+    ranked_rows = [
+        RankedPlanOut(
+            rank=item.rank,
+            score=item.raw_setup_score,
+            signal_score=int(getattr(ranking["best_setups"][item.rank - 1]["row"], "signal_score", 0) or 0),
+            row=_to_plan_row_out(ranking["best_setups"][item.rank - 1]["row"]),
+        )
+        for item in best_setups
+    ]
+    meta = {
+        "llm_used": True,
+        "llm_provider": req.llm_provider,
+        "llm_model": req.llm_model,
+        "llm_style": req.llm_style,
+    }
+    rows_logged = 0
+    try:
+        rows_logged = _queue_rows_for_logging(
+            db,
+            planned_at=planned_at,
+            mode=req.mode,
+            rows=[item.row for item in ranked_rows],
+            meta=meta,
+        )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"SP500 workflow logging failed: {exc}")
+
+    failed_rows = ranking["failures"]
+    failure_reasons = [
+        *[
+            {"ticker": item.get("ticker"), "reason": "prescan_crashed", "details": item.get("prescan_error")}
+            for item in prescan_failures
+        ],
+        *failed_rows,
+    ]
+    rejection_reason_counts = Counter(
+        reason.strip()
+        for item in prescan_rejected
+        for reason in str(item.get("scan_rejection_reason") or "missing_required_data").split(",")
+        if reason.strip()
+    )
+    selection_message = (
+        f"{len(best_trades_today)} high-quality trade{'s' if len(best_trades_today) != 1 else ''} confirmed today."
+        if best_trades_today
+        else "NO HIGH-QUALITY TRADE CURRENTLY CONFIRMED"
+    )
+    scan_summary = {
+        "universe": "SP500",
+        "universe_size": len(base_universe),
+        "suitability_passed": len(prescan_passed),
+        "prescan_passed": len(prescan_ranked),
+        "shortlisted": len(prescan_ranked),
+        "deep_analyzed": len(rows),
+        "actionable_count": sum(
+            1 for item in ranking["all_candidates"] if item["actionability_state"] == "actionable"
+        ),
+        "a_grade_setup_count": sum(
+            1 for item in ranking["all_candidates"] if item["grade"] in {"A-", "A", "A+"}
+        ),
+        "market_regime": regime_snapshot["regime"],
+        "target_actionable_trades_per_day": DEFAULT_PLANNING_CONFIG.target_actionable_trades_per_day,
+        "min_required_trades_per_day": DEFAULT_PLANNING_CONFIG.min_required_trades_per_day,
+    }
+    portfolio_summary = {
+        "max_positions": portfolio.max_positions,
+        "open_positions": portfolio.open_positions,
+        "available_position_slots": portfolio.available_position_slots,
+        "max_new_trades_today": min(best_trades_max, DEFAULT_PLANNING_CONFIG.max_new_trades_per_day),
+        "trading_budget": portfolio.trading_budget,
+        "capital_in_use": portfolio.capital_in_use,
+        "available_capital": portfolio.available_capital,
+        "sector_exposures": portfolio.sector_exposures,
+        "correlation_exposures": portfolio.correlation_exposures,
+    }
+    scoring_configuration = {
+        "minimums": {
+            "grade": DEFAULT_PLANNING_CONFIG.min_actionable_grade,
+            "raw_setup_score": DEFAULT_PLANNING_CONFIG.min_raw_setup_score,
+            "actionability_score": DEFAULT_PLANNING_CONFIG.min_actionability_score,
+            "portfolio_fit_score": DEFAULT_PLANNING_CONFIG.min_portfolio_fit_score,
+        },
+        "raw_setup_weights": DEFAULT_PLANNING_CONFIG.raw_setup_weights,
+        "actionability_weights": DEFAULT_PLANNING_CONFIG.daily_actionability_weights,
+        "trade_today_weights": DEFAULT_PLANNING_CONFIG.trade_today_weights,
+        "portfolio_limits": {
+            "max_per_sector": DEFAULT_PLANNING_CONFIG.max_open_positions_per_sector,
+            "max_per_correlation_group": DEFAULT_PLANNING_CONFIG.max_open_positions_per_correlation_group,
+        },
+    }
+    diagnostics = {
+        "successful_tickers": [item["ticker"] for item in ranking["all_candidates"]],
+        "failed_tickers": [item.get("ticker") for item in failure_reasons],
+        "failure_reasons": failure_reasons,
+        "prescan_rejection_counts": dict(rejection_reason_counts),
+        "prescan_rejected_count": len(prescan_rejected),
+        "market_regime_details": regime_snapshot,
+        "portfolio_read_error": portfolio_error,
+    }
+    response = Sp500DailyOpportunitiesResponse(
+        planned_at=planned_at,
+        market_regime=regime_snapshot["regime"],
+        universe_size=len(base_universe),
+        universe_as_of=universe_snapshot.as_of,
+        universe_source=universe_snapshot.source,
+        universe_used_fallback=universe_snapshot.used_fallback,
+        universe_warning=universe_snapshot.warning,
+        scanned_universe_size=len(base_universe),
+        pre_scanned_count=len(prescan_ranked),
+        pre_scan_shortlist_count=len(shortlist),
+        candidates_with_price=candidates_with_price,
+        eligible_count=len(ranking["all_candidates"]),
+        selected_count=len(best_setups),
+        rows_logged=rows_logged,
+        selection_message=selection_message,
+        scan_summary=scan_summary,
+        portfolio_summary=portfolio_summary,
+        scoring_configuration=scoring_configuration,
+        best_setups=best_setups,
+        best_trades_today=best_trades_today,
+        next_to_trigger=next_to_trigger,
+        diagnostics=diagnostics,
+    )
+    supabase_status = persist_scan_workflow_to_supabase(
+        workflow_type="sp500_daily_opportunities",
+        workflow_request=req,
+        workflow_response=response,
+        selected_rows=ranked_rows,
+    )
+    response.supabase_persisted = bool((supabase_status or {}).get("persisted"))
+    response.supabase_scan_run_id = (supabase_status or {}).get("scan_run_id")
+    response.supabase_persistence_error = (supabase_status or {}).get("error")
+    return response
 
 
 @app.post("/workflow/sp100/top10-log", response_model=Sp100WorkflowResponse)

@@ -188,6 +188,14 @@ def run_sp100_workflow(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def run_sp500_daily_opportunities(payload: dict[str, Any]) -> dict[str, Any]:
+    return post_json(
+        "/workflow/sp500/daily-opportunities",
+        payload,
+        timeout=get_api_timeout_seconds(900),
+    )
+
+
 def run_single_stock_workflow(payload: dict[str, Any]) -> dict[str, Any]:
     return post_json(
         "/workflow/swing-plan-log",

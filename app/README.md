@@ -122,6 +122,14 @@ Backward compatibility:
   - `best_immediate_setups`
   - `best_watchlist_setups`
   - `rejected_or_low_priority`
+- The primary daily scanner is now `POST /workflow/sp500/daily-opportunities`.
+  It loads current S&P 500 metadata from Wikipedia with a cached repository
+  fallback, cheaply pre-scans the full universe, deeply plans only the configured
+  shortlist, and returns `best_trades_today`, `best_setups`, and
+  `next_to_trigger` separately.
+- Daily-opportunity scores remain inspectable as `raw_setup_score`,
+  `actionability_score`, `portfolio_fit_score`, and `trade_today_score`.
+  Portfolio exposure never changes `raw_setup_score`.
 
 Fallback behavior:
 - If live quote data is unavailable, planning still falls back to recent cached closes.

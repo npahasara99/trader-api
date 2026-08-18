@@ -16,7 +16,19 @@ def _badge_class(kind: str, value) -> str:
     if kind == "watchlist_tier":
         return {"primary": "primary", "secondary": "secondary"}.get(value_slug, "muted")
     if kind == "actionability":
-        return {"ready-soon": "ready-soon", "monitor": "monitor", "background": "background"}.get(value_slug, "muted")
+        return {
+            "ready-soon": "ready-soon",
+            "actionable": "buy",
+            "confirmed": "ready-soon",
+            "awaiting-confirmation": "wait",
+            "in-price-zone": "wait",
+            "too-early": "background",
+            "monitor": "monitor",
+            "background": "background",
+            "extended": "low",
+            "missed": "avoid",
+            "invalidated": "avoid",
+        }.get(value_slug, "muted")
     if kind == "suitability":
         return {"high": "high", "medium": "medium", "low": "low", "unsuitable": "unsuitable"}.get(value_slug, "muted")
     if kind == "consistency":
@@ -141,6 +153,68 @@ def render_runner_bucket_panel(title: str, values: list[str], *, empty_text: str
 
 def render_runner_note(text: str) -> None:
     st.markdown(f'<div class="runner-empty-note">{html.escape(text)}</div>', unsafe_allow_html=True)
+
+
+def _waiting_for_text(values: list[dict]) -> str:
+    parts: list[str] = []
+    for item in values or []:
+        trigger_type = str(item.get("type") or "confirmation").replace("_", " ")
+        value = item.get("value")
+        if value is not None:
+            parts.append(f"{trigger_type} {format_price(value)}")
+        else:
+            parts.append(trigger_type)
+    return ", ".join(parts) if parts else "No pending trigger"
+
+
+def render_daily_trade_card(item: dict) -> None:
+    badges = "".join(
+        [
+            badge_html("final_action", item.get("action")),
+            badge_html("actionability", item.get("actionability_state")),
+        ]
+    )
+    st.markdown(
+        f"""
+        <div class="watch-card daily-opportunity-card">
+            <div class="opportunity-rank">#{int(item.get('rank') or 0)}</div>
+            <h4>{html.escape(str(item.get('ticker') or '-'))}</h4>
+            <div class="badge-row">{badges}<span class="badge primary">{html.escape(str(item.get('grade') or '-'))}</span></div>
+            <div class="mini-grid">
+                <div><div class="mini-label">Trade Today</div><div class="mini-value">{_safe_display(item.get('trade_today_score'))}</div></div>
+                <div><div class="mini-label">Raw Setup</div><div class="mini-value">{_safe_display(item.get('raw_setup_score'))}</div></div>
+                <div><div class="mini-label">Portfolio Fit</div><div class="mini-value">{_safe_display(item.get('portfolio_fit_score'))}</div></div>
+                <div><div class="mini-label">Trigger</div><div class="mini-value">{html.escape(format_price(item.get('confirmation_trigger')))}</div></div>
+                <div><div class="mini-label">Stop</div><div class="mini-value">{html.escape(format_price(item.get('stop_loss')))}</div></div>
+                <div><div class="mini-label">TP1 / TP2</div><div class="mini-value">{html.escape(format_price(item.get('take_profit_1')))} / {html.escape(format_price(item.get('take_profit_2')))}</div></div>
+            </div>
+            <div class="summary-note">{html.escape(pretty_label(item.get('setup_type')))} | {html.escape(str(item.get('sector') or 'Unknown'))}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _safe_display(value) -> str:
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def render_next_trigger_card(item: dict) -> None:
+    waiting = _waiting_for_text(item.get("waiting_for") or [])
+    st.markdown(
+        f"""
+        <div class="runner-bucket-inner next-trigger-card">
+            <div class="runner-bucket-title">#{int(item.get('rank') or 0)} {html.escape(str(item.get('ticker') or '-'))}
+                <span class="runner-bucket-count">{html.escape(str(item.get('grade') or '-'))}</span>
+            </div>
+            <div class="summary-note">Wait for {html.escape(waiting)}.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def summary_from_row(row) -> str:

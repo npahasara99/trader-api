@@ -8,6 +8,7 @@ from .indicators import add_indicator_columns, bars_to_frame, latest_value
 
 SECTOR_BENCHMARKS = {
     "technology": "XLK",
+    "information technology": "XLK",
     "software": "XLK",
     "it services": "XLK",
     "networking": "XLK",

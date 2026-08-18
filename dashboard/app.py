@@ -33,6 +33,7 @@ from dashboard.api_client import (
     run_manual_basket,
     run_single_stock_workflow,
     run_sp100_workflow,
+    run_sp500_daily_opportunities,
     update_bot_config,
 )
 from dashboard.components import (
@@ -49,6 +50,8 @@ from dashboard.components import (
     render_kpi_card,
     render_raw_json_block,
     render_runner_bucket_panel,
+    render_daily_trade_card,
+    render_next_trigger_card,
     render_runner_note,
     render_status_bar,
     render_top_watch_card,
@@ -86,7 +89,7 @@ inject_styles()
 
 
 RUNNER_DEFAULTS = {
-    "runner_type": "SP100 Top 10",
+    "runner_type": "SP500 Daily Opportunities",
     "single_ticker": "",
     "single_lookback_days": 30,
     "single_learning_limit": 200,
@@ -106,6 +109,20 @@ RUNNER_DEFAULTS = {
     "sp100_llm_model": "gpt-5",
     "sp100_llm_style": "sp100_ranker_v2_structured",
     "sp100_compact_response": False,
+    "sp500_prescan_limit": 75,
+    "sp500_deep_analysis_limit": 30,
+    "sp500_best_setups_count": 10,
+    "sp500_best_trades_max": 2,
+    "sp500_next_to_trigger_count": 5,
+    "sp500_lookback_days": 180,
+    "sp500_min_history_samples": 3,
+    "sp500_sector": "",
+    "sp500_industry": "",
+    "sp500_mode": "sp500_daily_opportunities",
+    "sp500_llm_provider": "chatgpt-actions",
+    "sp500_llm_model": "gpt-5",
+    "sp500_llm_style": "sp500_daily_ranker_v1",
+    "sp500_compact_response": True,
     "basket_tickers": "",
     "basket_mode": "manual",
     "basket_llm_provider": "chatgpt-actions",
@@ -123,6 +140,26 @@ def _init_runner_state() -> None:
 
 def _apply_runner_preset(preset: str) -> None:
     mapping = {
+        "sp500_default": {
+            "runner_type": "SP500 Daily Opportunities",
+            "sp500_sector": "",
+            "sp500_industry": "",
+        },
+        "sp500_tech": {
+            "runner_type": "SP500 Sector / Industry",
+            "sp500_sector": "Information Technology",
+            "sp500_industry": "",
+        },
+        "sp500_semis": {
+            "runner_type": "SP500 Sector / Industry",
+            "sp500_sector": "",
+            "sp500_industry": "Semiconductor",
+        },
+        "sp500_energy": {
+            "runner_type": "SP500 Sector / Industry",
+            "sp500_sector": "Energy",
+            "sp500_industry": "",
+        },
         "sp100_default": {
             "runner_type": "SP100 Top 10",
             "sp100_sector": "",
@@ -213,6 +250,8 @@ def _workflow_conclusion(result: dict) -> str:
 
 
 def _runner_result_conclusion(run_type: str, response: dict) -> str:
+    if run_type == "sp500_workflow":
+        return response.get("selection_message") or "S&P 500 daily opportunity scan completed."
     if run_type == "sp100_workflow":
         return _workflow_conclusion(response)
 
@@ -297,6 +336,80 @@ def _render_runner_workflow_result(result: dict) -> None:
     rows = result.get("rows") or []
     if rows:
         st.dataframe(format_runner_plan_rows(rows), use_container_width=True, hide_index=True)
+
+
+def _render_sp500_workflow_result(result: dict) -> None:
+    summary = result.get("scan_summary") or {}
+    portfolio = result.get("portfolio_summary") or {}
+    metric_cols = st.columns(5)
+    with metric_cols[0]:
+        render_kpi_card("Market", result.get("market_regime") or "-")
+    with metric_cols[1]:
+        render_kpi_card("Universe", int(result.get("universe_size") or 0), small=True)
+    with metric_cols[2]:
+        render_kpi_card("Deep Analyzed", int(summary.get("deep_analyzed") or 0), small=True)
+    with metric_cols[3]:
+        render_kpi_card("Actionable", int(summary.get("actionable_count") or 0), small=True)
+    with metric_cols[4]:
+        render_kpi_card("Open Slots", int(portfolio.get("available_position_slots") or 0), small=True)
+
+    if result.get("universe_used_fallback"):
+        st.caption(
+            f"Universe fallback snapshot in use ({result.get('universe_as_of')}). "
+            f"Live source warning: {result.get('universe_warning') or 'unavailable'}"
+        )
+    else:
+        st.caption(f"Universe as of {result.get('universe_as_of')} | Source: {result.get('universe_source')}")
+
+    if result.get("supabase_persisted"):
+        st.toast("S&P 500 scan persisted to the reporting database.", icon=":material/check_circle:")
+    elif result.get("supabase_persistence_error"):
+        st.error(f"Reporting persistence failed: {result.get('supabase_persistence_error')}")
+
+    st.markdown("### Best Trades Today")
+    trades = result.get("best_trades_today") or []
+    if not trades:
+        st.info("NO HIGH-QUALITY TRADE CURRENTLY CONFIRMED")
+    else:
+        trade_cols = st.columns(min(len(trades), 2), gap="large")
+        for index, item in enumerate(trades):
+            with trade_cols[index % len(trade_cols)]:
+                render_daily_trade_card(item)
+
+    st.markdown("### Best Setups")
+    st.caption("Objective individual setup quality. Portfolio concentration does not change this ranking.")
+    setups = result.get("best_setups") or []
+    if setups:
+        setup_rows = [
+            {
+                "Rank": item.get("rank"),
+                "Ticker": item.get("ticker"),
+                "Grade": item.get("grade"),
+                "Raw Setup": item.get("raw_setup_score"),
+                "Setup Type": pretty_label(item.get("setup_type")),
+                "Actionability": item.get("actionability_score"),
+                "Entry State": pretty_label(item.get("actionability_state")),
+                "Trigger": item.get("confirmation_trigger"),
+                "Sector": item.get("sector"),
+            }
+            for item in setups
+        ]
+        st.dataframe(pd.DataFrame(setup_rows), use_container_width=True, hide_index=True)
+    else:
+        st.caption("No setups completed the deep-analysis stage.")
+
+    st.markdown("### Next To Trigger")
+    next_items = result.get("next_to_trigger") or []
+    if next_items:
+        trigger_cols = st.columns(min(len(next_items), 3), gap="medium")
+        for index, item in enumerate(next_items):
+            with trigger_cols[index % len(trigger_cols)]:
+                render_next_trigger_card(item)
+    else:
+        st.caption("No high-quality setup is currently close to a defined trigger.")
+
+    with st.expander("Scanner Diagnostics", expanded=False):
+        st.json(result.get("diagnostics") or {})
 
 
 def _render_runner_plan_result(rows: list[dict], *, planned_at: str | None = None, market_regime: str | None = None) -> None:
@@ -475,17 +588,17 @@ with scanner_tab:
     with st.container(border=True):
         st.markdown("**Presets**")
         preset_cols = st.columns(5)
-        if preset_cols[0].button("SP100 Top 10", use_container_width=True, type="secondary"):
-            _apply_runner_preset("sp100_default")
+        if preset_cols[0].button("SP500 Daily", use_container_width=True, type="secondary"):
+            _apply_runner_preset("sp500_default")
             st.rerun()
         if preset_cols[1].button("Tech", use_container_width=True, type="secondary"):
-            _apply_runner_preset("sp100_tech")
+            _apply_runner_preset("sp500_tech")
             st.rerun()
         if preset_cols[2].button("Semis", use_container_width=True, type="secondary"):
-            _apply_runner_preset("sp100_semis")
+            _apply_runner_preset("sp500_semis")
             st.rerun()
         if preset_cols[3].button("Energy", use_container_width=True, type="secondary"):
-            _apply_runner_preset("sp100_energy")
+            _apply_runner_preset("sp500_energy")
             st.rerun()
         if preset_cols[4].button("Manual Basket", use_container_width=True, type="secondary"):
             _apply_runner_preset("manual_basket")
@@ -498,8 +611,22 @@ with scanner_tab:
             st.caption("Choose a supported run type, adjust only what matters, and launch from here.")
             st.session_state["runner_type"] = st.selectbox(
                 "Run Type",
-                options=["Single Stock", "SP100 Top 10", "SP100 Sector / Industry", "Manual Basket"],
-                index=["Single Stock", "SP100 Top 10", "SP100 Sector / Industry", "Manual Basket"].index(st.session_state["runner_type"]),
+                options=[
+                    "SP500 Daily Opportunities",
+                    "SP500 Sector / Industry",
+                    "Single Stock",
+                    "SP100 Top 10",
+                    "SP100 Sector / Industry",
+                    "Manual Basket",
+                ],
+                index=[
+                    "SP500 Daily Opportunities",
+                    "SP500 Sector / Industry",
+                    "Single Stock",
+                    "SP100 Top 10",
+                    "SP100 Sector / Industry",
+                    "Manual Basket",
+                ].index(st.session_state["runner_type"]),
             )
 
         run_type = st.session_state["runner_type"]
@@ -535,6 +662,61 @@ with scanner_tab:
                     }
                     response = run_single_stock_workflow(payload)
                     _store_runner_result("single_stock", response, title=f"Single Stock: {ticker}")
+                except TraderAPIError as exc:
+                    st.session_state["runner_last_error"] = str(exc)
+
+        elif run_type in {"SP500 Daily Opportunities", "SP500 Sector / Industry"}:
+            with st.form("sp500_runner_form", clear_on_submit=False):
+                st.markdown("**Scan Pipeline**")
+                scan_cols = st.columns(3)
+                scan_cols[0].number_input("Pre-Scan Limit", min_value=10, max_value=200, key="sp500_prescan_limit")
+                scan_cols[1].number_input("Deep Analysis", min_value=1, max_value=75, key="sp500_deep_analysis_limit")
+                scan_cols[2].number_input("Best Setups", min_value=1, max_value=25, key="sp500_best_setups_count")
+                output_cols = st.columns(2)
+                output_cols[0].number_input("Max Trades Today", min_value=0, max_value=5, key="sp500_best_trades_max")
+                output_cols[1].number_input("Next To Trigger", min_value=1, max_value=10, key="sp500_next_to_trigger_count")
+                st.markdown("**Scope**")
+                scope_cols = st.columns(2)
+                scope_cols[0].text_input("Sector", key="sp500_sector", placeholder="Information Technology")
+                scope_cols[1].text_input("Industry", key="sp500_industry", placeholder="Semiconductor")
+                st.markdown("**Lookback / History**")
+                history_cols = st.columns(2)
+                history_cols[0].number_input("Lookback Days", min_value=30, max_value=720, key="sp500_lookback_days")
+                history_cols[1].number_input("Min History Samples", min_value=1, max_value=20, key="sp500_min_history_samples")
+                st.markdown("**Model Settings**")
+                llm_cols = st.columns(4)
+                llm_cols[0].text_input("Mode", key="sp500_mode")
+                llm_cols[1].text_input("LLM Provider", key="sp500_llm_provider")
+                llm_cols[2].text_input("LLM Model", key="sp500_llm_model")
+                llm_cols[3].text_input("LLM Style", key="sp500_llm_style")
+                st.checkbox("Compact Response", key="sp500_compact_response")
+                sp500_submit = st.form_submit_button("Run S&P 500 Daily Scan", use_container_width=True, type="primary")
+
+            if sp500_submit:
+                try:
+                    payload = {
+                        "prescan_limit": int(st.session_state["sp500_prescan_limit"]),
+                        "deep_analysis_limit": int(st.session_state["sp500_deep_analysis_limit"]),
+                        "best_setups_count": int(st.session_state["sp500_best_setups_count"]),
+                        "best_trades_today_max": int(st.session_state["sp500_best_trades_max"]),
+                        "next_to_trigger_count": int(st.session_state["sp500_next_to_trigger_count"]),
+                        "lookback_days": int(st.session_state["sp500_lookback_days"]),
+                        "min_history_samples": int(st.session_state["sp500_min_history_samples"]),
+                        "sector": (st.session_state.get("sp500_sector") or "").strip() or None,
+                        "industry": (st.session_state.get("sp500_industry") or "").strip() or None,
+                        "mode": st.session_state["sp500_mode"],
+                        "llm_provider": st.session_state["sp500_llm_provider"],
+                        "llm_model": st.session_state["sp500_llm_model"],
+                        "llm_style": st.session_state["sp500_llm_style"],
+                        "compact_response": bool(st.session_state["sp500_compact_response"]),
+                    }
+                    response = run_sp500_daily_opportunities(payload)
+                    title = "S&P 500 Daily Opportunities"
+                    if payload.get("industry"):
+                        title = f"S&P 500 {payload['industry']}"
+                    elif payload.get("sector"):
+                        title = f"S&P 500 {payload['sector']}"
+                    _store_runner_result("sp500_workflow", response, title=title)
                 except TraderAPIError as exc:
                     st.session_state["runner_last_error"] = str(exc)
 
@@ -622,7 +804,7 @@ with scanner_tab:
                 except TraderAPIError as exc:
                     st.session_state["runner_last_error"] = str(exc)
 
-        st.caption("SP500 is not shown here because the current backend does not expose a supported SP500 workflow route.")
+        st.caption("S&P 500 is the primary daily universe. SP100 routes remain available for backward compatibility.")
 
     with result_col:
         with st.container(border=True):
@@ -644,7 +826,9 @@ with scanner_tab:
                     f'<div class="runner-conclusion">{_runner_result_conclusion(last_result.get("run_type") or "", response)}</div>',
                     unsafe_allow_html=True,
                 )
-                if last_result.get("run_type") == "sp100_workflow":
+                if last_result.get("run_type") == "sp500_workflow":
+                    _render_sp500_workflow_result(response)
+                elif last_result.get("run_type") == "sp100_workflow":
                     _render_runner_workflow_result(response)
                 elif last_result.get("run_type") == "single_stock":
                     row = response.get("row")
@@ -662,14 +846,14 @@ with scanner_tab:
                         render_kpi_card("Learning Samples", int(response.get("learning_samples") or 0), small=True)
                     if response.get("logging_skipped_reason"):
                         st.caption(response.get("logging_skipped_reason"))
-                    st.info("Single-stock runs do not currently update the active watchlist in Supabase. The Active Dashboard reflects the latest persisted watchlist workflow, which is currently the SP100 workflow path.")
+                    st.info("Single-stock runs do not currently update the active watchlist in Supabase. The Active Dashboard reflects the latest persisted SP500 or SP100 watchlist workflow.")
                 elif last_result.get("run_type") == "manual_basket":
                     _render_runner_plan_result(
                         response.get("rows") or [],
                         planned_at=response.get("planned_at"),
                         market_regime=response.get("market_regime"),
                     )
-                    st.info("Manual basket runs do not currently update the active watchlist in Supabase. The Active Dashboard reflects the latest persisted watchlist workflow, which is currently the SP100 workflow path.")
+                    st.info("Manual basket runs do not currently update the active watchlist in Supabase. The Active Dashboard reflects the latest persisted SP500 or SP100 watchlist workflow.")
 
 with bot_tab:
     st.markdown("### Trading Bot")
@@ -942,8 +1126,8 @@ with active_tab:
             if age.days >= 1:
                 st.warning(
                     f"Active watchlist data is stale. Latest persisted watchlist snapshot is from {format_ts(latest_snapshot_updated_at)}. "
-                    "If you ran a workflow today, only SP100 workflow runs currently refresh the active dashboard. "
-                    "If you did run SP100 today, check the API service logs for Supabase persistence warnings."
+                    "SP500 daily-opportunity and SP100 workflow runs refresh the active dashboard. "
+                    "If you ran either today, check the API service logs for Supabase persistence warnings."
                 )
     if live_quote_error:
         st.warning(f"Live quotes are currently unavailable. Active views keep planner levels visible, but Live Price stays N/A. {live_quote_error}")

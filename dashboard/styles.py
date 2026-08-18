@@ -372,6 +372,34 @@ def inject_styles() -> None:
             padding: 0.15rem 0;
         }
 
+        .daily-opportunity-card {
+            min-height: 300px;
+            position: relative;
+        }
+
+        .opportunity-rank {
+            position: absolute;
+            right: 1rem;
+            top: 0.9rem;
+            color: #7dd3fc;
+            font-weight: 800;
+            letter-spacing: 0.04em;
+        }
+
+        .next-trigger-card {
+            min-height: 118px;
+            padding: 0.9rem 1rem;
+            border: 1px solid rgba(96, 165, 250, 0.18);
+            border-radius: 14px;
+            background: linear-gradient(145deg, rgba(15, 23, 42, 0.78), rgba(8, 15, 28, 0.72));
+            transition: transform 160ms ease, border-color 160ms ease;
+        }
+
+        .next-trigger-card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(96, 165, 250, 0.38);
+        }
+
         .runner-result-heading {
             margin-bottom: 0.15rem;
         }
