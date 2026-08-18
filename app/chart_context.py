@@ -16,14 +16,35 @@ import pandas as pd
 
 from .config import DEFAULT_PLANNING_CONFIG, PlanningConfig
 from .indicators import add_indicator_columns
-from .structure import find_pivots
+from .structure import classify_structure_state, find_pivots
 
 
 TIMEFRAME_ALIASES = {
     "daily": ("daily", "day", "1d", "d"),
+    "four_hour": ("four_hour", "4h", "240m", "240min"),
     "hourly": ("hourly", "hour", "1h", "60m", "60min"),
     "thirty_minute": ("thirty_minute", "30m", "30min", "30_minute"),
 }
+
+
+def derive_four_hour_bars(hourly: pd.DataFrame, config: PlanningConfig) -> pd.DataFrame:
+    """Aggregate valid hourly data into four-hour OHLCV bars."""
+
+    if hourly.empty or len(hourly) < config.four_hour_min_hourly_bars or hourly["date"].isna().all():
+        return pd.DataFrame(columns=hourly.columns)
+    ordered = hourly.dropna(subset=["date"]).sort_values("date").copy()
+    gaps = ordered["date"].diff().dropna().dt.total_seconds().div(60.0)
+    positive_gaps = gaps[gaps > 0]
+    if positive_gaps.empty or float(positive_gaps.median()) > config.four_hour_max_median_gap_minutes:
+        return pd.DataFrame(columns=hourly.columns)
+    derived = (
+        ordered.set_index("date")
+        .resample("4h", origin="start_day")
+        .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+        .dropna(subset=["close"])
+        .reset_index()
+    )
+    return derived if len(derived) >= 8 else pd.DataFrame(columns=hourly.columns)
 
 
 def _finite(value: Any, default: float | None = None) -> float | None:
@@ -282,6 +303,16 @@ def _timeframe_context(frame: pd.DataFrame, name: str, config: PlanningConfig) -
     pivot_lookback = min(config.pivot_lookback, max(2, len(data) // 20))
     highs, lows = find_pivots(data, lookback=pivot_lookback, max_points=config.pivot_max_points)
     trend, structure_flags = _structure_label(data, highs, lows)
+    structure_state, rich_legacy_trend, rich_flags, ema_structure = classify_structure_state(
+        data,
+        highs,
+        lows,
+        extended_from_ema20_pct=config.structure_extended_from_ema20_pct,
+        parabolic_from_ema20_pct=config.structure_parabolic_from_ema20_pct,
+        base_max_atr_range=config.structure_base_max_atr_range,
+    )
+    trend = rich_legacy_trend or trend
+    structure_flags = sorted(set(structure_flags + rich_flags))
     local_window = 20 if name != "daily" else config.context_local_range_window
     local_range = _range_metrics(data, local_window)
     one_month = _range_metrics(data, min(21, len(data)))
@@ -297,6 +328,9 @@ def _timeframe_context(frame: pd.DataFrame, name: str, config: PlanningConfig) -
     breakout_failed = float(data["high"].iloc[-1]) > prior_high and price < prior_high - atr * 0.05
 
     ema20 = _finite(data["ema20"].iloc[-1])
+    ema50 = _finite(data["ema50"].iloc[-1])
+    ema100 = _finite(data["ema100"].iloc[-1])
+    ema200 = _finite(data["ema200"].iloc[-1])
     sma50 = _finite(data["sma50"].iloc[-1])
     sma100 = _finite(data["sma100"].iloc[-1])
     sma200 = _finite(data["sma200"].iloc[-1])
@@ -402,6 +436,7 @@ def _timeframe_context(frame: pd.DataFrame, name: str, config: PlanningConfig) -
             "last_bar_time": data["date"].iloc[-1],
             "current_price": price,
             "trend": trend,
+            "structure_state": structure_state,
             "structure_flags": structure_flags,
             "local_high": local_range["high"],
             "local_low": local_range["low"],
@@ -411,7 +446,16 @@ def _timeframe_context(frame: pd.DataFrame, name: str, config: PlanningConfig) -
             "range_position_3m": three_month["position"],
             "distance_to_local_high_pct": local_range["distance_to_high_pct"],
             "distance_to_local_low_pct": local_range["distance_to_low_pct"],
-            "moving_averages": {"ema20": ema20, "sma50": sma50, "sma100": sma100, "sma200": sma200},
+            "moving_averages": {
+                "ema20": ema20,
+                "ema50": ema50,
+                "ema100": ema100,
+                "ema200": ema200,
+                "sma50": sma50,
+                "sma100": sma100,
+                "sma200": sma200,
+            },
+            "ema_structure": ema_structure,
             "price_vs_moving_averages": {
                 "above_ema20": ema20 is not None and price >= ema20,
                 "above_sma50": sma50 is not None and price >= sma50,
@@ -458,15 +502,17 @@ def build_chart_context(
     bars_by_timeframe: Mapping[str, Any] | None = None,
     *,
     daily_bars: Any = None,
+    four_hour_bars: Any = None,
     hourly_bars: Any = None,
     thirty_minute_bars: Any = None,
     daily: Any = None,
+    four_hour: Any = None,
     hourly: Any = None,
     thirty_minute: Any = None,
     current_price: float | None = None,
     config: PlanningConfig | None = None,
 ) -> dict[str, Any]:
-    """Build JSON-serializable daily/1h/30m chart context.
+    """Build JSON-serializable daily/4h/1h/30m chart context.
 
     ``bars_by_timeframe`` accepts aliases such as ``1d``, ``1h`` and ``30m``.
     Explicit keyword inputs take precedence over values in that mapping.
@@ -474,9 +520,18 @@ def build_chart_context(
 
     config = config or DEFAULT_PLANNING_CONFIG
     source = dict(bars_by_timeframe or {})
+    hourly_input = hourly_bars if hourly_bars is not None else hourly if hourly is not None else _extract_timeframe(source, "hourly")
+    normalized_hourly = normalize_ohlcv_bars(hourly_input)
+    explicit_four_hour = four_hour_bars if four_hour_bars is not None else four_hour if four_hour is not None else _extract_timeframe(source, "four_hour")
+    normalized_four_hour = normalize_ohlcv_bars(explicit_four_hour)
+    four_hour_source = "provided"
+    if normalized_four_hour.empty:
+        normalized_four_hour = derive_four_hour_bars(normalized_hourly, config)
+        four_hour_source = "derived_from_hourly" if not normalized_four_hour.empty else "unavailable"
     inputs = {
         "daily": daily_bars if daily_bars is not None else daily if daily is not None else _extract_timeframe(source, "daily"),
-        "hourly": hourly_bars if hourly_bars is not None else hourly if hourly is not None else _extract_timeframe(source, "hourly"),
+        "four_hour": normalized_four_hour,
+        "hourly": normalized_hourly,
         "thirty_minute": thirty_minute_bars if thirty_minute_bars is not None else thirty_minute if thirty_minute is not None else _extract_timeframe(source, "thirty_minute"),
     }
     timeframe_contexts = {
@@ -485,8 +540,8 @@ def build_chart_context(
     }
     available = [name for name, context in timeframe_contexts.items() if context.get("available")]
     missing = [name for name in timeframe_contexts if name not in available]
-    execution_name = next((name for name in ("thirty_minute", "hourly", "daily") if name in available), None)
-    dominant_name = next((name for name in ("daily", "hourly", "thirty_minute") if name in available), None)
+    execution_name = next((name for name in ("thirty_minute", "hourly", "four_hour", "daily") if name in available), None)
+    dominant_name = next((name for name in ("daily", "four_hour", "hourly", "thirty_minute") if name in available), None)
     execution = timeframe_contexts.get(execution_name or "daily", {})
     dominant = timeframe_contexts.get(dominant_name or "daily", {})
 
@@ -527,9 +582,9 @@ def build_chart_context(
     else:
         current_structure = "range_structure"
 
-    nearest_support = _first_zone([execution, timeframe_contexts["hourly"], timeframe_contexts["daily"]], "nearest_support_zone")
-    secondary_support = _first_zone([execution, timeframe_contexts["hourly"], timeframe_contexts["daily"]], "secondary_support_zone")
-    nearest_resistance = _first_zone([execution, timeframe_contexts["hourly"], timeframe_contexts["daily"]], "nearest_resistance_zone")
+    nearest_support = _first_zone([execution, timeframe_contexts["hourly"], timeframe_contexts["four_hour"], timeframe_contexts["daily"]], "nearest_support_zone")
+    secondary_support = _first_zone([execution, timeframe_contexts["hourly"], timeframe_contexts["four_hour"], timeframe_contexts["daily"]], "secondary_support_zone")
+    nearest_resistance = _first_zone([execution, timeframe_contexts["hourly"], timeframe_contexts["four_hour"], timeframe_contexts["daily"]], "nearest_resistance_zone")
     daily_context = timeframe_contexts["daily"]
     major_resistance = daily_context.get("nearest_resistance_zone") or daily_context.get("secondary_resistance_zone") or nearest_resistance
     breakout_trigger = execution.get("breakout_trigger_zone") or nearest_resistance
@@ -552,6 +607,15 @@ def build_chart_context(
         preferred_shape = "no_clean_trade"
 
     major_source = daily_context if daily_context.get("available") else dominant
+    timeframe_weights = {"daily": 0.4, "four_hour": 0.3, "hourly": 0.2, "thirty_minute": 0.1}
+    signed = {"uptrend": 1.0, "pullback_in_uptrend": 0.7, "range": 0.0, "weak_breakdown_risk": -0.65, "downtrend": -1.0}
+    available_weight = sum(timeframe_weights[name] for name in available)
+    weighted_alignment = sum(
+        timeframe_weights[name] * signed.get(str(timeframe_contexts[name].get("trend") or "range"), 0.0)
+        for name in available
+    )
+    alignment_score = 5.0 if available_weight <= 0 else _clip(5.0 + 5.0 * weighted_alignment / available_weight, 0.0, 10.0)
+
     result = {
         "available": True,
         "available_timeframes": available,
@@ -559,6 +623,12 @@ def build_chart_context(
         "execution_timeframe": execution_name,
         "dominant_timeframe": dominant_name,
         "timeframes": timeframe_contexts,
+        "four_hour_source": four_hour_source,
+        "daily_trend": timeframe_contexts["daily"].get("trend") if timeframe_contexts["daily"].get("available") else None,
+        "four_hour_trend": timeframe_contexts["four_hour"].get("trend") if timeframe_contexts["four_hour"].get("available") else None,
+        "one_hour_trend": timeframe_contexts["hourly"].get("trend") if timeframe_contexts["hourly"].get("available") else None,
+        "thirty_minute_trend": timeframe_contexts["thirty_minute"].get("trend") if timeframe_contexts["thirty_minute"].get("available") else None,
+        "multi_timeframe_alignment_score": round(alignment_score, 3),
         "current_price": price,
         "dominant_trend": trend,
         "current_structure": current_structure,
@@ -596,4 +666,3 @@ def build_chart_context(
 # Friendly aliases for callers that use engine-oriented naming.
 analyze_chart_context = build_chart_context
 build_multi_timeframe_context = build_chart_context
-

@@ -40,6 +40,14 @@ class PlanRow:
     risk_tuning_reason: str | None = None
     current_price: float | None = None
     trend_state: str | None = None
+    structure_state: str | None = None
+    enhanced_trend_state: str | None = None
+    ema_structure: dict | None = None
+    universe_suitability: dict | None = None
+    universe_eligible: bool | None = None
+    universe_rejection_reasons: list[str] = field(default_factory=list)
+    average_daily_volume: float | None = None
+    liquidity_score: float | None = None
     range_position_1m: float | None = None
     range_position_3m: float | None = None
     range_position_12m: float | None = None
@@ -59,6 +67,10 @@ class PlanRow:
     breakout_extension_state: str | None = None
     historical_range_context: str | None = None
     price_location_context: str | None = None
+    price_location_score: float | None = None
+    price_location_category: str | None = None
+    price_location_reasons: list[str] = field(default_factory=list)
+    consecutive_green_sessions: int | None = None
     setup_type: str | None = None
     catalyst_signals: list[str] = field(default_factory=list)
     news_directional_bias: str | None = None
@@ -104,8 +116,20 @@ class PlanRow:
     support_zone_2: dict | None = None
     resistance_zone_1: dict | None = None
     resistance_zone_2: dict | None = None
+    support_levels: list[dict] = field(default_factory=list)
+    resistance_levels: list[dict] = field(default_factory=list)
+    nearest_support: float | None = None
+    nearest_resistance: float | None = None
+    major_resistance_cluster: list[dict] = field(default_factory=list)
     atr: float | None = None
     atr_pct: float | None = None
+    atr_percent: float | None = None
+    volatility_regime: str | None = None
+    volatility_suitability_score: float | None = None
+    ema20: float | None = None
+    ema50: float | None = None
+    ema100: float | None = None
+    ema200: float | None = None
     fib_levels: dict | None = None
     moving_averages: dict | None = None
     volume_context: dict | None = None
@@ -119,7 +143,23 @@ class PlanRow:
     entry_confluence_score: float | None = None
     entry_requires_confirmation: bool | None = None
     confirmation_trigger: str | None = None
+    preferred_entry_low: float | None = None
+    preferred_entry_high: float | None = None
+    confirmation_trigger_price: float | None = None
+    confirmation_reason: str | None = None
+    confirmation_state: str | None = None
+    entry_status: str | None = None
+    confirmation_required: bool | None = None
+    price_confirmed: bool | None = None
+    volume_confirmed: bool | None = None
+    confirmation_score: float | None = None
     stop_loss: float | None = None
+    suggested_stop: float | None = None
+    invalidation_level: float | None = None
+    invalidation_reason: str | None = None
+    invalidation_width_pct: float | None = None
+    invalidation_width_atr: float | None = None
+    executable_stop_technically_valid: bool | None = None
     stop_basis: str | None = None
     stop_distance_pct: float | None = None
     stop_width_pct: float | None = None
@@ -127,13 +167,23 @@ class PlanRow:
     stop_too_tight_flag: bool | None = None
     take_profit_1: float | None = None
     take_profit_2: float | None = None
+    take_profit_3: float | None = None
+    stretch_target: float | None = None
     take_profit_final: float | None = None
     tp1_distance_pct: float | None = None
     tp1_distance_atr: float | None = None
+    tp1_atr_distance: float | None = None
+    tp2_atr_distance: float | None = None
+    tp3_atr_distance: float | None = None
+    tp1_reason: str | None = None
+    tp2_reason: str | None = None
+    tp3_reason: str | None = None
+    stretch_target_reason: str | None = None
     tp_basis: str | None = None
     reward_risk: dict | None = None
     tp_too_optimistic_flag: bool | None = None
     hold_window_reachability_score: float | None = None
+    target_realism_score: float | None = None
     swing_realism_flag: str | None = None
     risk_width_flag: str | None = None
     target_reachability_flag: str | None = None
@@ -141,9 +191,12 @@ class PlanRow:
     stop_generation_reason: str | None = None
     tp1_generation_reason: str | None = None
     max_hold_days: int | None = None
+    expected_hold_days: int | None = None
     trend_quality_score: float | None = None
+    trend_score: float | None = None
     pullback_quality_score: float | None = None
     support_quality_score: float | None = None
+    support_confluence_score: float | None = None
     volatility_quality_score: float | None = None
     relative_strength_score: float | None = None
     volume_confirmation_score: float | None = None
@@ -156,6 +209,8 @@ class PlanRow:
     macro_score: float | None = None
     scenario_score: float | None = None
     composite_score: float | None = None
+    component_scores: dict | None = None
+    setup_downgrade_reasons: list[str] = field(default_factory=list)
     llm_review: dict | None = None
     quant_action: str | None = None
     reconciled_action: str | None = None
@@ -216,6 +271,11 @@ class PlanRow:
     gap_zone: dict | None = None
     recent_swing_highs: list[dict] = field(default_factory=list)
     recent_swing_lows: list[dict] = field(default_factory=list)
+    daily_trend: str | None = None
+    four_hour_trend: str | None = None
+    one_hour_trend: str | None = None
+    thirty_minute_trend: str | None = None
+    multi_timeframe_alignment_score: float | None = None
 
 
 # Static S&P 100-like liquid large-cap universe for API-side scanning.
@@ -1245,6 +1305,14 @@ def build_swing_plan(
                 risk_tuning_reason=structured["risk_tuning_reason"],
                 current_price=structured["current_price"],
                 trend_state=structured["trend_state"],
+                structure_state=structured.get("structure_state"),
+                enhanced_trend_state=structured.get("enhanced_trend_state"),
+                ema_structure=structured.get("ema_structure"),
+                universe_suitability=structured.get("universe_suitability"),
+                universe_eligible=structured.get("universe_eligible"),
+                universe_rejection_reasons=list(structured.get("universe_rejection_reasons") or []),
+                average_daily_volume=structured.get("average_daily_volume"),
+                liquidity_score=structured.get("liquidity_score"),
                 range_position_1m=structured.get("range_position_1m"),
                 range_position_3m=structured.get("range_position_3m"),
                 range_position_12m=structured.get("range_position_12m"),
@@ -1264,6 +1332,10 @@ def build_swing_plan(
                 breakout_extension_state=structured.get("breakout_extension_state"),
                 historical_range_context=structured.get("historical_range_context"),
                 price_location_context=structured.get("price_location_context"),
+                price_location_score=structured.get("price_location_score"),
+                price_location_category=structured.get("price_location_category"),
+                price_location_reasons=list(structured.get("price_location_reasons") or []),
+                consecutive_green_sessions=structured.get("consecutive_green_sessions"),
                 setup_type=structured.get("setup_type"),
                 catalyst_signals=list(structured.get("catalyst_signals") or []),
                 news_directional_bias=structured.get("news_directional_bias"),
@@ -1309,8 +1381,20 @@ def build_swing_plan(
                 support_zone_2=structured["support_zone_2"],
                 resistance_zone_1=structured["resistance_zone_1"],
                 resistance_zone_2=structured["resistance_zone_2"],
+                support_levels=list(structured.get("support_levels") or []),
+                resistance_levels=list(structured.get("resistance_levels") or []),
+                nearest_support=structured.get("nearest_support"),
+                nearest_resistance=structured.get("nearest_resistance"),
+                major_resistance_cluster=list(structured.get("major_resistance_cluster") or []),
                 atr=structured["atr"],
                 atr_pct=structured["atr_pct"],
+                atr_percent=structured.get("atr_percent"),
+                volatility_regime=structured.get("volatility_regime"),
+                volatility_suitability_score=structured.get("volatility_suitability_score"),
+                ema20=structured.get("ema20"),
+                ema50=structured.get("ema50"),
+                ema100=structured.get("ema100"),
+                ema200=structured.get("ema200"),
                 fib_levels=structured["fib_levels"],
                 moving_averages=structured["moving_averages"],
                 volume_context=structured["volume_context"],
@@ -1324,7 +1408,23 @@ def build_swing_plan(
                 entry_confluence_score=structured["entry_confluence_score"],
                 entry_requires_confirmation=structured["entry_requires_confirmation"],
                 confirmation_trigger=structured["confirmation_trigger"],
+                preferred_entry_low=structured.get("preferred_entry_low"),
+                preferred_entry_high=structured.get("preferred_entry_high"),
+                confirmation_trigger_price=structured.get("confirmation_trigger_price"),
+                confirmation_reason=structured.get("confirmation_reason"),
+                confirmation_state=structured.get("confirmation_state"),
+                entry_status=structured.get("entry_status"),
+                confirmation_required=structured.get("confirmation_required"),
+                price_confirmed=structured.get("price_confirmed"),
+                volume_confirmed=structured.get("volume_confirmed"),
+                confirmation_score=structured.get("confirmation_score"),
                 stop_loss=structured["stop_loss"],
+                suggested_stop=structured.get("suggested_stop"),
+                invalidation_level=structured.get("invalidation_level"),
+                invalidation_reason=structured.get("invalidation_reason"),
+                invalidation_width_pct=structured.get("invalidation_width_pct"),
+                invalidation_width_atr=structured.get("invalidation_width_atr"),
+                executable_stop_technically_valid=structured.get("executable_stop_technically_valid"),
                 stop_basis=structured["stop_basis"],
                 stop_distance_pct=structured["stop_distance_pct"],
                 stop_width_pct=structured["stop_width_pct"],
@@ -1332,13 +1432,23 @@ def build_swing_plan(
                 stop_too_tight_flag=structured["stop_too_tight_flag"],
                 take_profit_1=structured["take_profit_1"],
                 take_profit_2=structured["take_profit_2"],
+                take_profit_3=structured.get("take_profit_3"),
+                stretch_target=structured.get("stretch_target"),
                 take_profit_final=structured["take_profit_final"],
                 tp1_distance_pct=structured["tp1_distance_pct"],
                 tp1_distance_atr=structured["tp1_distance_atr"],
+                tp1_atr_distance=structured.get("tp1_atr_distance"),
+                tp2_atr_distance=structured.get("tp2_atr_distance"),
+                tp3_atr_distance=structured.get("tp3_atr_distance"),
+                tp1_reason=structured.get("tp1_reason"),
+                tp2_reason=structured.get("tp2_reason"),
+                tp3_reason=structured.get("tp3_reason"),
+                stretch_target_reason=structured.get("stretch_target_reason"),
                 tp_basis=structured["tp_basis"],
                 reward_risk=structured["reward_risk"],
                 tp_too_optimistic_flag=structured["tp_too_optimistic_flag"],
                 hold_window_reachability_score=structured["hold_window_reachability_score"],
+                target_realism_score=structured.get("target_realism_score"),
                 swing_realism_flag=structured["swing_realism_flag"],
                 risk_width_flag=structured["risk_width_flag"],
                 target_reachability_flag=structured["target_reachability_flag"],
@@ -1346,9 +1456,12 @@ def build_swing_plan(
                 stop_generation_reason=structured["stop_generation_reason"],
                 tp1_generation_reason=structured["tp1_generation_reason"],
                 max_hold_days=structured["max_hold_days"],
+                expected_hold_days=structured.get("expected_hold_days"),
                 trend_quality_score=structured["trend_quality_score"],
+                trend_score=structured.get("trend_score"),
                 pullback_quality_score=structured["pullback_quality_score"],
                 support_quality_score=structured["support_quality_score"],
+                support_confluence_score=structured.get("support_confluence_score"),
                 volatility_quality_score=structured["volatility_quality_score"],
                 relative_strength_score=structured["relative_strength_score"],
                 volume_confirmation_score=structured["volume_confirmation_score"],
@@ -1361,6 +1474,8 @@ def build_swing_plan(
                 macro_score=structured.get("macro_score"),
                 scenario_score=structured.get("scenario_score"),
                 composite_score=structured["composite_score"],
+                component_scores=structured.get("component_scores"),
+                setup_downgrade_reasons=list(structured.get("setup_downgrade_reasons") or []),
                 llm_review=structured["llm_review"],
                 pre_scan_score=pre_scan.get("pre_scan_score"),
                 pre_scan_reason_tags=list(pre_scan.get("pre_scan_reason_tags") or []),
@@ -1374,6 +1489,11 @@ def build_swing_plan(
                 gap_zone=structured["gap_zone"],
                 recent_swing_highs=structured["recent_swing_highs"],
                 recent_swing_lows=structured["recent_swing_lows"],
+                daily_trend=structured.get("daily_trend"),
+                four_hour_trend=structured.get("four_hour_trend"),
+                one_hour_trend=structured.get("one_hour_trend"),
+                thirty_minute_trend=structured.get("thirty_minute_trend"),
+                multi_timeframe_alignment_score=structured.get("multi_timeframe_alignment_score"),
             )
         )
 

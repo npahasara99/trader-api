@@ -5,6 +5,13 @@ from dataclasses import dataclass, field
 class PlanningConfig:
     """Centralized tunables for structured swing planning."""
 
+    min_price: float = 20.0
+    min_avg_daily_volume: float = 1_000_000.0
+    min_history_bars: int = 200
+    atr_pct_too_slow: float = 1.0
+    atr_pct_preferred_min: float = 1.5
+    atr_pct_preferred_max: float = 4.5
+    atr_pct_high_risk_max: float = 6.0
     history_lookback_days: int = 320
     pivot_lookback: int = 4
     pivot_max_points: int = 6
@@ -26,8 +33,8 @@ class PlanningConfig:
     stop_below_zone_buffer_pct: float = 0.004
     tp1_atr_mult: float = 1.6
     tp2_atr_mult: float = 3.0
-    max_hold_days_min: int = 5
-    max_hold_days_max: int = 30
+    max_hold_days_min: int = 2
+    max_hold_days_max: int = 10
     max_stop_width_pct_default: float = 0.12
     max_stop_width_pct_repair: float = 0.18
     max_stop_width_atr_default: float = 3.8
@@ -36,7 +43,18 @@ class PlanningConfig:
     max_tp1_distance_pct_repair: float = 0.22
     max_tp1_distance_atr_default: float = 5.5
     max_tp1_distance_atr_repair: float = 7.0
-    hold_window_reachability_factor: float = 0.85
+    hold_window_reachability_factor: float = 1.35
+    structure_extended_from_ema20_pct: float = 0.08
+    structure_parabolic_from_ema20_pct: float = 0.12
+    structure_base_max_atr_range: float = 3.2
+    price_location_near_support_atr: float = 0.8
+    price_location_near_resistance_atr: float = 0.65
+    confirmation_trigger_buffer_atr: float = 0.05
+    confirmation_entry_zone_atr: float = 0.35
+    confirmation_missed_atr: float = 1.25
+    confirmation_missed_pct: float = 0.035
+    four_hour_min_hourly_bars: int = 32
+    four_hour_max_median_gap_minutes: float = 90.0
     earnings_penalty_near_days: int = 7
     earnings_penalty_mid_days: int = 14
     earnings_hard_block_days: int = 3
@@ -181,6 +199,10 @@ class PlanningConfig:
             "catalyst_score": 0.7,
             "macro_score": 0.65,
             "scenario_score": 0.8,
+            "liquidity": 0.55,
+            "price_location": 1.2,
+            "target_realism": 0.8,
+            "confirmation": 0.9,
         }
     )
 

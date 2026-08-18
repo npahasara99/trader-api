@@ -15,6 +15,7 @@ class PivotPoint:
 @dataclass
 class StructureSummary:
     trend_state: str
+    structure_state: str
     swing_highs: list[PivotPoint]
     swing_lows: list[PivotPoint]
     breakout_level: float | None
@@ -22,6 +23,7 @@ class StructureSummary:
     consolidation_range: dict | None
     gap_zone: dict | None
     structure_flags: list[str]
+    ema_structure: dict
 
 
 def find_pivots(frame: pd.DataFrame, *, lookback: int = 4, max_points: int = 6) -> tuple[list[PivotPoint], list[PivotPoint]]:
@@ -47,43 +49,118 @@ def find_pivots(frame: pd.DataFrame, *, lookback: int = 4, max_points: int = 6) 
     return highs[-max_points:], lows[-max_points:]
 
 
-def _classify_trend(frame: pd.DataFrame, swing_highs: list[PivotPoint], swing_lows: list[PivotPoint]) -> tuple[str, list[str]]:
+def classify_structure_state(
+    frame: pd.DataFrame,
+    swing_highs: list[PivotPoint],
+    swing_lows: list[PivotPoint],
+    *,
+    extended_from_ema20_pct: float = 0.08,
+    parabolic_from_ema20_pct: float = 0.12,
+    base_max_atr_range: float = 3.2,
+) -> tuple[str, str, list[str], dict]:
+    """Return a rich structure state plus the backward-compatible trend state."""
+
     flags: list[str] = []
     if frame.empty:
-        return "range", flags
+        return "range", "range", flags, {}
 
     close = float(frame["close"].iloc[-1])
-    ema20 = frame["ema20"].iloc[-1] if "ema20" in frame.columns else None
-    sma50 = frame["sma50"].iloc[-1] if "sma50" in frame.columns else None
-    sma200 = frame["sma200"].iloc[-1] if "sma200" in frame.columns else None
+    def _value(column: str) -> float | None:
+        if column not in frame.columns or pd.isna(frame[column].iloc[-1]):
+            return None
+        return float(frame[column].iloc[-1])
+
+    ema20 = _value("ema20")
+    ema50 = _value("ema50") or _value("sma50")
+    ema100 = _value("ema100") or _value("sma100")
+    ema200 = _value("ema200") or _value("sma200")
+    atr_val = _value("atr") or max(close * 0.01, 0.01)
+    volume_ratio = _value("volume_ratio") or 1.0
+
+    slopes = {
+        period: (_value(f"ema{period}_slope_pct") or 0.0)
+        for period in (20, 50, 100, 200)
+    }
+    ema_values = [ema20, ema50, ema100, ema200]
+    available_emas = [value for value in ema_values if value is not None]
+    above_count = sum(1 for value in available_emas if close >= value)
+    below_count = len(available_emas) - above_count
+    bullish_stack = all(value is not None for value in ema_values) and bool(ema20 >= ema50 >= ema100 >= ema200)
+    bearish_stack = all(value is not None for value in ema_values) and bool(ema20 <= ema50 <= ema100 <= ema200)
+    distance_ema20 = ((close - ema20) / max(ema20, 1e-9)) if ema20 is not None else 0.0
 
     higher_highs = len(swing_highs) >= 2 and swing_highs[-1].price > swing_highs[-2].price
     higher_lows = len(swing_lows) >= 2 and swing_lows[-1].price > swing_lows[-2].price
     lower_highs = len(swing_highs) >= 2 and swing_highs[-1].price < swing_highs[-2].price
     lower_lows = len(swing_lows) >= 2 and swing_lows[-1].price < swing_lows[-2].price
 
-    if higher_highs and higher_lows and ema20 is not None and sma50 is not None and close >= ema20 >= sma50:
+    if higher_highs:
         flags.append("higher_highs")
+    if higher_lows:
         flags.append("higher_lows")
-        return "uptrend", flags
-
-    if ema20 is not None and sma50 is not None and close >= sma50 and lower_lows is False and len(swing_lows) >= 1:
-        last_low = swing_lows[-1].price
-        if close <= max(float(ema20), float(sma50)) * 1.02 and close >= last_low:
-            flags.append("pullback_near_support")
-            return "pullback_in_uptrend", flags
-
-    if lower_highs and lower_lows and sma50 is not None and sma200 is not None and close < sma50 <= sma200:
+    if lower_highs:
         flags.append("lower_highs")
+    if lower_lows:
         flags.append("lower_lows")
-        return "downtrend", flags
+    if bullish_stack:
+        flags.append("bullish_ema_stack")
+    if bearish_stack:
+        flags.append("bearish_ema_stack")
 
-    if lower_lows or (sma50 is not None and close < sma50 and ema20 is not None and close < ema20):
-        flags.append("breakdown_risk")
-        return "weak_breakdown_risk", flags
+    prior_high = float(frame["high"].iloc[-21:-1].max()) if len(frame) >= 22 else None
+    breakout = prior_high is not None and close > prior_high and distance_ema20 <= parabolic_from_ema20_pct
+    recent = frame.tail(min(20, len(frame)))
+    base_range_atr = (float(recent["high"].max()) - float(recent["low"].min())) / max(atr_val, 1e-9)
+    base_building = base_range_atr <= base_max_atr_range and abs(slopes[20]) <= 0.012
+    heavy_selloff = volume_ratio >= 1.25 and len(frame) >= 2 and close < float(frame["close"].iloc[-2])
+    recent_reclaim = (
+        ema20 is not None
+        and len(frame) >= 2
+        and float(frame["close"].iloc[-2]) < float(frame["ema20"].iloc[-2])
+        and close >= ema20
+    )
 
-    flags.append("range_bound")
-    return "range", flags
+    if distance_ema20 >= parabolic_from_ema20_pct or (
+        distance_ema20 >= extended_from_ema20_pct and above_count >= 3
+    ):
+        state, legacy = "extended", "uptrend"
+        flags.append("extended_from_ema20")
+    elif breakout and (bullish_stack or slopes[20] > 0):
+        state, legacy = "breakout", "uptrend"
+        flags.append("breakout_above_recent_high")
+    elif below_count == len(available_emas) and heavy_selloff and slopes[20] < 0:
+        state, legacy = "structural_breakdown", "downtrend"
+        flags.extend(["below_all_major_emas", "heavy_selloff"])
+    elif below_count >= 3 and (lower_lows or slopes[20] < -0.01):
+        state, legacy = "trend_damage", "weak_breakdown_risk"
+        flags.append("below_multiple_major_emas")
+    elif below_count >= 2 and recent_reclaim:
+        state, legacy = "reversal_attempt", "weak_breakdown_risk"
+        flags.append("short_term_reclaim")
+    elif bullish_stack and ema50 is not None and close >= ema50 and distance_ema20 <= 0.035 and not lower_lows:
+        state, legacy = "healthy_pullback", "pullback_in_uptrend"
+        flags.append("pullback_near_rising_ema_support")
+    elif ema200 is not None and close >= ema200 and ema100 is not None and slopes[100] >= -0.005 and close < (ema50 or close + 1):
+        state, legacy = "deep_pullback", "pullback_in_uptrend"
+        flags.append("deep_pullback_above_long_term_support")
+    elif base_building:
+        state, legacy = "base_building", "range"
+        flags.append("compressed_base")
+    elif lower_highs and lower_lows:
+        state, legacy = "structural_breakdown", "downtrend"
+    else:
+        state, legacy = "range", "range"
+        flags.append("range_bound")
+
+    ema_structure = {
+        "bullish_stack": bool(bullish_stack),
+        "bearish_stack": bool(bearish_stack),
+        "above_ema_count": int(above_count),
+        "below_ema_count": int(below_count),
+        "distance_from_ema20_pct": round(distance_ema20 * 100.0, 4),
+        "slopes_pct_5bar": {f"ema{period}": round(slopes[period] * 100.0, 4) for period in slopes},
+    }
+    return state, legacy, flags, ema_structure
 
 
 def detect_consolidation(frame: pd.DataFrame, *, window: int, atr_mult: float) -> dict | None:
@@ -129,9 +206,26 @@ def detect_gap_zone(frame: pd.DataFrame) -> dict | None:
     return best_gap
 
 
-def summarize_structure(frame: pd.DataFrame, *, pivot_lookback: int, pivot_max_points: int, consolidation_window: int, consolidation_range_atr_mult: float) -> StructureSummary:
+def summarize_structure(
+    frame: pd.DataFrame,
+    *,
+    pivot_lookback: int,
+    pivot_max_points: int,
+    consolidation_window: int,
+    consolidation_range_atr_mult: float,
+    extended_from_ema20_pct: float = 0.08,
+    parabolic_from_ema20_pct: float = 0.12,
+    base_max_atr_range: float = 3.2,
+) -> StructureSummary:
     highs, lows = find_pivots(frame, lookback=pivot_lookback, max_points=pivot_max_points)
-    trend_state, flags = _classify_trend(frame, highs, lows)
+    structure_state, trend_state, flags, ema_structure = classify_structure_state(
+        frame,
+        highs,
+        lows,
+        extended_from_ema20_pct=extended_from_ema20_pct,
+        parabolic_from_ema20_pct=parabolic_from_ema20_pct,
+        base_max_atr_range=base_max_atr_range,
+    )
 
     breakout_level = highs[-1].price if highs else None
     prior_breakout_retest_zone = None
@@ -155,6 +249,7 @@ def summarize_structure(frame: pd.DataFrame, *, pivot_lookback: int, pivot_max_p
 
     return StructureSummary(
         trend_state=trend_state,
+        structure_state=structure_state,
         swing_highs=highs,
         swing_lows=lows,
         breakout_level=(float(breakout_level) if breakout_level is not None else None),
@@ -162,4 +257,5 @@ def summarize_structure(frame: pd.DataFrame, *, pivot_lookback: int, pivot_max_p
         consolidation_range=consolidation,
         gap_zone=gap_zone,
         structure_flags=flags,
+        ema_structure=ema_structure,
     )

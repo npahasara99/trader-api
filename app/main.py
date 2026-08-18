@@ -247,6 +247,14 @@ class PlanRowOut(BaseModel):
     risk_tuning_reason: Optional[str] = None
     current_price: Optional[float] = None
     trend_state: Optional[str] = None
+    structure_state: Optional[str] = None
+    enhanced_trend_state: Optional[str] = None
+    ema_structure: Optional[dict] = None
+    universe_suitability: Optional[dict] = None
+    universe_eligible: Optional[bool] = None
+    universe_rejection_reasons: List[str] = Field(default_factory=list)
+    average_daily_volume: Optional[float] = None
+    liquidity_score: Optional[float] = None
     range_position_1m: Optional[float] = None
     range_position_3m: Optional[float] = None
     range_position_12m: Optional[float] = None
@@ -266,6 +274,10 @@ class PlanRowOut(BaseModel):
     breakout_extension_state: Optional[str] = None
     historical_range_context: Optional[str] = None
     price_location_context: Optional[str] = None
+    price_location_score: Optional[float] = None
+    price_location_category: Optional[str] = None
+    price_location_reasons: List[str] = Field(default_factory=list)
+    consecutive_green_sessions: Optional[int] = None
     setup_type: Optional[str] = None
     catalyst_signals: List[str] = Field(default_factory=list)
     news_directional_bias: Optional[str] = None
@@ -311,8 +323,20 @@ class PlanRowOut(BaseModel):
     support_zone_2: Optional[dict] = None
     resistance_zone_1: Optional[dict] = None
     resistance_zone_2: Optional[dict] = None
+    support_levels: List[dict] = Field(default_factory=list)
+    resistance_levels: List[dict] = Field(default_factory=list)
+    nearest_support: Optional[float] = None
+    nearest_resistance: Optional[float] = None
+    major_resistance_cluster: List[dict] = Field(default_factory=list)
     atr: Optional[float] = None
     atr_pct: Optional[float] = None
+    atr_percent: Optional[float] = None
+    volatility_regime: Optional[str] = None
+    volatility_suitability_score: Optional[float] = None
+    ema20: Optional[float] = None
+    ema50: Optional[float] = None
+    ema100: Optional[float] = None
+    ema200: Optional[float] = None
     fib_levels: Optional[dict] = None
     moving_averages: Optional[dict] = None
     volume_context: Optional[dict] = None
@@ -326,7 +350,23 @@ class PlanRowOut(BaseModel):
     entry_confluence_score: Optional[float] = None
     entry_requires_confirmation: Optional[bool] = None
     confirmation_trigger: Optional[str] = None
+    preferred_entry_low: Optional[float] = None
+    preferred_entry_high: Optional[float] = None
+    confirmation_trigger_price: Optional[float] = None
+    confirmation_reason: Optional[str] = None
+    confirmation_state: Optional[str] = None
+    entry_status: Optional[str] = None
+    confirmation_required: Optional[bool] = None
+    price_confirmed: Optional[bool] = None
+    volume_confirmed: Optional[bool] = None
+    confirmation_score: Optional[float] = None
     stop_loss: Optional[float] = None
+    suggested_stop: Optional[float] = None
+    invalidation_level: Optional[float] = None
+    invalidation_reason: Optional[str] = None
+    invalidation_width_pct: Optional[float] = None
+    invalidation_width_atr: Optional[float] = None
+    executable_stop_technically_valid: Optional[bool] = None
     stop_basis: Optional[str] = None
     stop_distance_pct: Optional[float] = None
     stop_width_pct: Optional[float] = None
@@ -334,13 +374,23 @@ class PlanRowOut(BaseModel):
     stop_too_tight_flag: Optional[bool] = None
     take_profit_1: Optional[float] = None
     take_profit_2: Optional[float] = None
+    take_profit_3: Optional[float] = None
+    stretch_target: Optional[float] = None
     take_profit_final: Optional[float] = None
     tp1_distance_pct: Optional[float] = None
     tp1_distance_atr: Optional[float] = None
+    tp1_atr_distance: Optional[float] = None
+    tp2_atr_distance: Optional[float] = None
+    tp3_atr_distance: Optional[float] = None
+    tp1_reason: Optional[str] = None
+    tp2_reason: Optional[str] = None
+    tp3_reason: Optional[str] = None
+    stretch_target_reason: Optional[str] = None
     tp_basis: Optional[str] = None
     reward_risk: Optional[dict] = None
     tp_too_optimistic_flag: Optional[bool] = None
     hold_window_reachability_score: Optional[float] = None
+    target_realism_score: Optional[float] = None
     swing_realism_flag: Optional[str] = None
     risk_width_flag: Optional[str] = None
     target_reachability_flag: Optional[str] = None
@@ -348,9 +398,12 @@ class PlanRowOut(BaseModel):
     stop_generation_reason: Optional[str] = None
     tp1_generation_reason: Optional[str] = None
     max_hold_days: Optional[int] = None
+    expected_hold_days: Optional[int] = None
     trend_quality_score: Optional[float] = None
+    trend_score: Optional[float] = None
     pullback_quality_score: Optional[float] = None
     support_quality_score: Optional[float] = None
+    support_confluence_score: Optional[float] = None
     volatility_quality_score: Optional[float] = None
     relative_strength_score: Optional[float] = None
     volume_confirmation_score: Optional[float] = None
@@ -363,6 +416,8 @@ class PlanRowOut(BaseModel):
     macro_score: Optional[float] = None
     scenario_score: Optional[float] = None
     composite_score: Optional[float] = None
+    component_scores: Optional[dict] = None
+    setup_downgrade_reasons: List[str] = Field(default_factory=list)
     llm_review: Optional[dict] = None
     quant_action: Optional[str] = None
     reconciled_action: Optional[str] = None
@@ -423,6 +478,11 @@ class PlanRowOut(BaseModel):
     gap_zone: Optional[dict] = None
     recent_swing_highs: List[dict] = Field(default_factory=list)
     recent_swing_lows: List[dict] = Field(default_factory=list)
+    daily_trend: Optional[str] = None
+    four_hour_trend: Optional[str] = None
+    one_hour_trend: Optional[str] = None
+    thirty_minute_trend: Optional[str] = None
+    multi_timeframe_alignment_score: Optional[float] = None
 
     llm_action: Optional[str] = None
     llm_rationale: Optional[str] = None
@@ -640,6 +700,14 @@ def _to_plan_row_out(r) -> PlanRowOut:
         risk_tuning_reason=getattr(r, "risk_tuning_reason", None),
         current_price=getattr(r, "current_price", None),
         trend_state=getattr(r, "trend_state", None),
+        structure_state=getattr(r, "structure_state", None),
+        enhanced_trend_state=getattr(r, "enhanced_trend_state", None),
+        ema_structure=getattr(r, "ema_structure", None),
+        universe_suitability=getattr(r, "universe_suitability", None),
+        universe_eligible=getattr(r, "universe_eligible", None),
+        universe_rejection_reasons=list(getattr(r, "universe_rejection_reasons", []) or []),
+        average_daily_volume=getattr(r, "average_daily_volume", None),
+        liquidity_score=getattr(r, "liquidity_score", None),
         range_position_1m=getattr(r, "range_position_1m", None),
         range_position_3m=getattr(r, "range_position_3m", None),
         range_position_12m=getattr(r, "range_position_12m", None),
@@ -659,6 +727,10 @@ def _to_plan_row_out(r) -> PlanRowOut:
         breakout_extension_state=getattr(r, "breakout_extension_state", None),
         historical_range_context=getattr(r, "historical_range_context", None),
         price_location_context=getattr(r, "price_location_context", None),
+        price_location_score=getattr(r, "price_location_score", None),
+        price_location_category=getattr(r, "price_location_category", None),
+        price_location_reasons=list(getattr(r, "price_location_reasons", []) or []),
+        consecutive_green_sessions=getattr(r, "consecutive_green_sessions", None),
         setup_type=getattr(r, "setup_type", None),
         catalyst_signals=list(getattr(r, "catalyst_signals", []) or []),
         news_directional_bias=getattr(r, "news_directional_bias", None),
@@ -704,8 +776,20 @@ def _to_plan_row_out(r) -> PlanRowOut:
         support_zone_2=getattr(r, "support_zone_2", None),
         resistance_zone_1=getattr(r, "resistance_zone_1", None),
         resistance_zone_2=getattr(r, "resistance_zone_2", None),
+        support_levels=list(getattr(r, "support_levels", []) or []),
+        resistance_levels=list(getattr(r, "resistance_levels", []) or []),
+        nearest_support=getattr(r, "nearest_support", None),
+        nearest_resistance=getattr(r, "nearest_resistance", None),
+        major_resistance_cluster=list(getattr(r, "major_resistance_cluster", []) or []),
         atr=getattr(r, "atr", None),
         atr_pct=getattr(r, "atr_pct", None),
+        atr_percent=getattr(r, "atr_percent", None),
+        volatility_regime=getattr(r, "volatility_regime", None),
+        volatility_suitability_score=getattr(r, "volatility_suitability_score", None),
+        ema20=getattr(r, "ema20", None),
+        ema50=getattr(r, "ema50", None),
+        ema100=getattr(r, "ema100", None),
+        ema200=getattr(r, "ema200", None),
         fib_levels=getattr(r, "fib_levels", None),
         moving_averages=getattr(r, "moving_averages", None),
         volume_context=getattr(r, "volume_context", None),
@@ -719,7 +803,23 @@ def _to_plan_row_out(r) -> PlanRowOut:
         entry_confluence_score=getattr(r, "entry_confluence_score", None),
         entry_requires_confirmation=getattr(r, "entry_requires_confirmation", None),
         confirmation_trigger=getattr(r, "confirmation_trigger", None),
+        preferred_entry_low=getattr(r, "preferred_entry_low", None),
+        preferred_entry_high=getattr(r, "preferred_entry_high", None),
+        confirmation_trigger_price=getattr(r, "confirmation_trigger_price", None),
+        confirmation_reason=getattr(r, "confirmation_reason", None),
+        confirmation_state=getattr(r, "confirmation_state", None),
+        entry_status=getattr(r, "entry_status", None),
+        confirmation_required=getattr(r, "confirmation_required", None),
+        price_confirmed=getattr(r, "price_confirmed", None),
+        volume_confirmed=getattr(r, "volume_confirmed", None),
+        confirmation_score=getattr(r, "confirmation_score", None),
         stop_loss=getattr(r, "stop_loss", None),
+        suggested_stop=getattr(r, "suggested_stop", None),
+        invalidation_level=getattr(r, "invalidation_level", None),
+        invalidation_reason=getattr(r, "invalidation_reason", None),
+        invalidation_width_pct=getattr(r, "invalidation_width_pct", None),
+        invalidation_width_atr=getattr(r, "invalidation_width_atr", None),
+        executable_stop_technically_valid=getattr(r, "executable_stop_technically_valid", None),
         stop_basis=getattr(r, "stop_basis", None),
         stop_distance_pct=getattr(r, "stop_distance_pct", None),
         stop_width_pct=getattr(r, "stop_width_pct", None),
@@ -727,13 +827,23 @@ def _to_plan_row_out(r) -> PlanRowOut:
         stop_too_tight_flag=getattr(r, "stop_too_tight_flag", None),
         take_profit_1=getattr(r, "take_profit_1", None),
         take_profit_2=getattr(r, "take_profit_2", None),
+        take_profit_3=getattr(r, "take_profit_3", None),
+        stretch_target=getattr(r, "stretch_target", None),
         take_profit_final=getattr(r, "take_profit_final", None),
         tp1_distance_pct=getattr(r, "tp1_distance_pct", None),
         tp1_distance_atr=getattr(r, "tp1_distance_atr", None),
+        tp1_atr_distance=getattr(r, "tp1_atr_distance", None),
+        tp2_atr_distance=getattr(r, "tp2_atr_distance", None),
+        tp3_atr_distance=getattr(r, "tp3_atr_distance", None),
+        tp1_reason=getattr(r, "tp1_reason", None),
+        tp2_reason=getattr(r, "tp2_reason", None),
+        tp3_reason=getattr(r, "tp3_reason", None),
+        stretch_target_reason=getattr(r, "stretch_target_reason", None),
         tp_basis=getattr(r, "tp_basis", None),
         reward_risk=getattr(r, "reward_risk", None),
         tp_too_optimistic_flag=getattr(r, "tp_too_optimistic_flag", None),
         hold_window_reachability_score=getattr(r, "hold_window_reachability_score", None),
+        target_realism_score=getattr(r, "target_realism_score", None),
         swing_realism_flag=getattr(r, "swing_realism_flag", None),
         risk_width_flag=getattr(r, "risk_width_flag", None),
         target_reachability_flag=getattr(r, "target_reachability_flag", None),
@@ -741,9 +851,12 @@ def _to_plan_row_out(r) -> PlanRowOut:
         stop_generation_reason=getattr(r, "stop_generation_reason", None),
         tp1_generation_reason=getattr(r, "tp1_generation_reason", None),
         max_hold_days=getattr(r, "max_hold_days", None),
+        expected_hold_days=getattr(r, "expected_hold_days", None),
         trend_quality_score=getattr(r, "trend_quality_score", None),
+        trend_score=getattr(r, "trend_score", None),
         pullback_quality_score=getattr(r, "pullback_quality_score", None),
         support_quality_score=getattr(r, "support_quality_score", None),
+        support_confluence_score=getattr(r, "support_confluence_score", None),
         volatility_quality_score=getattr(r, "volatility_quality_score", None),
         relative_strength_score=getattr(r, "relative_strength_score", None),
         volume_confirmation_score=getattr(r, "volume_confirmation_score", None),
@@ -756,6 +869,8 @@ def _to_plan_row_out(r) -> PlanRowOut:
         macro_score=getattr(r, "macro_score", None),
         scenario_score=getattr(r, "scenario_score", None),
         composite_score=getattr(r, "composite_score", None),
+        component_scores=getattr(r, "component_scores", None),
+        setup_downgrade_reasons=list(getattr(r, "setup_downgrade_reasons", []) or []),
         llm_review=getattr(r, "llm_review", None),
         quant_action=getattr(r, "quant_action", None),
         reconciled_action=getattr(r, "reconciled_action", None),
@@ -816,6 +931,11 @@ def _to_plan_row_out(r) -> PlanRowOut:
         gap_zone=getattr(r, "gap_zone", None),
         recent_swing_highs=list(getattr(r, "recent_swing_highs", []) or []),
         recent_swing_lows=list(getattr(r, "recent_swing_lows", []) or []),
+        daily_trend=getattr(r, "daily_trend", None),
+        four_hour_trend=getattr(r, "four_hour_trend", None),
+        one_hour_trend=getattr(r, "one_hour_trend", None),
+        thirty_minute_trend=getattr(r, "thirty_minute_trend", None),
+        multi_timeframe_alignment_score=getattr(r, "multi_timeframe_alignment_score", None),
         news=[NewsItem(**n) for n in (getattr(r, "news", None) or [])],
     )
 
@@ -1354,11 +1474,16 @@ def _apply_prob_and_action(
     classification = classify_final_action(
         payload={
             "trend_state": getattr(row, "trend_state", None),
+            "structure_state": getattr(row, "structure_state", None),
             "market_regime": regime,
             "buy_threshold": buy_threshold,
             "entry_quality_score": getattr(row, "entry_quality_score", None),
             "entry_requires_confirmation": getattr(row, "entry_requires_confirmation", None),
             "confirmation_trigger": getattr(row, "confirmation_trigger", None),
+            "confirmation_state": getattr(row, "confirmation_state", None),
+            "entry_status": getattr(row, "entry_status", None),
+            "executable_stop_technically_valid": getattr(row, "executable_stop_technically_valid", None),
+            "universe_eligible": getattr(row, "universe_eligible", None),
             "support_quality_score": getattr(row, "support_quality_score", None),
             "relative_strength_score": getattr(row, "relative_strength_score", None),
             "volume_confirmation_score": getattr(row, "volume_confirmation_score", None),
@@ -1857,13 +1982,14 @@ def workflow_sp100_top10_log(req: Sp100WorkflowRequest, db: Session = Depends(ge
         daily_closes_loader=daily_closes_loader,
         daily_bars_loader=daily_bars_loader,
     )
-    pre_scanned = ranked_prescan[:top_scan]
+    eligible_prescan = [item for item in ranked_prescan if not item.get("scan_rejection_reason")]
+    pre_scanned = eligible_prescan[:top_scan]
     shortlist = pre_scanned[: min(pre_scan_shortlist, len(pre_scanned))]
     universe = [item["ticker"] for item in shortlist]
     pre_scan_by_ticker = {
         item["ticker"]: {
             **item,
-            "scan_shortlisted": str(item.get("scan_rejection_reason") or "") != "prescan_crashed",
+            "scan_shortlisted": not bool(item.get("scan_rejection_reason")),
             "scan_rejection_reason": item.get("scan_rejection_reason"),
         }
         for item in shortlist

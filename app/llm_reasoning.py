@@ -83,6 +83,7 @@ def _json_safe(value: object):
 def _collect_constructive_traits(payload: dict, config: PlanningConfig) -> list[str]:
     traits: list[str] = []
     trend_state = str(payload.get("trend_state") or "range")
+    structure_state = str(payload.get("structure_state") or "")
     composite = _to_float(payload.get("composite_score"))
     entry_quality = _to_float(payload.get("entry_quality_score"))
     relative_strength_score = _to_float(payload.get("relative_strength_score"), 5.0)
@@ -192,6 +193,7 @@ def classify_final_action(*, payload: dict, config: PlanningConfig) -> dict:
     - AVOID is reserved for materially weak or unattractive setups.
     """
     trend_state = str(payload.get("trend_state") or "range")
+    structure_state = str(payload.get("structure_state") or "")
     market_regime = str(payload.get("market_regime") or "neutral")
     composite = _to_float(payload.get("composite_score"))
     buy_threshold = int(payload.get("buy_threshold") or 6)
@@ -210,6 +212,10 @@ def classify_final_action(*, payload: dict, config: PlanningConfig) -> dict:
     prob_sl_val = _to_float(prob_sl, 0.0) if prob_sl is not None else None
     prob_edge = (prob_tp_val - prob_sl_val) if prob_tp_val is not None and prob_sl_val is not None else None
     entry_requires_confirmation = bool(payload.get("entry_requires_confirmation"))
+    confirmation_state = str(payload.get("confirmation_state") or "")
+    entry_status = str(payload.get("entry_status") or "")
+    executable_stop_technically_valid = payload.get("executable_stop_technically_valid") is not False
+    universe_eligible = payload.get("universe_eligible") is not False
     earnings = payload.get("earnings") or {}
     days_to_earnings = earnings.get("days_to_earnings")
     volume_context = payload.get("volume_context") or {}
@@ -226,6 +232,40 @@ def classify_final_action(*, payload: dict, config: PlanningConfig) -> dict:
     avoid_reasons: list[str] = []
     wait_reasons: list[str] = []
     severity = 0.0
+
+    if not executable_stop_technically_valid:
+        buy_blockers.append("technical_invalidation_exceeds_swing_risk_limit")
+        wait_reasons.append("no_technically_valid_executable_stop")
+        severity += 1.1
+
+    if not universe_eligible:
+        buy_blockers.append("universe_suitability_failed")
+        avoid_reasons.append("basic_price_volume_or_history_requirement_failed")
+        severity += 2.0
+
+    if structure_state == "structural_breakdown":
+        buy_blockers.append("structural_breakdown")
+        avoid_reasons.append("structure_has_broken_below_major_emas")
+        severity += 2.4
+    elif structure_state == "trend_damage":
+        buy_blockers.append("trend_damage")
+        wait_reasons.append("trend_requires_repair")
+        severity += 1.1
+    elif structure_state == "extended":
+        buy_blockers.append("extended_do_not_chase")
+        wait_reasons.append("price_needs_a_reset")
+        severity += 0.8
+
+    if confirmation_state and confirmation_state != "confirmed":
+        buy_blockers.append(f"confirmation_{confirmation_state}")
+        wait_reasons.append("numeric_confirmation_trigger_not_satisfied")
+    if entry_status in {"missed", "extended"}:
+        buy_blockers.append(f"entry_{entry_status}")
+        severity += 0.7
+    elif entry_status == "invalidated":
+        buy_blockers.append("entry_invalidated")
+        avoid_reasons.append("price_below_thesis_invalidation")
+        severity += 3.0
 
     if days_to_earnings is not None and int(days_to_earnings) <= config.earnings_hard_block_days:
         buy_blockers.append("earnings_too_close")
@@ -351,6 +391,11 @@ def classify_final_action(*, payload: dict, config: PlanningConfig) -> dict:
         composite >= buy_threshold
         and trend_state in {"uptrend", "pullback_in_uptrend"}
         and not entry_requires_confirmation
+        and executable_stop_technically_valid
+        and universe_eligible
+        and structure_state not in {"structural_breakdown", "trend_damage", "extended"}
+        and confirmation_state in {"", "confirmed"}
+        and entry_status not in {"too_early", "in_price_zone", "awaiting_confirmation", "extended", "missed", "invalidated"}
         and entry_quality >= config.buy_min_entry_quality
         and relative_strength_score >= config.buy_min_relative_strength_score
         and support_quality_score >= config.buy_min_support_quality_score

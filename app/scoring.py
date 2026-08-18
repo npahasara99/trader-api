@@ -7,6 +7,105 @@ def _clip_score(value: float) -> float:
     return max(0.0, min(10.0, value))
 
 
+def score_price_location(
+    *,
+    current_price: float,
+    frame,
+    structure_state: str,
+    support_zone_1: dict | None,
+    resistance_zone_1: dict | None,
+    atr: float,
+    config: PlanningConfig,
+) -> dict:
+    """Score whether the current price offers practical swing entry geometry."""
+
+    price = max(float(current_price), 1e-9)
+    atr_value = max(float(atr or 0.0), price * 0.005)
+    ema20 = None
+    if frame is not None and not frame.empty and "ema20" in frame.columns:
+        value = frame["ema20"].iloc[-1]
+        ema20 = None if value != value else float(value)
+    distance_ema20 = 0.0 if ema20 is None else (price - ema20) / max(ema20, 1e-9)
+
+    recent = frame.tail(min(60, len(frame))) if frame is not None and not frame.empty else None
+    range_position = 0.5
+    consecutive_green = 0
+    if recent is not None and not recent.empty:
+        low = float(recent["low"].min())
+        high = float(recent["high"].max())
+        range_position = 0.5 if high <= low else max(0.0, min(1.0, (price - low) / (high - low)))
+        for is_green in reversed((recent["close"] > recent["open"]).tolist()):
+            if not is_green:
+                break
+            consecutive_green += 1
+
+    def _distance_atr(zone: dict | None, side: str) -> float | None:
+        if not zone:
+            return None
+        lower = float(zone.get("lower", price))
+        upper = float(zone.get("upper", price))
+        if lower <= price <= upper:
+            return 0.0
+        distance = price - upper if side == "support" else lower - price
+        return max(0.0, distance) / atr_value
+
+    support_distance = _distance_atr(support_zone_1, "support")
+    resistance_distance = _distance_atr(resistance_zone_1, "resistance")
+    score = 5.0
+    reasons: list[str] = []
+
+    if support_distance is not None and support_distance <= config.price_location_near_support_atr:
+        score += 2.0
+        reasons.append("near_ranked_support")
+    if -0.025 <= distance_ema20 <= 0.035:
+        score += 1.6
+        reasons.append("near_ema20")
+    elif distance_ema20 >= config.structure_extended_from_ema20_pct:
+        score -= 3.0
+        reasons.append("extended_above_ema20")
+    if resistance_distance is not None and resistance_distance <= config.price_location_near_resistance_atr:
+        if structure_state != "breakout":
+            score -= 1.7
+            reasons.append("directly_below_resistance")
+    if consecutive_green >= 5:
+        score -= 1.8
+        reasons.append("five_or_more_green_sessions")
+    elif consecutive_green >= 3:
+        score -= 0.7
+        reasons.append("multiple_green_sessions")
+    if structure_state == "healthy_pullback" and 0.25 <= range_position <= 0.8:
+        score += 1.0
+        reasons.append("constructive_pullback_location")
+    elif structure_state == "breakout" and distance_ema20 <= config.structure_extended_from_ema20_pct:
+        score += 0.7
+        reasons.append("supported_breakout_location")
+    elif structure_state in {"trend_damage", "structural_breakdown"}:
+        score = min(score, 3.8 if structure_state == "trend_damage" else 2.5)
+        reasons.append("damaged_structure_limits_location_quality")
+    elif structure_state == "extended":
+        score = min(score, 2.5)
+        reasons.append("extension_requires_reset")
+
+    score = _clip_score(score)
+    if structure_state == "extended" or distance_ema20 >= config.structure_parabolic_from_ema20_pct:
+        category = "extended"
+    elif score >= 8.5:
+        category = "excellent"
+    elif score >= 7.0:
+        category = "good"
+    elif score >= 5.0:
+        category = "neutral"
+    else:
+        category = "poor"
+    return {
+        "price_location_score": round(score, 3),
+        "price_location_category": category,
+        "price_location_reasons": reasons,
+        "local_range_position": round(range_position, 4),
+        "consecutive_green_sessions": consecutive_green,
+    }
+
+
 def score_setup(
     *,
     trend_state: str,
@@ -22,15 +121,39 @@ def score_setup(
     context: dict | None,
     sector_relative_strength: float | None,
     config: PlanningConfig,
+    structure_state: str | None = None,
+    liquidity_score: float = 5.0,
+    volatility_suitability_score: float | None = None,
+    price_location_score: float = 5.0,
+    target_realism_score: float = 5.0,
+    confirmation_score: float = 5.0,
 ) -> dict:
-    trend_quality = 8.2 if trend_state == "uptrend" else 6.8 if trend_state == "pullback_in_uptrend" else 4.8 if trend_state == "range" else 2.4
+    rich_state = str(structure_state or "")
+    rich_trend_scores = {
+        "healthy_pullback": 8.7,
+        "breakout": 8.2,
+        "base_building": 6.2,
+        "deep_pullback": 5.6,
+        "reversal_attempt": 4.8,
+        "range": 5.0,
+        "extended": 4.3,
+        "trend_damage": 2.8,
+        "structural_breakdown": 1.2,
+    }
+    trend_quality = rich_trend_scores.get(
+        rich_state,
+        8.2 if trend_state == "uptrend" else 6.8 if trend_state == "pullback_in_uptrend" else 4.8 if trend_state == "range" else 2.4,
+    )
     pullback_quality = 7.8 if trend_state == "pullback_in_uptrend" else 6.8 if trend_state == "uptrend" else 4.5 if trend_state == "range" else 2.5
     support_quality = 4.5
     if support_zone_1:
-        support_quality += min(3.5, len(support_zone_1.get("source_tags", [])) * 1.0)
+        ranked_strength = support_zone_1.get("strength_score")
+        if ranked_strength is not None:
+            support_quality = max(support_quality, float(ranked_strength))
+        support_quality += min(2.0, len(support_zone_1.get("source_tags", [])) * 0.55)
 
-    volatility_quality = 6.0
-    if atr_pct is not None:
+    volatility_quality = float(volatility_suitability_score) if volatility_suitability_score is not None else 6.0
+    if volatility_suitability_score is None and atr_pct is not None:
         atr_pct_val = float(atr_pct) * 100.0
         if atr_pct_val < 1.0:
             volatility_quality = 5.3
@@ -126,6 +249,10 @@ def score_setup(
         "catalyst_score": _clip_score(catalyst_score),
         "macro_score": _clip_score(macro_score),
         "scenario_score": _clip_score(scenario_score),
+        "liquidity_score": _clip_score(liquidity_score),
+        "price_location_score": _clip_score(price_location_score),
+        "target_realism_score": _clip_score(target_realism_score),
+        "confirmation_score": _clip_score(confirmation_score),
     }
 
     total_weight = sum(config.score_weights.values())
@@ -137,4 +264,7 @@ def score_setup(
         composite += scores[metric_key] * weight
     composite_score = (composite / max(total_weight, 1e-9))
     scores["composite_score"] = round(_clip_score(composite_score), 4)
+    scores["trend_score"] = scores["trend_quality_score"]
+    scores["volatility_suitability_score"] = scores["volatility_quality_score"]
+    scores["support_confluence_score"] = scores["support_quality_score"]
     return scores

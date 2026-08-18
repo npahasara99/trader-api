@@ -68,6 +68,10 @@ def add_indicator_columns(frame: pd.DataFrame, *, atr_window: int = 14, volume_w
 
     out = frame.copy()
     out["ema20"] = ema(out["close"], 20)
+    out["ema50"] = ema(out["close"], 50)
+    out["ema100"] = ema(out["close"], 100)
+    out["ema200"] = ema(out["close"], 200)
+    # Keep the existing simple averages because callers already consume them.
     out["sma50"] = sma(out["close"], 50)
     out["sma100"] = sma(out["close"], 100)
     out["sma200"] = sma(out["close"], 200)
@@ -78,6 +82,9 @@ def add_indicator_columns(frame: pd.DataFrame, *, atr_window: int = 14, volume_w
     out["ret_5"] = rolling_return(out["close"], 5)
     out["ret_20"] = rolling_return(out["close"], 20)
     out["vol_20"] = realized_volatility(out["close"], 20)
+    for period in (20, 50, 100, 200):
+        column = f"ema{period}"
+        out[f"{column}_slope_pct"] = out[column].pct_change(periods=5, fill_method=None)
     return out
 
 

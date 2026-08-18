@@ -6,13 +6,15 @@ import pandas as pd
 
 from .config import DEFAULT_PLANNING_CONFIG, PlanningConfig
 from .chart_context import build_chart_context
+from .confirmation import build_confirmation_plan
 from .context_scenarios import build_market_context
 from .entry_engine import build_entry_candidates, choose_preferred_entry
 from .indicators import add_indicator_columns, bars_to_frame, latest_value
 from .llm_reasoning import review_setup
 from .risk_engine import build_stop_loss, build_take_profits, estimate_hold_window
 from .scenario_engine import generate_execution_scenarios
-from .scoring import score_setup
+from .scanner import build_universe_suitability, classify_volatility
+from .scoring import score_price_location, score_setup
 from .structure import summarize_structure
 from .zones import build_support_resistance_zones, fibonacci_levels
 
@@ -108,19 +110,36 @@ def generate_structured_plan(
         pivot_max_points=config.pivot_max_points,
         consolidation_window=config.consolidation_window,
         consolidation_range_atr_mult=config.consolidation_range_atr_mult,
+        extended_from_ema20_pct=config.structure_extended_from_ema20_pct,
+        parabolic_from_ema20_pct=config.structure_parabolic_from_ema20_pct,
+        base_max_atr_range=config.structure_base_max_atr_range,
     )
     fibs = fibonacci_levels(frame, structure)
     zones = build_support_resistance_zones(frame, structure, fibs, config)
 
     atr_val = latest_value(frame, "atr") or max(current_price * 0.02, 0.01)
     atr_pct = latest_value(frame, "atr_pct")
+    volatility = classify_volatility(atr_pct, config)
+    universe = build_universe_suitability(current_price=current_price, frame=frame, config=config)
     moving_averages = {
         "ema20": latest_value(frame, "ema20"),
+        "ema50": latest_value(frame, "ema50"),
+        "ema100": latest_value(frame, "ema100"),
+        "ema200": latest_value(frame, "ema200"),
         "sma50": latest_value(frame, "sma50"),
         "sma100": latest_value(frame, "sma100"),
         "sma200": latest_value(frame, "sma200"),
     }
     volume_context = _volume_context(frame)
+    price_location = score_price_location(
+        current_price=current_price,
+        frame=frame,
+        structure_state=structure.structure_state,
+        support_zone_1=zones["support_zone_1"],
+        resistance_zone_1=zones["resistance_zone_1"],
+        atr=atr_val,
+        config=config,
+    )
 
     benchmark_bars = benchmark_bars or {}
     rs = {
@@ -187,10 +206,27 @@ def generate_structured_plan(
         recent_swing_low=recent_swing_low,
         atr=atr_val,
         current_price=current_price,
-        trend_state=structure.trend_state,
+        trend_state=structure.structure_state,
         sl_tolerance=context["sl_tolerance"],
         setup_scenario=context["setup_scenario"],
         config=config,
+    )
+    confirmation = build_confirmation_plan(
+        current_price=current_price,
+        preferred_entry=preferred["preferred_entry"],
+        support_zone_1=zones["support_zone_1"],
+        resistance_zone_1=zones["resistance_zone_1"],
+        moving_averages=moving_averages,
+        structure_state=structure.structure_state,
+        frame=frame,
+        atr=atr_val,
+        invalidation_level=stop["invalidation_level"],
+        volume_context=volume_context,
+        requires_confirmation=preferred["entry_requires_confirmation"],
+        config=config,
+    )
+    effective_entry_requires_confirmation = bool(
+        confirmation["confirmation_required"] and confirmation["confirmation_state"] != "confirmed"
     )
     historical_hold_days = None
     if history_stats and history_stats.get("samples"):
@@ -211,11 +247,12 @@ def generate_structured_plan(
         recent_swing_high=recent_swing_high,
         atr=atr_val,
         hold_days_hint=hold["max_hold_days"],
-        trend_state=structure.trend_state,
+        trend_state=structure.structure_state,
         tp_aggressiveness=context["tp_aggressiveness"],
         expected_move_profile=context["expected_move_profile"],
         price_location_context=context["price_location_context"],
         config=config,
+        ranked_resistance_levels=zones["resistance_levels"],
     )
     final_hold = estimate_hold_window(
         preferred_entry=preferred["preferred_entry"],
@@ -235,11 +272,12 @@ def generate_structured_plan(
             recent_swing_high=recent_swing_high,
             atr=atr_val,
             hold_days_hint=hold["max_hold_days"],
-            trend_state=structure.trend_state,
+            trend_state=structure.structure_state,
             tp_aggressiveness=context["tp_aggressiveness"],
             expected_move_profile=context["expected_move_profile"],
             price_location_context=context["price_location_context"],
             config=config,
+            ranked_resistance_levels=zones["resistance_levels"],
         )
     else:
         hold = final_hold
@@ -262,6 +300,7 @@ def generate_structured_plan(
     reward_risk = {
         "tp1": targets["expected_reward_risk_to_tp1"],
         "tp2": targets["expected_reward_risk_to_tp2"],
+        "tp3": targets["expected_reward_risk_to_tp3"],
         "final": targets["expected_reward_risk_to_final"],
     }
     relative_strength_values = [value for value in rs.values() if value is not None]
@@ -291,8 +330,14 @@ def generate_structured_plan(
         "market_regime": market_regime,
         "buy_threshold": buy_threshold,
         "entry_quality_score": preferred["entry_quality_score"],
-        "entry_requires_confirmation": preferred["entry_requires_confirmation"],
+        "entry_requires_confirmation": effective_entry_requires_confirmation,
         "confirmation_trigger": preferred["confirmation_trigger"],
+        "confirmation_trigger_price": confirmation["confirmation_trigger_price"],
+        "confirmation_state": confirmation["confirmation_state"],
+        "entry_status": confirmation["entry_status"],
+        "structure_state": structure.structure_state,
+        "executable_stop_technically_valid": stop["executable_stop_technically_valid"],
+        "universe_eligible": universe["universe_eligible"],
         "volume_context": volume_context,
         "reward_risk": reward_risk,
         "earnings": earnings,
@@ -338,6 +383,12 @@ def generate_structured_plan(
         context=context,
         sector_relative_strength=sector_relative_strength,
         config=config,
+        structure_state=structure.structure_state,
+        liquidity_score=universe["liquidity_score"],
+        volatility_suitability_score=volatility["volatility_suitability_score"],
+        price_location_score=price_location["price_location_score"],
+        target_realism_score=targets["target_realism_score"],
+        confirmation_score=confirmation["confirmation_score"],
     )
 
     composite_payload = {
@@ -374,6 +425,12 @@ def generate_structured_plan(
         context=context,
         sector_relative_strength=sector_relative_strength,
         config=config,
+        structure_state=structure.structure_state,
+        liquidity_score=universe["liquidity_score"],
+        volatility_suitability_score=volatility["volatility_suitability_score"],
+        price_location_score=price_location["price_location_score"],
+        target_realism_score=targets["target_realism_score"],
+        confirmation_score=confirmation["confirmation_score"],
     )
 
     # The reasoning layer may select only among eligible deterministic
@@ -395,19 +452,60 @@ def generate_structured_plan(
     else:
         scenario_bundle["execution_action"] = "MONITOR"
 
+    if confirmation["entry_status"] != "confirmed" and scenario_bundle["execution_action"] == "BUY_NOW":
+        scenario_bundle["execution_action"] = (
+            "WAIT_FOR_BREAKOUT" if structure.structure_state == "breakout" else "WAIT_FOR_PULLBACK"
+        )
+
     signal_score = int(news_score + earnings_score)
     strategy_action = str(llm_review["llm_action"])
+    setup_downgrade_reasons: list[str] = []
+    if not stop["executable_stop_technically_valid"]:
+        setup_downgrade_reasons.append("technical_invalidation_exceeds_swing_risk_limit")
+    if not universe["universe_eligible"]:
+        setup_downgrade_reasons.extend(universe["universe_rejection_reasons"])
+    if structure.structure_state in {"structural_breakdown", "trend_damage"}:
+        setup_downgrade_reasons.append(f"structure_state_{structure.structure_state}")
+    if confirmation["entry_status"] != "confirmed":
+        setup_downgrade_reasons.append(f"entry_{confirmation['entry_status']}")
+    if strategy_action == "BUY" and setup_downgrade_reasons:
+        strategy_action = (
+            "AVOID"
+            if structure.structure_state == "structural_breakdown" or not universe["universe_eligible"]
+            else "WAIT"
+        )
+    if not stop["executable_stop_technically_valid"] and scenario_bundle["execution_action"] == "BUY_NOW":
+        scenario_bundle["execution_action"] = "MONITOR"
 
     plan = {
         "ticker": ticker,
         "current_price": float(current_price),
         "trend_state": structure.trend_state,
+        "structure_state": structure.structure_state,
+        "enhanced_trend_state": structure.structure_state,
+        "ema_structure": structure.ema_structure,
+        "universe_suitability": universe,
+        "universe_eligible": universe["universe_eligible"],
+        "universe_rejection_reasons": universe["universe_rejection_reasons"],
+        "average_daily_volume": universe["average_daily_volume"],
+        "liquidity_score": scores["liquidity_score"],
         "support_zone_1": zones["support_zone_1"],
         "support_zone_2": zones["support_zone_2"],
         "resistance_zone_1": zones["resistance_zone_1"],
         "resistance_zone_2": zones["resistance_zone_2"],
+        "support_levels": zones["support_levels"],
+        "resistance_levels": zones["resistance_levels"],
+        "nearest_support": zones["nearest_support"],
+        "nearest_resistance": zones["nearest_resistance"],
+        "major_resistance_cluster": zones["major_resistance_cluster"],
         "atr": round(float(atr_val), 6),
         "atr_pct": None if atr_pct is None else round(float(atr_pct), 6),
+        **volatility,
+        "ema20": moving_averages["ema20"],
+        "ema50": moving_averages["ema50"],
+        "ema100": moving_averages["ema100"],
+        "ema200": moving_averages["ema200"],
+        **price_location,
         "fib_levels": fibs,
         "moving_averages": moving_averages,
         "volume_context": volume_context,
@@ -419,9 +517,16 @@ def generate_structured_plan(
         "entry_quality_score": preferred["entry_quality_score"],
         "entry_distance_from_current_price_pct": preferred["entry_distance_from_current_price_pct"],
         "entry_confluence_score": preferred["entry_confluence_score"],
-        "entry_requires_confirmation": preferred["entry_requires_confirmation"],
+        "entry_requires_confirmation": effective_entry_requires_confirmation,
         "confirmation_trigger": preferred["confirmation_trigger"],
+        **confirmation,
         "stop_loss": stop["stop_loss"],
+        "suggested_stop": stop["suggested_stop"],
+        "invalidation_level": stop["invalidation_level"],
+        "invalidation_reason": stop["invalidation_reason"],
+        "invalidation_width_pct": stop["invalidation_width_pct"],
+        "invalidation_width_atr": stop["invalidation_width_atr"],
+        "executable_stop_technically_valid": stop["executable_stop_technically_valid"],
         "stop_basis": stop["stop_basis"],
         "stop_distance_pct": stop["stop_distance_pct"],
         "stop_width_pct": stop["stop_width_pct"],
@@ -429,13 +534,23 @@ def generate_structured_plan(
         "stop_too_tight_flag": stop["stop_too_tight_flag"],
         "take_profit_1": targets["take_profit_1"],
         "take_profit_2": targets["take_profit_2"],
+        "take_profit_3": targets["take_profit_3"],
+        "stretch_target": targets["stretch_target"],
         "take_profit_final": targets["take_profit_final"],
         "tp1_distance_pct": targets["tp1_distance_pct"],
         "tp1_distance_atr": targets["tp1_distance_atr"],
+        "tp1_atr_distance": targets["tp1_atr_distance"],
+        "tp2_atr_distance": targets["tp2_atr_distance"],
+        "tp3_atr_distance": targets["tp3_atr_distance"],
+        "tp1_reason": targets["tp1_reason"],
+        "tp2_reason": targets["tp2_reason"],
+        "tp3_reason": targets["tp3_reason"],
+        "stretch_target_reason": targets["stretch_target_reason"],
         "tp_basis": targets["tp_basis"],
         "reward_risk": reward_risk,
         "tp_too_optimistic_flag": targets["tp_too_optimistic_flag"],
         "hold_window_reachability_score": targets["hold_window_reachability_score"],
+        "target_realism_score": scores["target_realism_score"],
         "swing_realism_flag": stop["swing_realism_flag"],
         "risk_width_flag": stop["risk_width_flag"],
         "target_reachability_flag": targets["target_reachability_flag"],
@@ -443,11 +558,16 @@ def generate_structured_plan(
         "stop_generation_reason": stop["stop_generation_reason"],
         "tp1_generation_reason": targets["tp1_generation_reason"],
         "max_hold_days": hold["max_hold_days"],
+        "expected_hold_days": hold["expected_hold_days"],
         "max_hold_date": hold["max_hold_date"],
         "trend_quality_score": scores["trend_quality_score"],
+        "trend_score": scores["trend_score"],
         "pullback_quality_score": scores["pullback_quality_score"],
         "support_quality_score": scores["support_quality_score"],
+        "support_confluence_score": scores["support_confluence_score"],
         "volatility_quality_score": scores["volatility_quality_score"],
+        "volatility_suitability_score": scores["volatility_suitability_score"],
+        "confirmation_score": scores["confirmation_score"],
         "relative_strength_score": scores["relative_strength_score"],
         "volume_confirmation_score": scores["volume_confirmation_score"],
         "earnings_risk_score": scores["earnings_risk_score"],
@@ -459,11 +579,29 @@ def generate_structured_plan(
         "macro_score": scores["macro_score"],
         "scenario_score": scores["scenario_score"],
         "composite_score": scores["composite_score"],
+        "component_scores": {
+            key: scores[key]
+            for key in (
+                "liquidity_score",
+                "volatility_suitability_score",
+                "trend_score",
+                "price_location_score",
+                "support_confluence_score",
+                "target_realism_score",
+                "confirmation_score",
+            )
+        },
+        "setup_downgrade_reasons": setup_downgrade_reasons,
         **context,
         "llm_review": {k: v for k, v in llm_review.items() if k not in {"prompt_preview", "provider", "model", "style", "llm_quality_score"}},
         "strategy_action": strategy_action,
         "chart_context": chart_context,
         "timeframe_context": chart_context.get("timeframes") or {},
+        "daily_trend": chart_context.get("daily_trend"),
+        "four_hour_trend": chart_context.get("four_hour_trend"),
+        "one_hour_trend": chart_context.get("one_hour_trend"),
+        "thirty_minute_trend": chart_context.get("thirty_minute_trend"),
+        "multi_timeframe_alignment_score": chart_context.get("multi_timeframe_alignment_score"),
         "preferred_trade_shape": chart_context.get("preferred_trade_shape"),
         "execution_scenarios": scenario_bundle["execution_scenarios"],
         "enter_now_scenario": scenario_bundle["enter_now_scenario"],

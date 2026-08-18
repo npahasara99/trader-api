@@ -59,6 +59,79 @@ def _safe_float(value: object, default: float = 0.0) -> float:
         return default
 
 
+def classify_volatility(atr_pct_ratio: float | None, config: PlanningConfig) -> dict:
+    """Classify ATR percentage without treating the preferred band as a hard gate."""
+
+    if atr_pct_ratio is None:
+        return {
+            "atr_percent": None,
+            "volatility_regime": "unknown",
+            "volatility_suitability_score": 5.0,
+        }
+    atr_percent = max(0.0, float(atr_pct_ratio) * 100.0)
+    if atr_percent < config.atr_pct_too_slow:
+        regime, score = "too_slow", 3.2
+    elif atr_percent < config.atr_pct_preferred_min:
+        regime, score = "low_volatility", 5.4
+    elif atr_percent <= config.atr_pct_preferred_max:
+        regime, score = "preferred", 8.5
+    elif atr_percent <= config.atr_pct_high_risk_max:
+        regime, score = "high_risk", 6.0
+    else:
+        regime, score = "very_high_risk", 3.4
+    return {
+        "atr_percent": round(atr_percent, 4),
+        "volatility_regime": regime,
+        "volatility_suitability_score": score,
+    }
+
+
+def build_universe_suitability(
+    *,
+    current_price: float | None,
+    frame,
+    config: PlanningConfig,
+) -> dict:
+    """Evaluate basic price, share-volume, and history requirements."""
+
+    price = _safe_float(current_price, 0.0)
+    avg_volume = latest_value(frame, "avg_volume") if frame is not None and not frame.empty else None
+    avg_volume_value = _safe_float(avg_volume, 0.0)
+    history_bars = 0 if frame is None else len(frame)
+    rejection_reasons: list[str] = []
+    if price < config.min_price:
+        rejection_reasons.append("price_below_minimum")
+    if avg_volume_value < config.min_avg_daily_volume:
+        rejection_reasons.append("average_daily_volume_below_minimum")
+    if history_bars < config.min_history_bars:
+        rejection_reasons.append("insufficient_history")
+
+    liquidity_score = 5.0
+    if price <= 0:
+        liquidity_score = 0.0
+    elif avg_volume_value >= config.min_avg_daily_volume * 5.0:
+        liquidity_score = 9.0
+    elif avg_volume_value >= config.min_avg_daily_volume * 2.0:
+        liquidity_score = 8.0
+    elif avg_volume_value >= config.min_avg_daily_volume:
+        liquidity_score = 7.0
+    elif avg_volume_value >= config.min_avg_daily_volume * 0.5:
+        liquidity_score = 4.0
+    else:
+        liquidity_score = 2.0
+    if price < config.min_price:
+        liquidity_score = min(liquidity_score, 3.0)
+
+    return {
+        "universe_eligible": not rejection_reasons,
+        "universe_rejection_reasons": rejection_reasons,
+        "average_daily_volume": round(avg_volume_value, 2),
+        "average_dollar_volume": round(avg_volume_value * price, 2),
+        "history_bars": int(history_bars),
+        "liquidity_score": round(liquidity_score, 3),
+    }
+
+
 def sector_benchmark_symbol_for_meta(meta: dict | None) -> str | None:
     meta = meta or {}
     industry = str(meta.get("industry") or "").lower()
@@ -203,27 +276,15 @@ def build_pre_scan_profile(
         pullback_score -= 0.4
     pullback_score = _clip(pullback_score)
 
-    volatility_score = 5.5
-    atr_pct_val = (_safe_float(atr_pct, -1.0) * 100.0) if atr_pct is not None else -1.0
-    if atr_pct_val < 0:
-        volatility_score = 5.0
-    elif atr_pct_val < 1.0:
-        volatility_score = 4.8
-    elif atr_pct_val <= 5.5:
-        volatility_score = 8.0
-    elif atr_pct_val <= 7.5:
-        volatility_score = 6.1
-    else:
-        volatility_score = 3.8
+    volatility = classify_volatility(atr_pct, config)
+    volatility_score = float(volatility["volatility_suitability_score"])
+    atr_pct_val = volatility["atr_percent"] if volatility["atr_percent"] is not None else -1.0
 
-    liquidity_score = 4.0
+    universe = build_universe_suitability(current_price=current_price, frame=frame, config=config)
+    liquidity_score = float(universe["liquidity_score"])
     avg_dollar_volume = _safe_float(avg_volume) * close if avg_volume is not None else 0.0
-    if avg_dollar_volume >= config.pre_scan_min_avg_dollar_volume:
-        liquidity_score = 7.2
-    if avg_dollar_volume >= config.pre_scan_min_avg_dollar_volume * 3.0:
-        liquidity_score = 8.4
-    elif avg_dollar_volume < config.pre_scan_min_avg_dollar_volume * 0.5:
-        liquidity_score = 2.8
+    if avg_dollar_volume < config.pre_scan_min_avg_dollar_volume:
+        liquidity_score = min(liquidity_score, 4.0)
 
     volume_score = 5.0
     if volume_ratio is not None:
@@ -279,20 +340,23 @@ def build_pre_scan_profile(
     else:
         tags.append("liquidity_low")
     if atr_pct_val > 0:
-        if 1.0 <= atr_pct_val <= 5.5:
+        if config.atr_pct_preferred_min <= atr_pct_val <= config.atr_pct_preferred_max:
             tags.append("atr_swing_friendly")
-        elif atr_pct_val > 7.5:
+        elif atr_pct_val > config.atr_pct_high_risk_max:
             tags.append("atr_too_high")
     if days_to_earnings is None or int(days_to_earnings) > config.earnings_penalty_near_days:
         tags.append("no_near_earnings_blocker")
     else:
         tags.append("earnings_near")
 
+    scan_rejections = list(universe["universe_rejection_reasons"])
     return {
         "ticker": ticker,
         "pre_scan_score": float(pre_scan_score),
         "pre_scan_reason_tags": tags[:8],
         "sector_relative_strength": None if sector_relative_strength is None else round(float(sector_relative_strength), 6),
         "scan_shortlisted": False,
-        "scan_rejection_reason": None,
+        "scan_rejection_reason": ",".join(scan_rejections) if scan_rejections else None,
+        "universe_suitability": universe,
+        **volatility,
     }

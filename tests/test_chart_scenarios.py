@@ -75,7 +75,7 @@ def test_chart_context_degrades_when_intraday_timeframes_are_missing():
 
     assert context["available"] is True
     assert context["available_timeframes"] == ["daily"]
-    assert set(context["missing_timeframes"]) == {"hourly", "thirty_minute"}
+    assert set(context["missing_timeframes"]) == {"four_hour", "hourly", "thirty_minute"}
     assert context["timeframes"]["daily"]["available"] is True
 
 
@@ -96,7 +96,8 @@ def test_structured_plan_exposes_multi_timeframe_scenarios_without_llm_levels():
         avoid_threshold=-4,
     )
 
-    assert plan["chart_context"]["available_timeframes"] == ["daily", "hourly", "thirty_minute"]
+    assert plan["chart_context"]["available_timeframes"] == ["daily", "four_hour", "hourly", "thirty_minute"]
+    assert plan["chart_context"]["four_hour_source"] == "derived_from_hourly"
     assert set(plan["execution_scenarios"]) == {"enter_now", "pullback", "breakout", "repair"}
     assert plan["preferred_scenario"] in {"enter_now", "pullback", "breakout", "repair", "none"}
     assert plan["execution_action"] in {
