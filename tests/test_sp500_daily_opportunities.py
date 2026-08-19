@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from app.config import DEFAULT_PLANNING_CONFIG
 from app.market_data import build_bulk_cached_daily_loaders
+from app.models import SwingDecision
 from app.opportunity_ranking import (
     build_daily_actionability_profile,
     build_portfolio_snapshot,
@@ -327,3 +328,10 @@ def test_cache_only_prescan_does_not_fall_back_to_live_price(monkeypatch):
 
     assert ranked[0]["ticker"] == "MISSING"
     assert ranked[0]["scan_rejection_reason"] == "insufficient_history"
+
+
+def test_swing_decision_mode_accepts_descriptive_workflow_identifiers():
+    mode_column = SwingDecision.__table__.c.mode
+
+    assert mode_column.type.length == 80
+    assert len("sp500_daily_opportunities") <= mode_column.type.length

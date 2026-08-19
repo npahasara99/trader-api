@@ -78,9 +78,16 @@ def _ensure_runtime_columns() -> None:
 
             for col, col_type in required_cols.items():
                 conn.execute(text(f"ALTER TABLE swing_decisions ADD COLUMN IF NOT EXISTS {col} {col_type}"))
-    except Exception:
+            if dialect == "postgresql":
+                conn.execute(
+                    text(
+                        "ALTER TABLE swing_decisions "
+                        "ALTER COLUMN mode TYPE VARCHAR(80)"
+                    )
+                )
+    except Exception as exc:
         # Do not block startup if migration cannot be applied here.
-        pass
+        print(f"Swing decision compatibility migration warning: {type(exc).__name__}: {exc}")
 
 
 # Create tables + best-effort additive columns
@@ -587,7 +594,7 @@ class Sp500DailyOpportunitiesRequest(BaseModel):
     min_history_samples: int = 3
     sector: Optional[str] = None
     industry: Optional[str] = None
-    mode: str = "sp500_daily_opportunities"
+    mode: str = Field(default="sp500_daily_opportunities", max_length=80)
     llm_provider: Optional[str] = "chatgpt-actions"
     llm_model: Optional[str] = None
     llm_style: Optional[str] = "sp500_daily_ranker_v1"

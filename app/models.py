@@ -15,7 +15,9 @@ class SwingDecision(Base):
 
     ticker: Mapped[str] = mapped_column(String(20), index=True)
     planned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, default=utcnow)
-    mode: Mapped[str] = mapped_column(String(20), default="manual")  # manual/scan
+    # Workflow identifiers such as ``sp500_daily_opportunities`` exceed the
+    # original 20-character manual/scan-era limit.
+    mode: Mapped[str] = mapped_column(String(80), default="manual")
 
     entry: Mapped[float] = mapped_column(Float)
     stop: Mapped[float] = mapped_column(Float)

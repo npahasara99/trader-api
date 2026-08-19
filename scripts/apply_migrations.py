@@ -12,10 +12,19 @@ os.chdir(REPO_ROOT)
 
 from app.db import Base, engine  # noqa: E402
 from app import models  # noqa: F401,E402
+from sqlalchemy import text  # noqa: E402
 
 
 def main() -> None:
     Base.metadata.create_all(bind=engine)
+    with engine.begin() as connection:
+        if connection.dialect.name == "postgresql":
+            connection.execute(
+                text(
+                    "ALTER TABLE swing_decisions "
+                    "ALTER COLUMN mode TYPE VARCHAR(80)"
+                )
+            )
     print("Schema sync complete.")
 
 
