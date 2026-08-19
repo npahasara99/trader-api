@@ -498,6 +498,85 @@ def _first_zone(contexts: list[dict[str, Any]], key: str) -> dict[str, Any] | No
     return next((context.get(key) for context in contexts if context.get("available") and context.get(key)), None)
 
 
+def derive_structure_layers(timeframes: Mapping[str, dict[str, Any]]) -> dict[str, str]:
+    """Separate swing trend, active setup, and execution structure."""
+
+    daily = timeframes.get("daily") or {}
+    intermediate = next(
+        (
+            timeframes[name]
+            for name in ("four_hour", "hourly")
+            if (timeframes.get(name) or {}).get("available")
+        ),
+        daily,
+    )
+    execution = next(
+        (
+            timeframes[name]
+            for name in ("thirty_minute", "hourly", "four_hour", "daily")
+            if (timeframes.get(name) or {}).get("available")
+        ),
+        daily,
+    )
+    daily_trend = str(daily.get("trend") or "range")
+    daily_structure = str(daily.get("structure_state") or "range")
+    intermediate_trend = str(intermediate.get("trend") or daily_trend)
+    intermediate_structure = str(intermediate.get("structure_state") or "range")
+
+    if daily_structure == "structural_breakdown" or daily_trend == "downtrend":
+        broader = "structural_breakdown"
+    elif daily_structure in {"trend_damage", "reversal_attempt"} or daily_trend == "weak_breakdown_risk":
+        broader = "trend_damage"
+    elif daily_trend in {"uptrend", "pullback_in_uptrend"}:
+        broader = "uptrend"
+    else:
+        broader = "range"
+
+    if daily_structure == "breakout":
+        setup_type = "breakout"
+    elif daily_structure == "extended":
+        setup_type = "controlled_momentum_continuation"
+    elif broader == "uptrend" and (
+        daily_structure == "deep_pullback"
+        or intermediate_trend in {"range", "weak_breakdown_risk", "downtrend"}
+        or intermediate_structure in {"deep_pullback", "trend_damage"}
+    ):
+        setup_type = "deep_pullback"
+    elif broader == "uptrend":
+        setup_type = "healthy_pullback"
+    elif broader in {"trend_damage", "structural_breakdown"} and (
+        execution.get("short_term_reversal_state") == "confirmed"
+        or intermediate_structure == "reversal_attempt"
+    ):
+        setup_type = "reversal_attempt"
+    elif broader in {"trend_damage", "structural_breakdown"}:
+        setup_type = "repair_after_breakdown"
+    else:
+        setup_type = "range_rebound" if execution.get("short_term_reversal_state") == "confirmed" else "range"
+
+    execution_state = str(execution.get("structure_state") or "range")
+    if execution_state == "base_building" or (
+        execution.get("compression_state") == "compressed"
+        and execution_state not in {"structural_breakdown", "extended"}
+    ):
+        execution_structure = "base_building"
+    elif execution_state == "reversal_attempt":
+        execution_structure = "attempting_base"
+    elif execution.get("breakout_state") == "confirmed_breakout":
+        execution_structure = "breakout"
+    elif execution_state == "extended":
+        execution_structure = "extended"
+    elif execution_state in {"trend_damage", "structural_breakdown"}:
+        execution_structure = "weak_structure"
+    else:
+        execution_structure = "range"
+    return {
+        "broader_structure": broader,
+        "setup_type_layer": setup_type,
+        "execution_structure": execution_structure,
+    }
+
+
 def build_chart_context(
     bars_by_timeframe: Mapping[str, Any] | None = None,
     *,
@@ -553,6 +632,9 @@ def build_chart_context(
             "timeframes": timeframe_contexts,
             "dominant_trend": "unknown",
             "current_structure": "insufficient_data",
+            "broader_structure": "unknown",
+            "setup_type_layer": "unknown",
+            "execution_structure": "insufficient_data",
             "price_location_context": "unknown",
             "preferred_trade_shape": "no_clean_trade",
         }
@@ -607,6 +689,7 @@ def build_chart_context(
         preferred_shape = "no_clean_trade"
 
     major_source = daily_context if daily_context.get("available") else dominant
+    structure_layers = derive_structure_layers(timeframe_contexts)
     timeframe_weights = {"daily": 0.4, "four_hour": 0.3, "hourly": 0.2, "thirty_minute": 0.1}
     signed = {"uptrend": 1.0, "pullback_in_uptrend": 0.7, "range": 0.0, "weak_breakdown_risk": -0.65, "downtrend": -1.0}
     available_weight = sum(timeframe_weights[name] for name in available)
@@ -632,6 +715,7 @@ def build_chart_context(
         "current_price": price,
         "dominant_trend": trend,
         "current_structure": current_structure,
+        **structure_layers,
         "price_location_context": price_location,
         "local_high": execution.get("local_high"),
         "local_low": execution.get("local_low"),

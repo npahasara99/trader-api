@@ -49,28 +49,59 @@ def build_confirmation_plan(
     resistance_low, resistance_high = _zone_bounds(resistance_zone_1)
     buffer = atr_value * config.confirmation_trigger_buffer_atr
 
-    candidates: list[tuple[float, str]] = []
+    near_candidates: list[tuple[float, str]] = []
     if prior_high is not None:
-        candidates.append((prior_high + buffer, "reclaim prior session high"))
+        near_candidates.append((prior_high + buffer, "reclaim prior session high"))
     if ema20 is not None and float(ema20) >= zone_low:
-        candidates.append((float(ema20) + buffer, "reclaim EMA20"))
-    if structure_state == "breakout" and resistance_high is not None:
-        candidates.append((resistance_high + buffer, "clear ranked resistance"))
-    elif structure_state in {"reversal_attempt", "trend_damage", "structural_breakdown"} and resistance_low is not None:
-        candidates.append((resistance_low + buffer, "repair through nearest resistance"))
+        near_candidates.append((float(ema20) + buffer, "reclaim EMA20"))
+    near_candidates = [item for item in near_candidates if item[0] > zone_low]
+    future_near = [item for item in near_candidates if item[0] > price]
+    near_level = min(future_near or near_candidates, key=lambda item: item[0]) if near_candidates else None
 
-    candidates = [item for item in candidates if item[0] > zone_low]
-    if candidates:
-        if structure_state in {"reversal_attempt", "trend_damage", "structural_breakdown", "breakout"}:
-            trigger_price, trigger_reason = max(candidates, key=lambda item: item[0])
-        else:
-            above_zone = [item for item in candidates if item[0] >= zone_high]
-            trigger_price, trigger_reason = min(above_zone or candidates, key=lambda item: item[0])
+    primary_candidates = list(near_candidates)
+    if resistance_low is not None:
+        primary_candidates.append((resistance_low + buffer, "clear nearest ranked resistance"))
+    primary_candidates = [item for item in primary_candidates if item[0] > zone_low]
+    if structure_state == "breakout" and resistance_high is not None:
+        trigger_price, trigger_reason = resistance_high + buffer, "clear ranked resistance"
+    elif primary_candidates:
+        # The first executable reclaim is the primary trigger. Longer-term
+        # repair belongs in the strong/major tiers, not the starter entry.
+        above_zone = [item for item in primary_candidates if item[0] >= zone_high]
+        trigger_price, trigger_reason = min(above_zone or primary_candidates, key=lambda item: item[0])
     else:
         trigger_price = zone_high + buffer
         trigger_reason = "hold above the preferred price zone"
 
     trigger_price = round(float(trigger_price), 6)
+    primary_level = {"price": trigger_price, "reason": trigger_reason}
+    near_confirmation = None
+    if near_level is not None and float(near_level[0]) < trigger_price - max(buffer * 0.25, 1e-9):
+        near_confirmation = {"price": round(float(near_level[0]), 6), "reason": near_level[1]}
+
+    strong_confirmation = None
+    if resistance_high is not None and float(resistance_high) + buffer > trigger_price + buffer * 0.5:
+        strong_confirmation = {
+            "price": round(float(resistance_high) + buffer, 6),
+            "reason": "hold above the upper edge of ranked resistance",
+        }
+
+    major_candidates: list[tuple[float, str]] = []
+    for key, reason in (
+        ("ema50", "reclaim EMA50 trend structure"),
+        ("ema100", "reclaim EMA100 trend structure"),
+        ("ema200", "reclaim EMA200 trend structure"),
+    ):
+        value = moving_averages.get(key)
+        if value is not None and float(value) > trigger_price + buffer:
+            major_candidates.append((float(value) + buffer, reason))
+    if resistance_high is not None and float(resistance_high) + buffer > trigger_price + buffer:
+        major_candidates.append((float(resistance_high) + buffer, "repair the broader resistance regime"))
+    major_trend_repair = None
+    if major_candidates:
+        major_price, major_reason = max(major_candidates, key=lambda item: item[0])
+        major_trend_repair = {"price": round(major_price, 6), "reason": major_reason}
+
     price_confirmed = price >= trigger_price
     volume_confirmed = volume_context.get("reversal_volume_state") == "confirmed_bounce"
     heavy_distribution = volume_context.get("selloff_volume_state") == "heavy_distribution"
@@ -120,6 +151,16 @@ def build_confirmation_plan(
         "preferred_entry_low": round(zone_low, 6),
         "preferred_entry_high": round(zone_high, 6),
         "confirmation_trigger_price": trigger_price,
+        "near_confirmation": near_confirmation,
+        "primary_entry_trigger": primary_level,
+        "strong_confirmation": strong_confirmation,
+        "major_trend_repair": major_trend_repair,
+        "confirmation_levels": {
+            "near_confirmation": near_confirmation,
+            "primary_entry_trigger": primary_level,
+            "strong_confirmation": strong_confirmation,
+            "major_trend_repair": major_trend_repair,
+        },
         "confirmation_reason": trigger_reason,
         "confirmation_state": confirmation_state,
         "entry_status": entry_status,

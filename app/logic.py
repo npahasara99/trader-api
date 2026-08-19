@@ -71,7 +71,17 @@ class PlanRow:
     price_location_category: str | None = None
     price_location_reasons: list[str] = field(default_factory=list)
     consecutive_green_sessions: int | None = None
+    broader_structure: str | None = None
     setup_type: str | None = None
+    execution_structure: str | None = None
+    scenario_setup_type: str | None = None
+    setup_id: str | None = None
+    setup_created_at: str | None = None
+    setup_last_validated_at: str | None = None
+    setup_status: str | None = None
+    setup_invalidated_at: str | None = None
+    setup_invalidation_reason: str | None = None
+    replaced_setup: dict | None = None
     catalyst_signals: list[str] = field(default_factory=list)
     news_directional_bias: str | None = None
     catalyst_strength_score: float | None = None
@@ -146,6 +156,11 @@ class PlanRow:
     preferred_entry_low: float | None = None
     preferred_entry_high: float | None = None
     confirmation_trigger_price: float | None = None
+    near_confirmation: dict | None = None
+    primary_entry_trigger: dict | None = None
+    strong_confirmation: dict | None = None
+    major_trend_repair: dict | None = None
+    confirmation_levels: dict | None = None
     confirmation_reason: str | None = None
     confirmation_state: str | None = None
     entry_status: str | None = None
@@ -1121,6 +1136,7 @@ def build_swing_plan(
     history_stats_by_ticker: dict[str, dict] | None = None,
     pre_scan_by_ticker: dict[str, dict] | None = None,
     ticker_metadata_by_ticker: dict[str, dict] | None = None,
+    previous_setup_by_ticker: dict[str, dict] | None = None,
     llm_provider: str | None = None,
     llm_model: str | None = None,
     llm_style: str | None = None,
@@ -1238,6 +1254,7 @@ def build_swing_plan(
                 benchmark_bars=benchmark_bars,
                 ticker_meta=ticker_meta,
                 sector_relative_strength=pre_scan.get("sector_relative_strength"),
+                previous_setup=(previous_setup_by_ticker or {}).get(t),
                 llm_provider=llm_provider,
                 llm_model=llm_model,
                 llm_style=llm_style,
@@ -1353,7 +1370,17 @@ def build_swing_plan(
                 price_location_category=structured.get("price_location_category"),
                 price_location_reasons=list(structured.get("price_location_reasons") or []),
                 consecutive_green_sessions=structured.get("consecutive_green_sessions"),
+                broader_structure=structured.get("broader_structure"),
                 setup_type=structured.get("setup_type"),
+                execution_structure=structured.get("execution_structure"),
+                scenario_setup_type=structured.get("scenario_setup_type"),
+                setup_id=structured.get("setup_id"),
+                setup_created_at=structured.get("setup_created_at"),
+                setup_last_validated_at=structured.get("setup_last_validated_at"),
+                setup_status=structured.get("setup_status"),
+                setup_invalidated_at=structured.get("setup_invalidated_at"),
+                setup_invalidation_reason=structured.get("setup_invalidation_reason"),
+                replaced_setup=structured.get("replaced_setup"),
                 catalyst_signals=list(structured.get("catalyst_signals") or []),
                 news_directional_bias=structured.get("news_directional_bias"),
                 catalyst_strength_score=structured.get("catalyst_strength_score"),
@@ -1428,6 +1455,11 @@ def build_swing_plan(
                 preferred_entry_low=structured.get("preferred_entry_low"),
                 preferred_entry_high=structured.get("preferred_entry_high"),
                 confirmation_trigger_price=structured.get("confirmation_trigger_price"),
+                near_confirmation=structured.get("near_confirmation"),
+                primary_entry_trigger=structured.get("primary_entry_trigger"),
+                strong_confirmation=structured.get("strong_confirmation"),
+                major_trend_repair=structured.get("major_trend_repair"),
+                confirmation_levels=structured.get("confirmation_levels"),
                 confirmation_reason=structured.get("confirmation_reason"),
                 confirmation_state=structured.get("confirmation_state"),
                 entry_status=structured.get("entry_status"),

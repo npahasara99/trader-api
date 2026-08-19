@@ -15,6 +15,15 @@ from .scanner import build_pre_scan_profile, sector_benchmark_symbol_for_meta
 from .suitability import build_swing_trade_suitability
 from .supabase_reporting import persist_scan_workflow_to_supabase, persist_sp100_workflow_to_supabase
 from .opportunity_ranking import build_portfolio_snapshot, rank_daily_opportunities
+from .candidate_discovery import (
+    build_sector_aware_candidate_order,
+    classify_best_setup_quality,
+    classify_search_exhaustiveness,
+    run_adaptive_batches,
+    sector_counts,
+    validate_sp500_universe,
+)
+from .market_session import classify_market_session
 from .universe import get_sp500_universe
 from .what_to_watch import build_what_to_watch
 from .watchlist import build_watchlist_profile
@@ -291,7 +300,17 @@ class PlanRowOut(BaseModel):
     price_location_category: Optional[str] = None
     price_location_reasons: List[str] = Field(default_factory=list)
     consecutive_green_sessions: Optional[int] = None
+    broader_structure: Optional[str] = None
     setup_type: Optional[str] = None
+    execution_structure: Optional[str] = None
+    scenario_setup_type: Optional[str] = None
+    setup_id: Optional[str] = None
+    setup_created_at: Optional[str] = None
+    setup_last_validated_at: Optional[str] = None
+    setup_status: Optional[str] = None
+    setup_invalidated_at: Optional[str] = None
+    setup_invalidation_reason: Optional[str] = None
+    replaced_setup: Optional[dict] = None
     catalyst_signals: List[str] = Field(default_factory=list)
     news_directional_bias: Optional[str] = None
     catalyst_strength_score: Optional[float] = None
@@ -366,6 +385,11 @@ class PlanRowOut(BaseModel):
     preferred_entry_low: Optional[float] = None
     preferred_entry_high: Optional[float] = None
     confirmation_trigger_price: Optional[float] = None
+    near_confirmation: Optional[dict] = None
+    primary_entry_trigger: Optional[dict] = None
+    strong_confirmation: Optional[dict] = None
+    major_trend_repair: Optional[dict] = None
+    confirmation_levels: Optional[dict] = None
     confirmation_reason: Optional[str] = None
     confirmation_state: Optional[str] = None
     entry_status: Optional[str] = None
@@ -599,6 +623,11 @@ class Sp500DailyOpportunitiesRequest(BaseModel):
     llm_model: Optional[str] = None
     llm_style: Optional[str] = "sp500_daily_ranker_v1"
     compact_response: bool = False
+    adaptive_expansion: bool = True
+    deep_analysis_batch_size: int = DEFAULT_PLANNING_CONFIG.sp500_deep_analysis_batch_size
+    max_deep_analysis_limit: int = DEFAULT_PLANNING_CONFIG.sp500_max_deep_analysis_limit
+    min_deep_candidates_per_sector: int = DEFAULT_PLANNING_CONFIG.sp500_min_deep_candidates_per_sector
+    target_actionable_candidates: int = DEFAULT_PLANNING_CONFIG.sp500_target_actionable_candidates
 
 
 class DailyOpportunityOut(BaseModel):
@@ -609,18 +638,31 @@ class DailyOpportunityOut(BaseModel):
     industry: str
     correlation_group: str
     setup_type: Optional[str] = None
+    broader_structure: Optional[str] = None
+    execution_structure: Optional[str] = None
     grade: str
     action: str
     planner_action: Optional[str] = None
     raw_setup_score: float
     actionability_score: float
+    actionability_raw: float = 0.0
+    actionability_penalties: dict = Field(default_factory=dict)
+    actionability_positive: List[str] = Field(default_factory=list)
+    actionability_negative: List[str] = Field(default_factory=list)
     portfolio_fit_score: float
     trade_today_score: float
     actionability_state: str
+    execution_timing: Optional[str] = None
     confirmation_status: str
     current_price: Optional[float] = None
     preferred_entry: Optional[float] = None
     confirmation_trigger: Optional[float] = None
+    near_confirmation: Optional[dict] = None
+    primary_entry_trigger: Optional[dict] = None
+    strong_confirmation: Optional[dict] = None
+    major_trend_repair: Optional[dict] = None
+    distance_to_primary_trigger_pct: Optional[float] = None
+    next_trigger_rank_score: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit_1: Optional[float] = None
     take_profit_2: Optional[float] = None
@@ -646,6 +688,10 @@ class Sp500DailyOpportunitiesResponse(BaseModel):
     universe_source: str
     universe_used_fallback: bool = False
     universe_warning: Optional[str] = None
+    symbols_loaded: int = 0
+    market_session: str = "closed"
+    search_exhaustiveness: str = "partial"
+    best_setup_quality_state: str = "no_quality_setups"
     scanned_universe_size: int
     pre_scanned_count: int
     pre_scan_shortlist_count: int
@@ -842,7 +888,17 @@ def _to_plan_row_out(r) -> PlanRowOut:
         price_location_category=getattr(r, "price_location_category", None),
         price_location_reasons=list(getattr(r, "price_location_reasons", []) or []),
         consecutive_green_sessions=getattr(r, "consecutive_green_sessions", None),
+        broader_structure=getattr(r, "broader_structure", None),
         setup_type=getattr(r, "setup_type", None),
+        execution_structure=getattr(r, "execution_structure", None),
+        scenario_setup_type=getattr(r, "scenario_setup_type", None),
+        setup_id=getattr(r, "setup_id", None),
+        setup_created_at=getattr(r, "setup_created_at", None),
+        setup_last_validated_at=getattr(r, "setup_last_validated_at", None),
+        setup_status=getattr(r, "setup_status", None),
+        setup_invalidated_at=getattr(r, "setup_invalidated_at", None),
+        setup_invalidation_reason=getattr(r, "setup_invalidation_reason", None),
+        replaced_setup=getattr(r, "replaced_setup", None),
         catalyst_signals=list(getattr(r, "catalyst_signals", []) or []),
         news_directional_bias=getattr(r, "news_directional_bias", None),
         catalyst_strength_score=getattr(r, "catalyst_strength_score", None),
@@ -917,6 +973,11 @@ def _to_plan_row_out(r) -> PlanRowOut:
         preferred_entry_low=getattr(r, "preferred_entry_low", None),
         preferred_entry_high=getattr(r, "preferred_entry_high", None),
         confirmation_trigger_price=getattr(r, "confirmation_trigger_price", None),
+        near_confirmation=getattr(r, "near_confirmation", None),
+        primary_entry_trigger=getattr(r, "primary_entry_trigger", None),
+        strong_confirmation=getattr(r, "strong_confirmation", None),
+        major_trend_repair=getattr(r, "major_trend_repair", None),
+        confirmation_levels=getattr(r, "confirmation_levels", None),
         confirmation_reason=getattr(r, "confirmation_reason", None),
         confirmation_state=getattr(r, "confirmation_state", None),
         entry_status=getattr(r, "entry_status", None),
@@ -1083,6 +1144,18 @@ def _queue_rows_for_logging(db: Session, *, planned_at: datetime, mode: str, row
             else:
                 news_items.append(n.model_dump())
 
+        primary_trigger = (r.primary_entry_trigger or {}).get("price") if r.primary_entry_trigger else None
+        lifecycle_tags = [
+            value
+            for value in (
+                f"setup_id:{r.setup_id}" if r.setup_id else None,
+                f"setup_created_at:{r.setup_created_at}" if r.setup_created_at else None,
+                f"setup_status:{r.setup_status}" if r.setup_status else None,
+                f"primary_trigger:{primary_trigger}" if primary_trigger is not None else None,
+            )
+            if value
+        ]
+
         db.add(
             SwingDecision(
                 ticker=r.ticker,
@@ -1104,6 +1177,7 @@ def _queue_rows_for_logging(db: Session, *, planned_at: datetime, mode: str, row
                 earnings_score=int(r.earnings_score) if r.earnings_score is not None else None,
                 earnings_context_json=(json.dumps(r.earnings_context) if r.earnings_context is not None else None),
                 news_json=json.dumps(news_items),
+                tags_json=json.dumps(lifecycle_tags) if lifecycle_tags else None,
             )
         )
         rows_logged += 1
@@ -2109,18 +2183,31 @@ def _daily_opportunity_out(candidate: dict, *, compact: bool) -> DailyOpportunit
         industry=candidate["industry"],
         correlation_group=candidate["correlation_group"],
         setup_type=candidate.get("setup_type"),
+        broader_structure=candidate.get("broader_structure"),
+        execution_structure=candidate.get("execution_structure"),
         grade=candidate["grade"],
         action=candidate["action"],
         planner_action=candidate.get("planner_action"),
         raw_setup_score=candidate["raw_setup_score"],
+        actionability_raw=candidate.get("actionability_raw", candidate["actionability_score"]),
+        actionability_penalties=dict(candidate.get("actionability_penalties") or {}),
+        actionability_positive=list(candidate.get("actionability_positive") or []),
+        actionability_negative=list(candidate.get("actionability_negative") or []),
         actionability_score=candidate["actionability_score"],
         portfolio_fit_score=candidate["portfolio_fit_score"],
         trade_today_score=candidate["trade_today_score"],
         actionability_state=candidate["actionability_state"],
+        execution_timing=candidate.get("execution_timing"),
         confirmation_status=candidate["confirmation_status"],
         current_price=candidate.get("current_price"),
         preferred_entry=candidate.get("preferred_entry"),
         confirmation_trigger=candidate.get("confirmation_trigger"),
+        near_confirmation=candidate.get("near_confirmation"),
+        primary_entry_trigger=candidate.get("primary_entry_trigger"),
+        strong_confirmation=candidate.get("strong_confirmation"),
+        major_trend_repair=candidate.get("major_trend_repair"),
+        distance_to_primary_trigger_pct=candidate.get("distance_to_primary_trigger_pct"),
+        next_trigger_rank_score=candidate.get("next_trigger_rank_score"),
         stop_loss=candidate.get("stop_loss"),
         take_profit_1=candidate.get("take_profit_1"),
         take_profit_2=candidate.get("take_profit_2"),
@@ -2148,8 +2235,16 @@ def workflow_sp500_daily_opportunities(
 
     workflow_started = time.monotonic()
     planned_at = datetime.now(timezone.utc)
+    market_session = classify_market_session(planned_at)
     prescan_limit = max(10, min(int(req.prescan_limit), 200))
-    deep_limit = max(1, min(int(req.deep_analysis_limit), prescan_limit, 75))
+    max_deep_limit = max(
+        1,
+        min(int(req.max_deep_analysis_limit), prescan_limit, DEFAULT_PLANNING_CONFIG.sp500_max_deep_analysis_limit),
+    )
+    deep_limit = max(1, min(int(req.deep_analysis_limit), max_deep_limit))
+    deep_batch_size = max(1, min(int(req.deep_analysis_batch_size), max_deep_limit))
+    target_actionable = max(1, min(int(req.target_actionable_candidates), 5))
+    min_per_sector = max(0, min(int(req.min_deep_candidates_per_sector), 10))
     best_setups_count = max(1, min(int(req.best_setups_count), deep_limit, 25))
     best_trades_max = max(0, min(int(req.best_trades_today_max), 5))
     next_to_trigger_count = max(1, min(int(req.next_to_trigger_count), 10))
@@ -2159,6 +2254,12 @@ def workflow_sp500_daily_opportunities(
     base_universe, universe_snapshot, metadata_by_ticker = get_sp500_universe(
         sector=req.sector,
         industry=req.industry,
+    )
+    universe_validation = validate_sp500_universe(
+        universe_size=len(base_universe),
+        sector_filter=req.sector,
+        industry_filter=req.industry,
+        minimum_broad_size=DEFAULT_PLANNING_CONFIG.sp500_universe_minimum_broad_size,
     )
     sector_benchmarks = {
         benchmark
@@ -2188,6 +2289,28 @@ def workflow_sp500_daily_opportunities(
     )
     prescan_cache_coverage["missing_symbols"] = list(prescan_cache_coverage.get("missing_symbols") or [])[:25]
     prescan_cache_coverage["stale_symbols"] = list(prescan_cache_coverage.get("stale_symbols") or [])[:25]
+    broad_scope = not bool((req.sector or "").strip() or (req.industry or "").strip())
+    market_data_minimum = min(
+        DEFAULT_PLANNING_CONFIG.sp500_universe_minimum_broad_size,
+        max(len(base_universe), 1),
+    )
+    market_data_validation = {
+        "status": "valid",
+        "valid": True,
+        "expected_minimum": market_data_minimum if broad_scope else None,
+        "warning": None,
+    }
+    if broad_scope and prescan_cache_coverage["constituents_current"] < market_data_minimum:
+        market_data_validation = {
+            "status": "MARKET_DATA_COVERAGE_INSUFFICIENT",
+            "valid": False,
+            "expected_minimum": market_data_minimum,
+            "warning": (
+                "Broad SP500 universe loaded, but only "
+                f"{prescan_cache_coverage['constituents_current']} constituents have current cached daily bars. "
+                "Sector results may be incomplete until the SP500 daily-bar cache is backfilled."
+            ),
+        }
     ranked_prescan = _rank_pre_scan_universe(
         base_universe,
         daily_closes_loader=prescan_closes_loader,
@@ -2210,7 +2333,13 @@ def workflow_sp500_daily_opportunities(
         if item.get("scan_rejection_reason") and not item.get("prescan_error")
     ]
     prescan_passed = [item for item in ranked_prescan if not item.get("scan_rejection_reason")]
-    prescan_ranked = prescan_passed[:prescan_limit]
+    sector_aware_order = build_sector_aware_candidate_order(
+        prescan_passed,
+        metadata_by_ticker=metadata_by_ticker,
+        initial_limit=deep_limit,
+        min_per_sector=min_per_sector,
+    )
+    prescan_ranked = sector_aware_order[:prescan_limit]
     shortlist = prescan_ranked[:deep_limit]
     deep_universe = [item["ticker"] for item in shortlist]
     pre_scan_by_ticker = {
@@ -2257,43 +2386,39 @@ def workflow_sp500_daily_opportunities(
     except Exception:
         history_stats = {}
 
-    rows = []
-    if deep_universe:
-        rows = build_swing_plan(
-            deep_universe,
-            regime=regime_snapshot["regime"],
-            buy_threshold=thresholds["buy_threshold"],
-            avoid_threshold=thresholds["avoid_threshold"],
-            daily_closes_loader=daily_closes_loader,
-            daily_bars_loader=daily_bars_loader,
-            timeframe_bars_loader=get_timeframe_bars,
-            history_stats_by_ticker=history_stats,
-            pre_scan_by_ticker=pre_scan_by_ticker,
-            ticker_metadata_by_ticker=metadata_by_ticker,
-            llm_provider=req.llm_provider,
-            llm_model=req.llm_model,
-            llm_style=req.llm_style,
+    previous_setup_error = None
+    previous_setup_by_ticker: dict[str, dict] = {}
+    try:
+        prior_decisions = (
+            db.query(SwingDecision)
+            .filter(SwingDecision.ticker.in_([item["ticker"] for item in prescan_ranked]))
+            .order_by(SwingDecision.planned_at.desc())
+            .all()
         )
-    deep_analysis_seconds = round(time.monotonic() - deep_analysis_started, 3)
-    print(
-        "SP500 workflow deep analysis complete: "
-        f"requested={len(deep_universe)} rows={len(rows)} seconds={deep_analysis_seconds}"
-    )
-
-    candidates_with_price = 0
-    for row in rows:
-        if row.entry is None or row.stop is None or row.take_profit is None:
-            continue
-        candidates_with_price += 1
-        stats = history_stats.get(row.ticker) or {}
-        _apply_prob_and_action(
-            row,
-            regime=regime_snapshot["regime"],
-            buy_threshold=thresholds["buy_threshold"],
-            avoid_threshold=thresholds["avoid_threshold"],
-            history_win_rate=(float(stats["win_rate"]) if stats.get("samples", 0) >= min_history_samples else None),
-            history_samples=int(stats.get("samples", 0)),
-        )
+        for decision in prior_decisions:
+            if decision.ticker in previous_setup_by_ticker:
+                continue
+            lifecycle_values: dict[str, str] = {}
+            try:
+                for tag in json.loads(decision.tags_json or "[]"):
+                    key, separator, value = str(tag).partition(":")
+                    if separator:
+                        lifecycle_values[key] = value
+            except (TypeError, ValueError, json.JSONDecodeError):
+                lifecycle_values = {}
+            prior_trigger = lifecycle_values.get("primary_trigger")
+            previous_setup_by_ticker[decision.ticker] = {
+                "setup_id": lifecycle_values.get("setup_id") or f"legacy-decision-{decision.id}",
+                "setup_created_at": lifecycle_values.get("setup_created_at") or decision.planned_at.isoformat(),
+                "invalidation_level": float(decision.stop),
+                # Legacy rows fall back to entry as context only. New rows store
+                # the actual primary trigger in tags_json.
+                "primary_entry_trigger": {
+                    "price": float(prior_trigger) if prior_trigger is not None else float(decision.entry)
+                },
+            }
+    except Exception as exc:
+        previous_setup_error = f"{type(exc).__name__}: {exc}"
 
     portfolio_error = None
     try:
@@ -2322,6 +2447,79 @@ def workflow_sp500_daily_opportunities(
         max_positions=int(settings.MAX_OPEN_POSITIONS),
         trading_budget=float(settings.TRADING_BUDGET),
     )
+
+    def analyze_candidate_batch(batch_items: list[dict]):
+        batch_tickers = [item["ticker"] for item in batch_items]
+        batch_pre_scan = {
+            item["ticker"]: {**item, "scan_shortlisted": True}
+            for item in batch_items
+        }
+        batch_rows = build_swing_plan(
+            batch_tickers,
+            regime=regime_snapshot["regime"],
+            buy_threshold=thresholds["buy_threshold"],
+            avoid_threshold=thresholds["avoid_threshold"],
+            daily_closes_loader=daily_closes_loader,
+            daily_bars_loader=daily_bars_loader,
+            timeframe_bars_loader=get_timeframe_bars,
+            history_stats_by_ticker=history_stats,
+            pre_scan_by_ticker=batch_pre_scan,
+            ticker_metadata_by_ticker=metadata_by_ticker,
+            previous_setup_by_ticker=previous_setup_by_ticker,
+            llm_provider=req.llm_provider,
+            llm_model=req.llm_model,
+            llm_style=req.llm_style,
+        )
+        for row in batch_rows:
+            if row.entry is None or row.stop is None or row.take_profit is None:
+                continue
+            stats = history_stats.get(row.ticker) or {}
+            _apply_prob_and_action(
+                row,
+                regime=regime_snapshot["regime"],
+                buy_threshold=thresholds["buy_threshold"],
+                avoid_threshold=thresholds["avoid_threshold"],
+                history_win_rate=(
+                    float(stats["win_rate"])
+                    if stats.get("samples", 0) >= min_history_samples
+                    else None
+                ),
+                history_samples=int(stats.get("samples", 0)),
+            )
+        return batch_rows
+
+    def count_strict_actionable(candidate_rows) -> int:
+        interim = rank_daily_opportunities(
+            candidate_rows,
+            metadata_by_ticker=metadata_by_ticker,
+            market_regime=regime_snapshot["regime"],
+            portfolio=portfolio,
+            best_setups_count=max(best_setups_count, target_actionable),
+            best_trades_max=target_actionable,
+            next_to_trigger_count=next_to_trigger_count,
+        )
+        return len(interim["best_trades_today"])
+
+    rows, adaptive_history = run_adaptive_batches(
+        prescan_ranked,
+        initial_limit=deep_limit,
+        batch_size=deep_batch_size,
+        maximum_limit=max_deep_limit,
+        target_actionable=target_actionable,
+        adaptive=bool(req.adaptive_expansion),
+        analyze_batch=analyze_candidate_batch,
+        count_actionable=count_strict_actionable,
+    ) if prescan_ranked else ([], [])
+    deep_analysis_seconds = round(time.monotonic() - deep_analysis_started, 3)
+    print(
+        "SP500 workflow deep analysis complete: "
+        f"initial={len(deep_universe)} analyzed={len(rows)} batches={len(adaptive_history)} "
+        f"seconds={deep_analysis_seconds}"
+    )
+
+    candidates_with_price = sum(
+        1 for row in rows if row.entry is not None and row.stop is not None and row.take_profit is not None
+    )
     ranking = rank_daily_opportunities(
         rows,
         metadata_by_ticker=metadata_by_ticker,
@@ -2331,6 +2529,14 @@ def workflow_sp500_daily_opportunities(
         best_trades_max=best_trades_max,
         next_to_trigger_count=next_to_trigger_count,
     )
+    for bucket_name in ("all_candidates", "best_setups", "best_trades_today", "next_to_trigger"):
+        for candidate in ranking[bucket_name]:
+            if candidate["actionability_state"] == "actionable":
+                candidate["execution_timing"] = (
+                    "actionable_now" if market_session == "regular" else "ready_for_next_session"
+                )
+            else:
+                candidate["execution_timing"] = candidate["actionability_state"]
     for candidate in ranking["all_candidates"]:
         _apply_daily_opportunity_fields(candidate)
 
@@ -2375,12 +2581,57 @@ def workflow_sp500_daily_opportunities(
         ],
         *failed_rows,
     ]
+    rejection_reason_aliases = {
+        "price_below_minimum": "price_too_low",
+        "average_daily_volume_below_minimum": "low_liquidity",
+        "planner_crashed": "data_failure",
+        "prescan_crashed": "data_failure",
+    }
     rejection_reason_counts = Counter(
-        reason.strip()
+        rejection_reason_aliases.get(reason.strip(), reason.strip())
         for item in prescan_rejected
         for reason in str(item.get("scan_rejection_reason") or "missing_required_data").split(",")
         if reason.strip()
     )
+    actionable_count = sum(
+        1 for item in ranking["all_candidates"] if item["actionability_state"] == "actionable"
+    )
+    a_grade_count = sum(
+        1 for item in ranking["all_candidates"] if item["grade"] in {"A-", "A", "A+"}
+    )
+    search_exhaustiveness = classify_search_exhaustiveness(
+        analyzed=len(rows),
+        viable=len(prescan_ranked),
+        initial_limit=deep_limit,
+        maximum_limit=max_deep_limit,
+    )
+    best_setup_quality_state = classify_best_setup_quality(ranking["all_candidates"])
+    market_data_tickers = [ticker for ticker in base_universe if prescan_bars_loader(ticker)]
+    valid_setup_tickers = [item["ticker"] for item in ranking["all_candidates"]]
+    best_setup_tickers = [item["ticker"] for item in ranking["best_setups"]]
+    sector_stage_counts = {
+        "universe_sector_counts": sector_counts(base_universe, metadata_by_ticker),
+        "market_data_sector_counts": sector_counts(market_data_tickers, metadata_by_ticker),
+        "suitability_sector_counts": sector_counts(prescan_passed, metadata_by_ticker),
+        "prescan_sector_counts": sector_counts(prescan_ranked, metadata_by_ticker),
+        "initial_shortlist_sector_counts": sector_counts(shortlist, metadata_by_ticker),
+        "deep_analysis_sector_counts": sector_counts(rows, metadata_by_ticker),
+        "valid_setup_sector_counts": sector_counts(valid_setup_tickers, metadata_by_ticker),
+        "best_setup_sector_counts": sector_counts(best_setup_tickers, metadata_by_ticker),
+    }
+    failed_symbol_count = len({item.get("ticker") for item in failure_reasons if item.get("ticker")})
+    candidate_funnel = {
+        "universe_loaded": len(base_universe),
+        "market_data_success": len(market_data_tickers),
+        "basic_suitability_passed": len(prescan_passed),
+        "prescan_passed": len(prescan_ranked),
+        "initial_shortlisted": len(shortlist),
+        "deep_analyzed": len(rows),
+        "valid_setups": len(ranking["all_candidates"]),
+        "a_grade_setups": a_grade_count,
+        "actionable_setups": actionable_count,
+        "failed_symbols": failed_symbol_count,
+    }
     if not shortlist:
         selection_message = (
             "NO CURRENT S&P 500 DAILY-BAR COVERAGE WAS AVAILABLE FOR DEEP ANALYSIS. "
@@ -2392,20 +2643,27 @@ def workflow_sp500_daily_opportunities(
             f"{'s' if len(best_trades_today) != 1 else ''} confirmed today."
         )
     else:
-        selection_message = "NO HIGH-QUALITY TRADE CURRENTLY CONFIRMED"
+        selection_message = (
+            "NO HIGH-QUALITY TRADE CURRENTLY CONFIRMED. "
+            f"Deep analysis covered {len(rows)} of {len(prescan_ranked)} viable prescan candidates "
+            f"({search_exhaustiveness})."
+        )
     scan_summary = {
         "universe": "SP500",
         "universe_size": len(base_universe),
+        "symbols_loaded": len(base_universe),
+        "market_data_success": len(market_data_tickers),
         "suitability_passed": len(prescan_passed),
         "prescan_passed": len(prescan_ranked),
-        "shortlisted": len(prescan_ranked),
+        "shortlisted": len(shortlist),
+        "initial_deep_analysis_size": len(shortlist),
+        "expanded_deep_analysis_size": max(len(rows) - len(shortlist), 0),
         "deep_analyzed": len(rows),
-        "actionable_count": sum(
-            1 for item in ranking["all_candidates"] if item["actionability_state"] == "actionable"
-        ),
-        "a_grade_setup_count": sum(
-            1 for item in ranking["all_candidates"] if item["grade"] in {"A-", "A", "A+"}
-        ),
+        "actionable_count": actionable_count,
+        "a_grade_setup_count": a_grade_count,
+        "search_exhaustiveness": search_exhaustiveness,
+        "best_setup_quality_state": best_setup_quality_state,
+        "market_session": market_session,
         "market_regime": regime_snapshot["regime"],
         "cached_constituents_current": prescan_cache_coverage["constituents_current"],
         "cached_constituents_with_sufficient_history": prescan_cache_coverage[
@@ -2441,6 +2699,20 @@ def workflow_sp500_daily_opportunities(
         },
     }
     diagnostics = {
+        "universe_validation": universe_validation,
+        "market_data_validation": market_data_validation,
+        "candidate_funnel": candidate_funnel,
+        "sector_stage_counts": sector_stage_counts,
+        "adaptive_expansion": {
+            "enabled": bool(req.adaptive_expansion),
+            "target_actionable": target_actionable,
+            "initial_limit": deep_limit,
+            "batch_size": deep_batch_size,
+            "maximum_limit": max_deep_limit,
+            "batches": adaptive_history,
+            "remaining_viable_candidates": max(len(prescan_ranked) - len(rows), 0),
+            "search_exhaustiveness": search_exhaustiveness,
+        },
         "successful_tickers": [item["ticker"] for item in ranking["all_candidates"]],
         "failed_tickers": [item.get("ticker") for item in failure_reasons],
         "failure_reasons": failure_reasons,
@@ -2448,7 +2720,15 @@ def workflow_sp500_daily_opportunities(
         "prescan_rejected_count": len(prescan_rejected),
         "market_regime_details": regime_snapshot,
         "portfolio_read_error": portfolio_error,
+        "previous_setup_read_error": previous_setup_error,
         "daily_bar_cache_coverage": prescan_cache_coverage,
+        "performance": {
+            "scan_duration_seconds": round(time.monotonic() - workflow_started, 3),
+            "market_data_requests": None,
+            "market_data_request_count_available": False,
+            "cache_hits": len(market_data_tickers),
+            "symbols_failed": failed_symbol_count,
+        },
         "stage_seconds": {
             "prescan": prescan_seconds,
             "deep_analysis": deep_analysis_seconds,
@@ -2459,10 +2739,14 @@ def workflow_sp500_daily_opportunities(
         planned_at=planned_at,
         market_regime=regime_snapshot["regime"],
         universe_size=len(base_universe),
+        symbols_loaded=len(base_universe),
         universe_as_of=universe_snapshot.as_of,
         universe_source=universe_snapshot.source,
         universe_used_fallback=universe_snapshot.used_fallback,
-        universe_warning=universe_snapshot.warning,
+        universe_warning=universe_snapshot.warning or universe_validation.get("warning"),
+        market_session=market_session,
+        search_exhaustiveness=search_exhaustiveness,
+        best_setup_quality_state=best_setup_quality_state,
         scanned_universe_size=len(base_universe),
         pre_scanned_count=len(prescan_ranked),
         pre_scan_shortlist_count=len(shortlist),

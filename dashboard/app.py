@@ -108,8 +108,13 @@ RUNNER_DEFAULTS = {
     "sp100_llm_model": "gpt-5",
     "sp100_llm_style": "sp100_ranker_v2_structured",
     "sp100_compact_response": False,
-    "sp500_prescan_limit": 75,
+    "sp500_prescan_limit": 150,
     "sp500_deep_analysis_limit": 30,
+    "sp500_adaptive_expansion": True,
+    "sp500_deep_analysis_batch_size": 15,
+    "sp500_max_deep_analysis_limit": 75,
+    "sp500_min_deep_candidates_per_sector": 2,
+    "sp500_target_actionable_candidates": 2,
     "sp500_best_setups_count": 10,
     "sp500_best_trades_max": 2,
     "sp500_next_to_trigger_count": 5,
@@ -342,17 +347,24 @@ def _render_sp500_workflow_result(result: dict) -> None:
     portfolio = result.get("portfolio_summary") or {}
     diagnostics = result.get("diagnostics") or {}
     cache_coverage = diagnostics.get("daily_bar_cache_coverage") or {}
-    metric_cols = st.columns(5)
+    metric_cols = st.columns(4)
     with metric_cols[0]:
         render_kpi_card("Market", result.get("market_regime") or "-")
     with metric_cols[1]:
         render_kpi_card("Universe", int(result.get("universe_size") or 0), small=True)
     with metric_cols[2]:
-        render_kpi_card("Deep Analyzed", int(summary.get("deep_analyzed") or 0), small=True)
+        render_kpi_card("Market Data", int(summary.get("market_data_success") or 0), small=True)
     with metric_cols[3]:
+        render_kpi_card("Suitable", int(summary.get("suitability_passed") or 0), small=True)
+    result_cols = st.columns(4)
+    with result_cols[0]:
+        render_kpi_card("Deep Analyzed", int(summary.get("deep_analyzed") or 0), small=True)
+    with result_cols[1]:
+        render_kpi_card("Search", pretty_label(result.get("search_exhaustiveness")), small=True)
+    with result_cols[2]:
+        render_kpi_card("A / A- Setups", int(summary.get("a_grade_setup_count") or 0), small=True)
+    with result_cols[3]:
         render_kpi_card("Actionable", int(summary.get("actionable_count") or 0), small=True)
-    with metric_cols[4]:
-        render_kpi_card("Open Slots", int(portfolio.get("available_position_slots") or 0), small=True)
 
     if result.get("universe_used_fallback"):
         st.caption(
@@ -371,8 +383,14 @@ def _render_sp500_workflow_result(result: dict) -> None:
             f"{sufficient_cache_count} have enough history for pre-screening. "
             f"Cache as of {cache_coverage.get('cache_as_of') or 'unknown'}."
         )
+    market_data_validation = diagnostics.get("market_data_validation") or {}
+    if market_data_validation.get("valid") is False:
+        st.warning(str(market_data_validation.get("warning") or "S&P 500 market-data coverage is incomplete."))
     if not (result.get("best_setups") or []) and result.get("selection_message"):
         st.warning(str(result.get("selection_message")))
+    quality_state = str(result.get("best_setup_quality_state") or "")
+    if quality_state in {"weak_scan", "no_quality_setups"}:
+        st.warning("NO A-GRADE SETUPS CURRENTLY FOUND. The table below contains the highest-ranked watch candidates.")
 
     if result.get("supabase_persisted"):
         st.toast("S&P 500 scan persisted to the reporting database.", icon=":material/check_circle:")
@@ -389,7 +407,7 @@ def _render_sp500_workflow_result(result: dict) -> None:
             with trade_cols[index % len(trade_cols)]:
                 render_daily_trade_card(item)
 
-    st.markdown("### Best Setups")
+    st.markdown("### Highest-Ranked Watch Candidates" if quality_state in {"weak_scan", "no_quality_setups"} else "### Best Setups")
     st.caption("Objective individual setup quality. Portfolio concentration does not change this ranking.")
     setups = result.get("best_setups") or []
     if setups:
@@ -422,7 +440,27 @@ def _render_sp500_workflow_result(result: dict) -> None:
         st.caption("No high-quality setup is currently close to a defined trigger.")
 
     with st.expander("Scanner Diagnostics", expanded=False):
-        st.json(diagnostics)
+        validation = diagnostics.get("universe_validation") or {}
+        if validation.get("valid") is False:
+            st.error(validation.get("warning") or "Universe validation failed.")
+        funnel = diagnostics.get("candidate_funnel") or {}
+        if funnel:
+            st.markdown("**Candidate Funnel**")
+            st.dataframe(
+                pd.DataFrame([{"Stage": pretty_label(key), "Count": value} for key, value in funnel.items()]),
+                use_container_width=True,
+                hide_index=True,
+            )
+        sector_stages = diagnostics.get("sector_stage_counts") or {}
+        if sector_stages:
+            st.markdown("**Sector Coverage by Stage**")
+            sector_frame = pd.DataFrame(sector_stages).fillna(0).astype(int)
+            sector_frame.index.name = "Sector"
+            st.dataframe(sector_frame.reset_index(), use_container_width=True, hide_index=True)
+        st.markdown("**Adaptive Expansion**")
+        st.json(diagnostics.get("adaptive_expansion") or {})
+        with st.expander("Raw Scanner Diagnostics", expanded=False):
+            st.json(diagnostics)
 
 
 def _render_runner_plan_result(rows: list[dict], *, planned_at: str | None = None, market_regime: str | None = None) -> None:
@@ -688,6 +726,13 @@ with scanner_tab:
                 output_cols = st.columns(2)
                 output_cols[0].number_input("Max Trades Today", min_value=0, max_value=5, key="sp500_best_trades_max")
                 output_cols[1].number_input("Next To Trigger", min_value=1, max_value=10, key="sp500_next_to_trigger_count")
+                with st.expander("Adaptive Search", expanded=False):
+                    st.checkbox("Expand analysis when strict actionable setups are not found", key="sp500_adaptive_expansion")
+                    adaptive_cols = st.columns(4)
+                    adaptive_cols[0].number_input("Batch Size", min_value=1, max_value=50, key="sp500_deep_analysis_batch_size")
+                    adaptive_cols[1].number_input("Maximum Deep", min_value=1, max_value=200, key="sp500_max_deep_analysis_limit")
+                    adaptive_cols[2].number_input("Min Per Sector", min_value=0, max_value=10, key="sp500_min_deep_candidates_per_sector")
+                    adaptive_cols[3].number_input("Target Actionable", min_value=1, max_value=5, key="sp500_target_actionable_candidates")
                 st.markdown("**Scope**")
                 scope_cols = st.columns(2)
                 scope_cols[0].text_input("Sector", key="sp500_sector", placeholder="Information Technology")
@@ -713,6 +758,11 @@ with scanner_tab:
                         "best_setups_count": int(st.session_state["sp500_best_setups_count"]),
                         "best_trades_today_max": int(st.session_state["sp500_best_trades_max"]),
                         "next_to_trigger_count": int(st.session_state["sp500_next_to_trigger_count"]),
+                        "adaptive_expansion": bool(st.session_state["sp500_adaptive_expansion"]),
+                        "deep_analysis_batch_size": int(st.session_state["sp500_deep_analysis_batch_size"]),
+                        "max_deep_analysis_limit": int(st.session_state["sp500_max_deep_analysis_limit"]),
+                        "min_deep_candidates_per_sector": int(st.session_state["sp500_min_deep_candidates_per_sector"]),
+                        "target_actionable_candidates": int(st.session_state["sp500_target_actionable_candidates"]),
                         "lookback_days": int(st.session_state["sp500_lookback_days"]),
                         "min_history_samples": int(st.session_state["sp500_min_history_samples"]),
                         "sector": (st.session_state.get("sp500_sector") or "").strip() or None,

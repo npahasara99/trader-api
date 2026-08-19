@@ -272,29 +272,43 @@ def build_daily_actionability_profile(
     }
     weights = config.daily_actionability_weights
     weighted = sum(components[key] * weights[key] for key in weights) / max(sum(weights.values()), 1e-9)
+    actionability_raw = _clip(weighted)
 
     extended_threshold = max(atr * config.actionability_extended_atr, current_price * config.actionability_extended_pct)
     exclusion_reasons: list[str] = []
+    penalties: dict[str, float] = {}
     if current_price <= max(invalidation, stop):
         state = "invalidated"
         exclusion_reasons.append("invalidated")
+        penalties["invalidated"] = actionability_raw
         weighted = 0.0
     elif tp1 > 0 and current_price >= tp1:
         state = "missed"
         exclusion_reasons.extend(["target_already_reached", "poor_current_rr"])
-        weighted = min(weighted, 2.0)
-    elif current_rr is not None and current_rr < config.actionability_missed_current_rr:
+        penalties["target_already_reached"] = 4.25
+        weighted -= penalties["target_already_reached"]
+    elif (
+        current_rr is not None
+        and current_rr < config.actionability_missed_current_rr
+        and price_confirmed
+        and trigger > 0
+        and current_price >= trigger
+    ):
         state = "missed"
         exclusion_reasons.append("poor_current_rr")
-        weighted = min(weighted, 3.0)
+        penalties["confirmed_but_poor_current_rr"] = 3.4
+        weighted -= penalties["confirmed_but_poor_current_rr"]
     elif trigger > 0 and current_price > trigger + extended_threshold:
         state = "extended"
         exclusion_reasons.append("too_extended")
-        weighted = min(weighted - 1.5, 5.0)
+        extension_atr = (current_price - trigger) / max(atr, current_price * 0.005)
+        penalties["extension"] = round(1.2 + min(max(extension_atr - 1.0, 0.0) * 0.45, 2.0), 4)
+        weighted -= penalties["extension"]
     elif base_entry_state in {"extended", "missed", "invalidated"}:
         state = base_entry_state
         exclusion_reasons.append(base_entry_state)
-        weighted = min(weighted, 4.0 if state == "extended" else 2.0)
+        penalties[f"planner_{state}"] = {"extended": 2.2, "missed": 3.6, "invalidated": actionability_raw}[state]
+        weighted -= penalties[f"planner_{state}"]
     elif price_confirmed and (volume_confirmed or confirmation_state == "confirmed"):
         state = "confirmed"
         weighted += 0.5
@@ -307,11 +321,15 @@ def build_daily_actionability_profile(
 
     if _value(row, "executable_stop_technically_valid", True) is False:
         exclusion_reasons.append("no_technically_valid_executable_stop")
-        weighted -= 3.0
+        penalties["no_technically_valid_executable_stop"] = 3.0
+        weighted -= penalties["no_technically_valid_executable_stop"]
     if current_rr is not None and current_rr < config.actionability_min_current_rr:
         if "poor_current_rr" not in exclusion_reasons:
             exclusion_reasons.append("poor_current_rr")
-        weighted -= 1.1
+        # Below an unreached trigger, poor current R:R is a penalty, not proof
+        # the setup was missed. The entry state remains confirmation-aware.
+        penalties["current_reward_risk"] = 1.1
+        weighted -= penalties["current_reward_risk"]
 
     score = _clip(weighted)
     if state == "confirmed" and score >= config.min_actionability_score:
@@ -326,7 +344,16 @@ def build_daily_actionability_profile(
         if market_regime in {"risk_off", "high_volatility"}:
             waiting_for.append({"type": "market_stabilization", "value": None})
 
+    positive = [
+        key for key, value in components.items() if float(value) >= 7.0
+    ]
+    negative = list(dict.fromkeys([
+        *exclusion_reasons,
+        *(f"weak_{key}" for key, value in components.items() if float(value) <= 4.0),
+    ]))
     return {
+        "actionability_raw": actionability_raw,
+        "actionability_penalties": penalties,
         "actionability_score": score,
         "actionability_state": state,
         "confirmation_status": "confirmed" if price_confirmed and volume_confirmed else "pending",
@@ -336,6 +363,8 @@ def build_daily_actionability_profile(
         "actionability_weights": dict(weights),
         "waiting_for": waiting_for,
         "exclusion_reasons": exclusion_reasons,
+        "actionability_positive": positive,
+        "actionability_negative": negative,
     }
 
 
@@ -418,10 +447,18 @@ def _candidate_from_row(
         "sector": sector,
         "industry": industry,
         "correlation_group": correlation_group,
-        "setup_type": _value(row, "enhanced_trend_state", None) or _value(row, "setup_type", None),
+        "broader_structure": _value(row, "broader_structure", None),
+        "setup_type": _value(row, "setup_type", None) or _value(row, "enhanced_trend_state", None),
+        "execution_structure": _value(row, "execution_structure", None),
         "current_price": _value(row, "current_price", None),
         "preferred_entry": _value(row, "preferred_entry", None),
         "confirmation_trigger": _value(row, "confirmation_trigger_price", None),
+        "near_confirmation": _value(row, "near_confirmation", None),
+        "primary_entry_trigger": _value(row, "primary_entry_trigger", None),
+        "strong_confirmation": _value(row, "strong_confirmation", None),
+        "major_trend_repair": _value(row, "major_trend_repair", None),
+        "setup_id": _value(row, "setup_id", None),
+        "setup_status": _value(row, "setup_status", None),
         "stop_loss": _value(row, "stop_loss", None),
         "take_profit_1": _value(row, "take_profit_1", None),
         "take_profit_2": _value(row, "take_profit_2", None),
@@ -441,6 +478,24 @@ def _candidate_from_row(
             + actionability["exclusion_reasons"]
             + portfolio_fit["portfolio_exclusion_reasons"]
         )
+    )
+    primary_trigger = _safe_float(
+        (candidate.get("primary_entry_trigger") or {}).get("price")
+        if isinstance(candidate.get("primary_entry_trigger"), dict)
+        else candidate.get("confirmation_trigger"),
+        _safe_float(candidate.get("confirmation_trigger"), 0.0),
+    )
+    current = _safe_float(candidate.get("current_price"), 0.0)
+    candidate["distance_to_primary_trigger_pct"] = (
+        None if primary_trigger <= 0 or current <= 0 else round((primary_trigger - current) / current, 6)
+    )
+    distance = abs(float(candidate["distance_to_primary_trigger_pct"] or 0.0))
+    proximity = _clip(10.0 - distance * 100.0)
+    candidate["trigger_proximity_score"] = proximity
+    candidate["next_trigger_rank_score"] = _clip(
+        candidate["raw_setup_score"] * 0.55
+        + candidate["actionability_score"] * 0.25
+        + proximity * 0.20
     )
     return candidate
 
@@ -492,7 +547,10 @@ def rank_daily_opportunities(
         and item["waiting_for"]
         and "invalidated" not in item["exclusion_reasons"]
     ]
-    next_candidates.sort(key=lambda item: (item["actionability_score"], item["raw_setup_score"]), reverse=True)
+    next_candidates.sort(
+        key=lambda item: (item["next_trigger_rank_score"], item["raw_setup_score"]),
+        reverse=True,
+    )
     next_to_trigger = [
         {**item, "rank": rank}
         for rank, item in enumerate(next_candidates[:next_to_trigger_count], start=1)

@@ -204,11 +204,25 @@ def _safe_display(value) -> str:
 
 def render_next_trigger_card(item: dict) -> None:
     waiting = _waiting_for_text(item.get("waiting_for") or [])
+    trigger = (item.get("primary_entry_trigger") or {}).get("price") or item.get("confirmation_trigger")
+    distance = item.get("distance_to_primary_trigger_pct")
+    distance_text = "-"
+    try:
+        distance_text = f"{float(distance) * 100.0:+.2f}%"
+    except (TypeError, ValueError):
+        pass
     st.markdown(
         f"""
         <div class="runner-bucket-inner next-trigger-card">
             <div class="runner-bucket-title">#{int(item.get('rank') or 0)} {html.escape(str(item.get('ticker') or '-'))}
                 <span class="runner-bucket-count">{html.escape(str(item.get('grade') or '-'))}</span>
+            </div>
+            <div class="mini-grid">
+                <div><div class="mini-label">Raw Setup</div><div class="mini-value">{_safe_display(item.get('raw_setup_score'))}</div></div>
+                <div><div class="mini-label">Actionability</div><div class="mini-value">{_safe_display(item.get('actionability_score'))}</div></div>
+                <div><div class="mini-label">Primary Trigger</div><div class="mini-value">{html.escape(format_price(trigger))}</div></div>
+                <div><div class="mini-label">Distance</div><div class="mini-value">{html.escape(distance_text)}</div></div>
+                <div><div class="mini-label">Invalidation</div><div class="mini-value">{html.escape(format_price((item.get('row') or {}).get('invalidation_level') or item.get('stop_loss')))}</div></div>
             </div>
             <div class="summary-note">Wait for {html.escape(waiting)}.</div>
         </div>

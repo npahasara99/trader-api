@@ -15,6 +15,7 @@ from .risk_engine import build_stop_loss, build_take_profits, estimate_hold_wind
 from .scenario_engine import generate_execution_scenarios
 from .scanner import build_universe_suitability, classify_volatility
 from .scoring import score_price_location, score_setup
+from .setup_lifecycle import build_setup_lifecycle
 from .structure import summarize_structure
 from .zones import build_support_resistance_zones, fibonacci_levels
 
@@ -95,6 +96,7 @@ def generate_structured_plan(
     benchmark_bars: dict[str, list[dict]] | None = None,
     ticker_meta: dict | None = None,
     sector_relative_strength: float | None = None,
+    previous_setup: dict | None = None,
     llm_provider: str | None = None,
     llm_model: str | None = None,
     llm_style: str | None = None,
@@ -228,6 +230,15 @@ def generate_structured_plan(
     effective_entry_requires_confirmation = bool(
         confirmation["confirmation_required"] and confirmation["confirmation_state"] != "confirmed"
     )
+    lifecycle = build_setup_lifecycle(
+        ticker=ticker,
+        current_price=current_price,
+        structure_state=structure.structure_state,
+        entry_status=confirmation["entry_status"],
+        invalidation_level=stop["invalidation_level"],
+        primary_trigger=(confirmation.get("primary_entry_trigger") or {}).get("price"),
+        previous_setup=previous_setup,
+    )
     historical_hold_days = None
     if history_stats and history_stats.get("samples"):
         historical_hold_days = 12
@@ -342,7 +353,9 @@ def generate_structured_plan(
         "reward_risk": reward_risk,
         "earnings": earnings,
         "price_location_context": context["price_location_context"],
-        "setup_type": context["setup_type"],
+        "broader_structure": chart_context.get("broader_structure"),
+        "setup_type": chart_context.get("setup_type_layer") or context["setup_type"],
+        "execution_structure": chart_context.get("execution_structure"),
         "setup_scenario": context["setup_scenario"],
         "continuation_vs_reversion_bias": context["continuation_vs_reversion_bias"],
         "news_regime_alignment": context["news_regime_alignment"],
@@ -593,6 +606,11 @@ def generate_structured_plan(
         },
         "setup_downgrade_reasons": setup_downgrade_reasons,
         **context,
+        "broader_structure": chart_context.get("broader_structure"),
+        "setup_type": chart_context.get("setup_type_layer") or context["setup_type"],
+        "execution_structure": chart_context.get("execution_structure"),
+        "scenario_setup_type": context.get("setup_type"),
+        **lifecycle,
         "llm_review": {k: v for k, v in llm_review.items() if k not in {"prompt_preview", "provider", "model", "style", "llm_quality_score"}},
         "strategy_action": strategy_action,
         "chart_context": chart_context,

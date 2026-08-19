@@ -66,9 +66,14 @@ class PlanningConfig:
     pre_scan_min_avg_dollar_volume: float = 20_000_000.0
     sp500_universe_url: str = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     sp500_universe_cache_seconds: int = 21_600
-    sp500_prescan_limit: int = 75
+    sp500_prescan_limit: int = 150
     sp500_deep_analysis_limit: int = 30
     sp500_prescan_cache_max_age_days: int = 7
+    sp500_universe_minimum_broad_size: int = 450
+    sp500_min_deep_candidates_per_sector: int = 2
+    sp500_deep_analysis_batch_size: int = 15
+    sp500_max_deep_analysis_limit: int = 75
+    sp500_target_actionable_candidates: int = 2
     best_setups_count: int = 10
     best_trades_today_max: int = 2
     next_to_trigger_count: int = 5
