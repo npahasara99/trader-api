@@ -174,9 +174,12 @@ def evaluate_monitor(
         and not five_minute_close
         and (quality["upper_wick_ratio"] or 0.0) > config.max_upper_wick_ratio
     )
-    risk = current - stop if current is not None and stop is not None else None
-    current_rr = None if not risk or risk <= 0 or tp1 is None else round((tp1 - current) / risk, 4)
-    rr_valid = bool(current_rr is not None and current_rr >= config.minimum_current_rr)
+    planned_risk = trigger - stop if trigger is not None and stop is not None else None
+    planned_rr = None if not planned_risk or planned_risk <= 0 or tp1 is None else round((tp1 - trigger) / planned_risk, 4)
+    current_risk = current - stop if current is not None and stop is not None else None
+    raw_current_rr = None if not current_risk or current_risk <= 0 or tp1 is None else round((tp1 - current) / current_risk, 4)
+    rr_valid = bool(raw_current_rr is not None and raw_current_rr >= config.minimum_current_rr)
+    planned_rr_valid = bool(planned_rr is not None and planned_rr >= config.minimum_current_rr)
     chased = bool(current is not None and max_chase is not None and current > max_chase)
     invalidated = bool(not setup_valid or (current is not None and invalidation is not None and current <= invalidation))
     retest_tolerance = (atr or 0.0) * config.retest_tolerance_atr_fraction
@@ -198,7 +201,12 @@ def evaluate_monitor(
         "relative_volume": {"passed": volume_confirmation, "weight": 1.75, "value": rvol_5m},
         "candle_quality": {"passed": constructive_candle, "weight": 1.0},
         "retest_success": {"passed": retest_held, "weight": 0.75},
-        "current_rr": {"passed": rr_valid, "weight": 1.0, "value": current_rr},
+        "current_rr": {
+            "passed": rr_valid if crossed_recently else planned_rr_valid,
+            "weight": 1.0,
+            "value": raw_current_rr if crossed_recently else planned_rr,
+            "mode": "current_executable" if crossed_recently else "planned_at_trigger",
+        },
         "not_chased": {"passed": not chased, "weight": 1.0},
         "fresh_data": {"passed": not stale, "weight": 2.0},
     }
@@ -234,7 +242,21 @@ def evaluate_monitor(
     else:
         state = MonitorState.WATCHING
 
-    manual_plan = build_manual_order_plan(current_price=current, levels={**levels, "max_chase_price": max_chase}, config=config) if current else None
+    executable_states = {
+        MonitorState.APPROVED,
+        MonitorState.STRONGLY_CONFIRMED,
+        MonitorState.MISSED,
+    }
+    current_executable_rr = raw_current_rr if state in executable_states else None
+    manual_plan = (
+        build_manual_order_plan(
+            current_price=current,
+            levels={**levels, "max_chase_price": max_chase},
+            config=config,
+        )
+        if current is not None and state in executable_states
+        else None
+    )
     return {
         "state": state.value,
         "evaluated_at": evaluated_at,
@@ -258,8 +280,17 @@ def evaluate_monitor(
         "data_stale": stale,
         "data_age_seconds": stale_seconds,
         "max_chase_price": max_chase,
-        "current_rr_tp1": current_rr,
-        "target_reachability": "acceptable" if rr_valid and tp1 and current < tp1 else "unacceptable",
+        "planned_rr_at_primary_trigger": planned_rr,
+        "current_executable_rr": current_executable_rr,
+        # Kept for response compatibility; it now truthfully means executable R:R.
+        "current_rr_tp1": current_executable_rr,
+        "target_reachability": (
+            "acceptable"
+            if current_executable_rr is not None and rr_valid and tp1 and current < tp1
+            else "unacceptable"
+            if current_executable_rr is not None
+            else "not_active"
+        ),
         "rejection_reason": rejection_reason,
         "attempt_number": prior_attempt_count + 1 if state in {MonitorState.ARMED, MonitorState.CONFIRMING} and previous not in {MonitorState.ARMED, MonitorState.CONFIRMING} else prior_attempt_count,
         "manual_order_plan": manual_plan,
@@ -269,7 +300,7 @@ def evaluate_monitor(
                 (stale, "data_stale"),
                 (invalidated, "setup_invalidated"),
                 (chased, "maximum_chase_exceeded"),
-                (not rr_valid, "current_reward_risk_unacceptable"),
+                (crossed_recently and not rr_valid, "current_reward_risk_unacceptable"),
             )
             if condition
         ],

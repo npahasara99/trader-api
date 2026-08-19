@@ -317,8 +317,45 @@ def fetch_live_monitors(*, include_inactive: bool = False) -> list[dict[str, Any
     return payload.get("rows") if isinstance(payload.get("rows"), list) else []
 
 
+def fetch_live_monitor_status() -> dict[str, Any]:
+    return get_json("/live-monitor/status", timeout=get_api_timeout_seconds(60))
+
+
 def fetch_live_monitor_detail(watch_id: str) -> dict[str, Any]:
     return get_json(f"/live-monitor/{watch_id}", timeout=get_api_timeout_seconds(90))
+
+
+def fetch_live_monitor_charts(watch_id: str) -> dict[str, Any]:
+    return get_json(f"/live-monitor/{watch_id}/charts", timeout=get_api_timeout_seconds(180))
+
+
+def request_live_monitor_chart_review(
+    watch_id: str,
+    *,
+    review_type: str = "CHART_STRUCTURE_REVIEW",
+) -> dict[str, Any]:
+    return post_json(
+        f"/live-monitor/{watch_id}/chart-review",
+        {"review_type": review_type},
+        timeout=get_api_timeout_seconds(300),
+    )
+
+
+def decide_live_monitor_chart_levels(
+    watch_id: str,
+    *,
+    decision: str,
+    manual_levels: dict[str, float | None] | None = None,
+) -> dict[str, Any]:
+    return post_json(
+        f"/live-monitor/{watch_id}/chart-level-decision",
+        {
+            "decision": decision,
+            "manual_levels": manual_levels,
+            "decided_by": "dashboard_user",
+        },
+        timeout=get_api_timeout_seconds(180),
+    )
 
 
 def add_live_monitor(ticker: str, *, source: str = "dashboard", planner_payload: dict | None = None) -> dict[str, Any]:

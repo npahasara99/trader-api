@@ -75,6 +75,16 @@ def _ensure_runtime_columns() -> None:
         "earnings_score": "INTEGER",
         "earnings_context_json": "TEXT",
     }
+    monitor_cols = {
+        "llm_proposed_levels_json": "TEXT",
+        "validated_chart_levels_json": "TEXT",
+        "level_sources_json": "TEXT",
+        "chart_analysis_status": "VARCHAR(40) NOT NULL DEFAULT 'NOT_RUN'",
+        "latest_chart_review_id": "VARCHAR(80)",
+        "plan_stale_reason": "TEXT",
+        "proposed_setup_json": "TEXT",
+    }
+    snapshot_cols = {"image_data_base64": "TEXT"}
     try:
         with engine.begin() as conn:
             dialect = conn.dialect.name
@@ -86,10 +96,28 @@ def _ensure_runtime_columns() -> None:
                 for col, col_type in required_cols.items():
                     if col not in existing:
                         conn.execute(text(f"ALTER TABLE swing_decisions ADD COLUMN {col} {col_type}"))
+                monitor_existing = {
+                    row[1]
+                    for row in conn.execute(text("PRAGMA table_info(monitor_setups)")).fetchall()
+                }
+                for col, col_type in monitor_cols.items():
+                    if col not in monitor_existing:
+                        conn.execute(text(f"ALTER TABLE monitor_setups ADD COLUMN {col} {col_type}"))
+                snapshot_existing = {
+                    row[1]
+                    for row in conn.execute(text("PRAGMA table_info(chart_snapshots)")).fetchall()
+                }
+                for col, col_type in snapshot_cols.items():
+                    if col not in snapshot_existing:
+                        conn.execute(text(f"ALTER TABLE chart_snapshots ADD COLUMN {col} {col_type}"))
                 return
 
             for col, col_type in required_cols.items():
                 conn.execute(text(f"ALTER TABLE swing_decisions ADD COLUMN IF NOT EXISTS {col} {col_type}"))
+            for col, col_type in monitor_cols.items():
+                conn.execute(text(f"ALTER TABLE monitor_setups ADD COLUMN IF NOT EXISTS {col} {col_type}"))
+            for col, col_type in snapshot_cols.items():
+                conn.execute(text(f"ALTER TABLE chart_snapshots ADD COLUMN IF NOT EXISTS {col} {col_type}"))
             if dialect == "postgresql":
                 conn.execute(
                     text(
@@ -99,7 +127,7 @@ def _ensure_runtime_columns() -> None:
                 )
     except Exception as exc:
         # Do not block startup if migration cannot be applied here.
-        print(f"Swing decision compatibility migration warning: {type(exc).__name__}: {exc}")
+        print(f"Runtime compatibility migration warning: {type(exc).__name__}: {exc}")
 
 
 # Create tables + best-effort additive columns

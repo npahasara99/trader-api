@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import sys
 
 
@@ -24,12 +25,15 @@ from dashboard.api_client import (
     api_config_status,
     bot_action,
     decide_learning_proposal,
+    decide_live_monitor_chart_levels,
     edit_live_monitor_levels,
     fetch_earnings_calendar,
     fetch_earnings_detail,
     fetch_live_quotes,
     fetch_live_monitor_detail,
+    fetch_live_monitor_charts,
     fetch_live_monitors,
+    fetch_live_monitor_status,
     fetch_monitor_journal,
     fetch_monitor_learning,
     fetch_bot_config,
@@ -41,6 +45,7 @@ from dashboard.api_client import (
     run_sp100_workflow,
     run_sp500_daily_opportunities,
     live_monitor_action,
+    request_live_monitor_chart_review,
     update_bot_config,
 )
 from dashboard.components import (
@@ -73,6 +78,7 @@ from dashboard.queries import (
     fetch_run_results,
 )
 from dashboard.styles import inject_styles
+from dashboard.lightweight_chart import render_lightweight_chart
 from dashboard.tradingview_chart import render_tradingview_chart
 from dashboard.utils import (
     build_active_market_view,
@@ -617,6 +623,63 @@ def _load_earnings_detail_data(ticker: str, *, days_ahead: int) -> dict:
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_live_quotes_data(tickers: tuple[str, ...]) -> dict:
     return fetch_live_quotes(list(tickers))
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _load_live_monitor_chart_data(watch_id: str) -> dict:
+    return fetch_live_monitor_charts(watch_id)
+
+
+def _render_live_monitor_table(monitor_rows: list[dict]) -> None:
+    if not monitor_rows:
+        st.info("No symbols are in the live monitor. Add one manually or from the scanner result cards.")
+        return
+    monitor_df = pd.DataFrame(monitor_rows)
+    monitor_columns = [
+        "ticker", "current_price", "near_confirmation", "primary_trigger", "strong_confirmation",
+        "major_trend_repair", "distance_to_trigger_pct", "rvol_5m", "state", "chart_analysis_status",
+        "live_confirmation_score", "planned_rr_at_primary_trigger", "current_executable_rr",
+        "trigger_source", "market_session", "data_age_seconds", "last_event",
+    ]
+    visible = [column for column in monitor_columns if column in monitor_df.columns]
+    display = monitor_df[visible].copy()
+    if "distance_to_trigger_pct" in display:
+        display["distance_to_trigger_pct"] = pd.to_numeric(display["distance_to_trigger_pct"], errors="coerce") * 100.0
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "current_price": st.column_config.NumberColumn("Current", format="$%.2f"),
+            "near_confirmation": st.column_config.NumberColumn("Near Confirm", format="$%.2f"),
+            "primary_trigger": st.column_config.NumberColumn("Primary", format="$%.2f"),
+            "strong_confirmation": st.column_config.NumberColumn("Strong", format="$%.2f"),
+            "major_trend_repair": st.column_config.NumberColumn("Major Repair", format="$%.2f"),
+            "distance_to_trigger_pct": st.column_config.NumberColumn("Distance %", format="%.2f%%"),
+            "rvol_5m": st.column_config.NumberColumn("5m RVOL", format="%.2fx"),
+            "live_confirmation_score": st.column_config.NumberColumn("Confirm / 10", format="%.2f"),
+            "planned_rr_at_primary_trigger": st.column_config.NumberColumn("Planned R:R", format="%.2f"),
+            "current_executable_rr": st.column_config.NumberColumn("Executable R:R", format="%.2f"),
+            "data_age_seconds": st.column_config.NumberColumn("Data Age (s)", format="%.0f"),
+        },
+    )
+
+
+_MONITOR_REFRESH_SECONDS = max(2, min(5, int(os.getenv("LIVE_MONITOR_FRONTEND_REFRESH_SECONDS", "5"))))
+
+
+@st.fragment(run_every=f"{_MONITOR_REFRESH_SECONDS}s")
+def _render_live_monitor_polling_panel(show_inactive: bool) -> None:
+    try:
+        status = fetch_live_monitor_status()
+        status_cols = st.columns(4)
+        status_cols[0].metric("Monitor Service", status.get("monitor_service_status") or "UNKNOWN")
+        status_cols[1].metric("Active", status.get("active_monitor_count") or 0)
+        status_cols[2].metric("Backend Poll", f"{status.get('poll_interval_seconds') or '-'}s")
+        status_cols[3].metric("Last Evaluation", format_ts(status.get("last_backend_evaluation_at")))
+        _render_live_monitor_table(fetch_live_monitors(include_inactive=show_inactive))
+    except TraderAPIError as exc:
+        st.error(str(exc))
 
 
 _init_runner_state()
@@ -1670,43 +1733,13 @@ with live_monitor_tab:
         if st.button("Refresh Monitor", key="live_monitor_refresh", use_container_width=True):
             st.rerun()
 
-    monitor_error = None
     try:
         monitor_rows = fetch_live_monitors(include_inactive=show_inactive_monitors)
     except TraderAPIError as exc:
         monitor_rows = []
-        monitor_error = str(exc)
-    if monitor_error:
-        st.error(monitor_error)
-    elif not monitor_rows:
-        st.info("No symbols are in the live monitor. Add one manually or from the scanner result cards.")
-    else:
-        monitor_df = pd.DataFrame(monitor_rows)
-        monitor_columns = [
-            "ticker", "current_price", "primary_trigger", "distance_to_trigger_pct", "rvol_1m", "rvol_5m",
-            "price_confirmation", "volume_confirmation", "state", "setup_valid", "live_confirmation_score",
-            "current_rr_tp1", "trigger_source", "market_session", "market_data_as_of", "last_event",
-        ]
-        visible_monitor_columns = [column for column in monitor_columns if column in monitor_df.columns]
-        display_monitor_df = monitor_df[visible_monitor_columns].copy()
-        for column in ("distance_to_trigger_pct",):
-            if column in display_monitor_df:
-                display_monitor_df[column] = pd.to_numeric(display_monitor_df[column], errors="coerce") * 100.0
-        st.dataframe(
-            display_monitor_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "current_price": st.column_config.NumberColumn("Current Price", format="$%.2f"),
-                "primary_trigger": st.column_config.NumberColumn("Primary Trigger", format="$%.2f"),
-                "distance_to_trigger_pct": st.column_config.NumberColumn("Distance %", format="%.2f%%"),
-                "rvol_1m": st.column_config.NumberColumn("1m RVOL", format="%.2fx"),
-                "rvol_5m": st.column_config.NumberColumn("5m RVOL", format="%.2fx"),
-                "live_confirmation_score": st.column_config.NumberColumn("Confirm / 10", format="%.2f"),
-                "current_rr_tp1": st.column_config.NumberColumn("Current R:R", format="%.2f"),
-            },
-        )
-
+        st.error(str(exc))
+    _render_live_monitor_polling_panel(show_inactive_monitors)
+    if monitor_rows:
         monitor_options = {row["id"]: f"{row['ticker']} | {row['state']}" for row in monitor_rows}
         selected_watch_id = st.selectbox(
             "Monitor Detail",
@@ -1721,16 +1754,30 @@ with live_monitor_tab:
             monitor_detail = {}
 
         if monitor_detail:
-            detail_cols = st.columns(6)
+            detail_cols = st.columns(8)
             detail_cols[0].metric("Ticker", monitor_detail.get("ticker") or "-")
             detail_cols[1].metric("State", monitor_detail.get("state") or "-")
             detail_cols[2].metric("Current", format_price(monitor_detail.get("current_price")))
-            detail_cols[3].metric("Trigger", format_price(monitor_detail.get("primary_trigger")))
-            detail_cols[4].metric("5m RVOL", "-" if monitor_detail.get("rvol_5m") is None else f"{float(monitor_detail['rvol_5m']):.2f}x")
-            detail_cols[5].metric("Current R:R", "-" if monitor_detail.get("current_rr_tp1") is None else f"{float(monitor_detail['current_rr_tp1']):.2f}")
+            detail_cols[3].metric("Near Confirm", format_price(monitor_detail.get("near_confirmation")))
+            detail_cols[4].metric("Primary", format_price(monitor_detail.get("primary_trigger")))
+            detail_cols[5].metric("Strong", format_price(monitor_detail.get("strong_confirmation")))
+            detail_cols[6].metric("Major Repair", format_price(monitor_detail.get("major_trend_repair")))
+            detail_cols[7].metric("5m RVOL", "-" if monitor_detail.get("rvol_5m") is None else f"{float(monitor_detail['rvol_5m']):.2f}x")
+            planned_rr = monitor_detail.get("planned_rr_at_primary_trigger")
+            executable_rr = monitor_detail.get("current_executable_rr")
+            st.caption(
+                f"Data freshness: {monitor_detail.get('data_age_seconds') if monitor_detail.get('data_age_seconds') is not None else '-'}s | "
+                f"Chart analysis: {monitor_detail.get('chart_analysis_status') or 'NOT_RUN'} | "
+                f"Planned R:R at trigger: {planned_rr if planned_rr is not None else '-'} | "
+                f"Current executable R:R: {executable_rr if executable_rr is not None else 'NOT ACTIVE'}"
+            )
 
-            action_columns = st.columns(7)
-            monitor_actions = ["pause", "resume", "stop", "evaluate", "reanalyze", "llm-review", "remove"]
+            monitor_actions = ["stop", "evaluate", "reanalyze", "llm-review", "remove"]
+            if monitor_detail.get("state") == "PAUSED":
+                monitor_actions.insert(0, "resume")
+            else:
+                monitor_actions.insert(0, "pause")
+            action_columns = st.columns(len(monitor_actions))
             for index, action in enumerate(monitor_actions):
                 if action_columns[index].button(action.replace("-", " ").title(), key=f"monitor_action_{action}_{selected_watch_id}", use_container_width=True):
                     try:
@@ -1739,8 +1786,8 @@ with live_monitor_tab:
                     except TraderAPIError as exc:
                         st.error(str(exc))
 
-            overview_tab, evidence_tab, attempts_tab, plan_tab, trade_tab, monitor_debug_tab = st.tabs(
-                ["Setup", "Confirmation", "Attempts", "Manual Order Plan", "Manual Trade", "Raw"]
+            overview_tab, chart_analysis_tab, evidence_tab, attempts_tab, plan_tab, trade_tab, history_tab, monitor_debug_tab = st.tabs(
+                ["Setup", "Chart Analysis", "Confirmation", "Attempts", "Manual Order Plan", "Manual Trade", "History", "Raw"]
             )
             with overview_tab:
                 render_key_value_grid(
@@ -1761,7 +1808,8 @@ with live_monitor_tab:
                 with st.expander("Edit active level overlay", expanded=False):
                     editable_level_names = [
                         "near_confirmation", "primary_entry_trigger", "strong_confirmation",
-                        "major_trend_repair", "invalidation_level", "optional_support_level", "suggested_stop", "max_chase_price",
+                        "major_trend_repair", "invalidation_level", "optional_support_level", "suggested_stop",
+                        "tp1", "tp2", "tp3", "stretch_target", "max_chase_price",
                     ]
                     with st.form(f"level_override_form_{selected_watch_id}"):
                         level_inputs = {
@@ -1779,6 +1827,130 @@ with live_monitor_tab:
                             st.error(str(exc))
                 with st.expander("Planner original levels", expanded=False):
                     st.json(planner_levels)
+            with chart_analysis_tab:
+                chart_payload = {}
+                try:
+                    chart_payload = _load_live_monitor_chart_data(selected_watch_id)
+                except TraderAPIError as exc:
+                    st.error(str(exc))
+                if chart_payload:
+                    available_levels = chart_payload.get("levels") or []
+                    level_names = [level.get("name") for level in available_levels if level.get("name")]
+                    visible_level_names = st.multiselect(
+                        "Visible semantic levels",
+                        options=level_names,
+                        default=level_names,
+                        key=f"chart_levels_{selected_watch_id}",
+                    )
+                    visible_levels = [level for level in available_levels if level.get("name") in visible_level_names]
+                    broader_options = [
+                        key
+                        for key in ("daily", "four_hour", "hourly")
+                        if ((chart_payload.get("timeframes") or {}).get(key) or {}).get("bars")
+                    ]
+                    broader_key = st.selectbox(
+                        "Broader chart timeframe",
+                        options=broader_options or ["daily"],
+                        format_func=lambda value: {"daily": "Daily", "four_hour": "4 Hour (derived from hourly)", "hourly": "1 Hour"}.get(value, value),
+                        key=f"broader_chart_timeframe_{selected_watch_id}",
+                    )
+                    chart_columns = st.columns(3, gap="small")
+                    chart_specs = [
+                        (broader_key, "Broader Swing"),
+                        ("structure", "30m Structure"),
+                        ("execution", "5m Execution"),
+                    ]
+                    for column, (timeframe_key, title) in zip(chart_columns, chart_specs):
+                        timeframe_payload = (chart_payload.get("timeframes") or {}).get(timeframe_key) or {}
+                        with column:
+                            if timeframe_payload.get("bars"):
+                                render_lightweight_chart(
+                                    ticker=monitor_detail.get("ticker") or "-",
+                                    title=title,
+                                    timeframe_payload=timeframe_payload,
+                                    levels=visible_levels,
+                                    markers=chart_payload.get("attempt_markers") or [],
+                                    height=410,
+                                )
+                            else:
+                                st.info(f"{title} data is unavailable.")
+                    st.caption(
+                        f"Source: {chart_payload.get('data_source') or '-'} | Last bar: {format_ts(chart_payload.get('last_bar_timestamp'))} | "
+                        f"Freshness: {chart_payload.get('data_freshness_seconds') if chart_payload.get('data_freshness_seconds') is not None else '-'}s. "
+                        "Interactive charts use the same canonical OHLCV returned by the trader API."
+                    )
+                latest_chart_review = (monitor_detail.get("chart_reviews") or [{}])[0]
+                st.markdown("#### Structure Assessment")
+                render_key_value_grid(
+                    [
+                        ("Broader", pretty_label(monitor_detail.get("broader_structure"))),
+                        ("Setup", pretty_label(monitor_detail.get("setup_type"))),
+                        ("Execution", pretty_label(monitor_detail.get("execution_structure"))),
+                        ("Status", monitor_detail.get("chart_analysis_status") or "NOT_RUN"),
+                        ("Confidence", latest_chart_review.get("confidence")),
+                        ("Data Check", latest_chart_review.get("data_consistency_status") or "NOT_RUN"),
+                    ],
+                    columns=3,
+                )
+                planner_comparison = monitor_detail.get("planner_levels") or {}
+                proposed_comparison = monitor_detail.get("llm_proposed_levels") or {}
+                validated_comparison = monitor_detail.get("validated_chart_levels") or {}
+                active_comparison = monitor_detail.get("active_levels") or {}
+                comparison_names = [
+                    "near_confirmation", "primary_entry_trigger", "strong_confirmation", "major_trend_repair",
+                    "invalidation_level", "suggested_stop", "tp1", "tp2", "tp3",
+                ]
+                st.markdown("#### Level Comparison")
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "Level": pretty_label(name),
+                                "Planner": planner_comparison.get(name),
+                                "Chart Review": proposed_comparison.get(name),
+                                "Validated": validated_comparison.get(name),
+                                "Active": active_comparison.get(name),
+                                "Source": (monitor_detail.get("level_sources") or {}).get(name),
+                            }
+                            for name in comparison_names
+                        ]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                if latest_chart_review.get("reason_summary"):
+                    st.info(latest_chart_review.get("reason_summary"))
+                if monitor_detail.get("chart_analysis_status") in {"DISAGREEMENT", "STALE"}:
+                    st.warning("LEVEL REVIEW REQUIRED: validated chart levels are proposals until you explicitly accept them.")
+                review_controls = st.columns(4)
+                if review_controls[0].button("Run Chart Review", key=f"run_chart_review_{selected_watch_id}", type="primary", use_container_width=True):
+                    try:
+                        request_live_monitor_chart_review(selected_watch_id)
+                        _load_live_monitor_chart_data.clear()
+                        st.rerun()
+                    except TraderAPIError as exc:
+                        st.error(str(exc))
+                if review_controls[1].button("Accept Validated", key=f"accept_chart_{selected_watch_id}", use_container_width=True):
+                    try:
+                        decide_live_monitor_chart_levels(selected_watch_id, decision="ACCEPT_VALIDATED")
+                        _load_live_monitor_chart_data.clear()
+                        st.rerun()
+                    except TraderAPIError as exc:
+                        st.error(str(exc))
+                if review_controls[2].button("Keep Planner", key=f"keep_planner_{selected_watch_id}", use_container_width=True):
+                    try:
+                        decide_live_monitor_chart_levels(selected_watch_id, decision="KEEP_PLANNER")
+                        _load_live_monitor_chart_data.clear()
+                        st.rerun()
+                    except TraderAPIError as exc:
+                        st.error(str(exc))
+                if review_controls[3].button("Reanalyze", key=f"chart_reanalyze_{selected_watch_id}", use_container_width=True):
+                    try:
+                        live_monitor_action(selected_watch_id, "reanalyze")
+                        _load_live_monitor_chart_data.clear()
+                        st.rerun()
+                    except TraderAPIError as exc:
+                        st.error(str(exc))
             with evidence_tab:
                 evaluation = monitor_detail.get("latest_evaluation") or {}
                 render_key_value_grid(
@@ -1845,6 +2017,12 @@ with live_monitor_tab:
                 trades = monitor_detail.get("manual_trades") or []
                 if trades:
                     st.dataframe(pd.DataFrame(trades), use_container_width=True, hide_index=True)
+            with history_tab:
+                history_rows = monitor_detail.get("journal") or []
+                if history_rows:
+                    st.dataframe(pd.DataFrame(history_rows), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No monitor history has been recorded yet.")
             with monitor_debug_tab:
                 st.json(monitor_detail, expanded=False)
 

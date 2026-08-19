@@ -462,6 +462,13 @@ class MonitorSetup(Base):
     planner_levels_json: Mapped[str] = mapped_column(Text)
     active_levels_json: Mapped[str] = mapped_column(Text)
     manual_overrides_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    llm_proposed_levels_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    validated_chart_levels_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    level_sources_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chart_analysis_status: Mapped[str] = mapped_column(String(40), default="NOT_RUN", index=True)
+    latest_chart_review_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    plan_stale_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proposed_setup_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     trigger_source: Mapped[str] = mapped_column(String(20), default="PLANNER")
     max_chase_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
@@ -669,4 +676,72 @@ class ShadowRuleEvaluation(Base):
     production_decision: Mapped[str] = mapped_column(String(40))
     shadow_decision: Mapped[str] = mapped_column(String(40))
     evidence_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ChartSnapshot(Base):
+    """Immutable decision-time chart image and exact time-bounded metadata."""
+
+    __tablename__ = "chart_snapshots"
+    __table_args__ = (
+        UniqueConstraint("content_hash", name="uq_chart_snapshots_content_hash"),
+        Index("ix_chart_snapshots_setup_event", "setup_id", "event_type", "generated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    watch_id: Mapped[str] = mapped_column(String(80), index=True)
+    setup_id: Mapped[str] = mapped_column(String(80), index=True)
+    decision_event_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(24), index=True)
+    event_type: Mapped[str] = mapped_column(String(80), index=True)
+    image_path: Mapped[str] = mapped_column(Text)
+    image_data_base64: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_hash: Mapped[str] = mapped_column(String(80), index=True)
+    data_source: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    data_last_bar_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_time_boundary: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    metadata_json: Mapped[str] = mapped_column(Text)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    retain_permanently: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ChartStructureReview(Base):
+    __tablename__ = "chart_structure_reviews"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    watch_id: Mapped[str] = mapped_column(String(80), index=True)
+    setup_id: Mapped[str] = mapped_column(String(80), index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    review_type: Mapped[str] = mapped_column(String(60), index=True)
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    prompt_version: Mapped[str] = mapped_column(String(80), index=True)
+    chart_snapshot_ids_json: Mapped[str] = mapped_column(Text)
+    deterministic_input_json: Mapped[str] = mapped_column(Text)
+    planner_levels_json: Mapped[str] = mapped_column(Text)
+    llm_output_json: Mapped[str] = mapped_column(Text)
+    llm_proposed_levels_json: Mapped[str] = mapped_column(Text)
+    validated_levels_json: Mapped[str] = mapped_column(Text)
+    validation_json: Mapped[str] = mapped_column(Text)
+    decision: Mapped[str] = mapped_column(String(40), index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    reason_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    data_consistency_status: Mapped[str] = mapped_column(String(40), default="CONSISTENT")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ChartLevelDecision(Base):
+    __tablename__ = "chart_level_decisions"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    watch_id: Mapped[str] = mapped_column(String(80), index=True)
+    setup_id: Mapped[str] = mapped_column(String(80), index=True)
+    chart_review_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    decision: Mapped[str] = mapped_column(String(40), index=True)
+    previous_active_levels_json: Mapped[str] = mapped_column(Text)
+    selected_levels_json: Mapped[str] = mapped_column(Text)
+    level_sources_json: Mapped[str] = mapped_column(Text)
+    decided_by: Mapped[str] = mapped_column(String(80), default="user")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

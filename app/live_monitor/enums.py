@@ -14,6 +14,7 @@ class MonitorState(StrEnum):
     INVALIDATED = "INVALIDATED"
     MISSED = "MISSED"
     DATA_STALE = "DATA_STALE"
+    PLAN_STALE = "PLAN_STALE"
     PAUSED = "PAUSED"
     STOPPED = "STOPPED"
     EXPIRED = "EXPIRED"
@@ -29,6 +30,7 @@ ACTIVE_MONITOR_STATES = {
     MonitorState.REJECTED_BREAKOUT,
     MonitorState.MISSED,
     MonitorState.DATA_STALE,
+    MonitorState.PLAN_STALE,
 }
 
 
@@ -36,4 +38,3 @@ class AdvisoryDecision(StrEnum):
     APPROVE = "APPROVE"
     WAIT = "WAIT"
     REJECT = "REJECT"
-

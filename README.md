@@ -1,5 +1,7 @@
 # Trader API + Interactive Brokers Swing Bot
 
+See [Chart-Aware Live Monitor](docs/chart_aware_monitor.md) for canonical chart data, level reconciliation, decision-time snapshots, and dashboard controls.
+
 This repository contains:
 
 - the existing FastAPI trader API

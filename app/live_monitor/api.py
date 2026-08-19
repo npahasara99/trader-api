@@ -25,6 +25,16 @@ class ReanalyzeRequest(BaseModel):
     planner_payload: dict[str, Any] | None = None
 
 
+class ChartReviewRequest(BaseModel):
+    review_type: str = "CHART_STRUCTURE_REVIEW"
+
+
+class ChartLevelDecisionRequest(BaseModel):
+    decision: str
+    manual_levels: dict[str, float | None] | None = None
+    decided_by: str = "dashboard_user"
+
+
 class ManualActionRequest(BaseModel):
     action: str
     trade_id: str | None = None
@@ -132,6 +142,43 @@ def stock_profile(ticker: str, service: LiveMonitorService = Depends(get_live_mo
 def monitor_detail(watch_id: str, service: LiveMonitorService = Depends(get_live_monitor_service)):
     try:
         return service.get_monitor(watch_id)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.get("/{watch_id}/charts")
+def monitor_charts(watch_id: str, service: LiveMonitorService = Depends(get_live_monitor_service)):
+    try:
+        return service.chart_bundle(watch_id)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/{watch_id}/chart-review")
+def request_chart_review(
+    watch_id: str,
+    request: ChartReviewRequest,
+    service: LiveMonitorService = Depends(get_live_monitor_service),
+):
+    try:
+        return service.run_chart_review(watch_id, review_type=request.review_type, automatic=False)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/{watch_id}/chart-level-decision")
+def chart_level_decision(
+    watch_id: str,
+    request: ChartLevelDecisionRequest,
+    service: LiveMonitorService = Depends(get_live_monitor_service),
+):
+    try:
+        return service.apply_chart_level_decision(
+            watch_id,
+            decision=request.decision,
+            manual_levels=request.manual_levels,
+            decided_by=request.decided_by,
+        )
     except Exception as exc:
         raise _translate_error(exc) from exc
 
