@@ -496,8 +496,11 @@ def _render_sp500_workflow_result(result: dict) -> None:
             st.dataframe(sector_frame.reset_index(), use_container_width=True, hide_index=True)
         st.markdown("**Adaptive Expansion**")
         st.json(diagnostics.get("adaptive_expansion") or {})
-        with st.expander("Raw Scanner Diagnostics", expanded=False):
-            st.json(diagnostics)
+
+    # Streamlit prohibits nested expanders, so keep the raw payload as a
+    # separate sibling section below the summarized diagnostics.
+    with st.expander("Raw Scanner Diagnostics", expanded=False):
+        st.json(diagnostics)
 
 
 def _render_runner_plan_result(rows: list[dict], *, planned_at: str | None = None, market_regime: str | None = None) -> None:
