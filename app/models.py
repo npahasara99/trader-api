@@ -426,11 +426,14 @@ class LiveWatch(Base):
     state: Mapped[str] = mapped_column(String(40), default="WATCHING", index=True)
     current_setup_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     current_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_snapshot_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     market_data_as_of: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     session_label: Mapped[str | None] = mapped_column(String(24), nullable=True)
     last_event: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_evaluation_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_backend_evaluation_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_market_data_update_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -459,6 +462,14 @@ class MonitorSetup(Base):
     industry: Mapped[str | None] = mapped_column(String(160), nullable=True)
     market_regime: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
     planner_baseline_json: Mapped[str] = mapped_column(Text)
+    market_snapshot_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    plan_reference_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    plan_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    market_data_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    plan_stale: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    plan_stale_reasons_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    previous_setup_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    replacement_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     planner_levels_json: Mapped[str] = mapped_column(Text)
     active_levels_json: Mapped[str] = mapped_column(Text)
     manual_overrides_json: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -526,6 +537,28 @@ class MonitorEvent(Base):
     message: Mapped[str] = mapped_column(Text)
     snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class MarketSnapshot(Base):
+    """Immutable market-data vintage used by one planner setup and its charts."""
+
+    __tablename__ = "market_snapshots"
+    __table_args__ = (Index("ix_market_snapshots_ticker_created", "ticker", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    quote_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reference_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    data_source: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    daily_last_bar_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    hourly_last_bar_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    thirty_min_last_bar_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    five_min_last_bar_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    one_min_last_bar_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consistency_status: Mapped[str] = mapped_column(String(40), default="CONSISTENT", index=True)
+    cache_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    payload_json: Mapped[str] = mapped_column(Text)
 
 
 class MonitorDecisionSnapshot(Base):
@@ -691,6 +724,7 @@ class ChartSnapshot(Base):
     id: Mapped[str] = mapped_column(String(80), primary_key=True)
     watch_id: Mapped[str] = mapped_column(String(80), index=True)
     setup_id: Mapped[str] = mapped_column(String(80), index=True)
+    market_snapshot_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     decision_event_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     ticker: Mapped[str] = mapped_column(String(32), index=True)
     timeframe: Mapped[str] = mapped_column(String(24), index=True)
@@ -712,6 +746,7 @@ class ChartStructureReview(Base):
     id: Mapped[str] = mapped_column(String(80), primary_key=True)
     watch_id: Mapped[str] = mapped_column(String(80), index=True)
     setup_id: Mapped[str] = mapped_column(String(80), index=True)
+    market_snapshot_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     ticker: Mapped[str] = mapped_column(String(32), index=True)
     review_type: Mapped[str] = mapped_column(String(60), index=True)
     status: Mapped[str] = mapped_column(String(40), index=True)

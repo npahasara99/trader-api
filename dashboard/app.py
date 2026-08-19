@@ -636,7 +636,7 @@ def _render_live_monitor_table(monitor_rows: list[dict]) -> None:
         return
     monitor_df = pd.DataFrame(monitor_rows)
     monitor_columns = [
-        "ticker", "current_price", "near_confirmation", "primary_trigger", "strong_confirmation",
+        "ticker", "current_price", "plan_reference_price", "price_drift_pct", "plan_stale", "near_confirmation", "primary_trigger", "strong_confirmation",
         "major_trend_repair", "distance_to_trigger_pct", "rvol_5m", "state", "chart_analysis_status",
         "live_confirmation_score", "planned_rr_at_primary_trigger", "current_executable_rr",
         "trigger_source", "market_session", "data_age_seconds", "last_event",
@@ -645,12 +645,17 @@ def _render_live_monitor_table(monitor_rows: list[dict]) -> None:
     display = monitor_df[visible].copy()
     if "distance_to_trigger_pct" in display:
         display["distance_to_trigger_pct"] = pd.to_numeric(display["distance_to_trigger_pct"], errors="coerce") * 100.0
+    if "price_drift_pct" in display:
+        display["price_drift_pct"] = pd.to_numeric(display["price_drift_pct"], errors="coerce") * 100.0
     st.dataframe(
         display,
         use_container_width=True,
         hide_index=True,
         column_config={
             "current_price": st.column_config.NumberColumn("Current", format="$%.2f"),
+            "plan_reference_price": st.column_config.NumberColumn("Plan Ref", format="$%.2f"),
+            "price_drift_pct": st.column_config.NumberColumn("Plan Drift %", format="%.2f%%"),
+            "plan_stale": st.column_config.CheckboxColumn("Plan Stale"),
             "near_confirmation": st.column_config.NumberColumn("Near Confirm", format="$%.2f"),
             "primary_trigger": st.column_config.NumberColumn("Primary", format="$%.2f"),
             "strong_confirmation": st.column_config.NumberColumn("Strong", format="$%.2f"),
@@ -1722,7 +1727,12 @@ with live_monitor_tab:
             add_symbol_submitted = st.form_submit_button("Add to Live Monitor", type="primary", use_container_width=True)
         if add_symbol_submitted:
             try:
-                added = add_live_monitor(symbol, source="manual_dashboard")
+                with st.status("Creating synchronized monitor", expanded=True) as monitor_status:
+                    st.write("Fetching fresh quote and OHLCV...")
+                    st.write("Generating a setup from the canonical market snapshot...")
+                    added = add_live_monitor(symbol, source="manual_dashboard")
+                    st.write("Planner and chart snapshot references validated.")
+                    monitor_status.update(label="Fresh monitor created", state="complete", expanded=False)
                 st.toast(f"{added.get('ticker')} added. Planner baseline created.", icon=":material/visibility:")
                 st.rerun()
             except (TraderAPIError, ValueError) as exc:
@@ -1754,6 +1764,11 @@ with live_monitor_tab:
             monitor_detail = {}
 
         if monitor_detail:
+            if monitor_detail.get("plan_stale"):
+                st.error(
+                    "PLAN STALE - REANALYSIS REQUIRED. Previous planner levels are historical only; "
+                    "approval, executable R:R, LLM review, and manual order generation are disabled."
+                )
             detail_cols = st.columns(8)
             detail_cols[0].metric("Ticker", monitor_detail.get("ticker") or "-")
             detail_cols[1].metric("State", monitor_detail.get("state") or "-")
@@ -1771,8 +1786,22 @@ with live_monitor_tab:
                 f"Planned R:R at trigger: {planned_rr if planned_rr is not None else '-'} | "
                 f"Current executable R:R: {executable_rr if executable_rr is not None else 'NOT ACTIVE'}"
             )
+            snapshot_meta = monitor_detail.get("market_snapshot") or {}
+            render_key_value_grid(
+                [
+                    ("Quote As Of", format_ts(monitor_detail.get("current_price_timestamp"))),
+                    ("Planner Generated", format_ts(monitor_detail.get("plan_created_at"))),
+                    ("Planner Reference", format_price(monitor_detail.get("plan_reference_price"))),
+                    ("Plan Drift", format_pct(monitor_detail.get("price_drift_pct"))),
+                    ("Data Source", snapshot_meta.get("data_source") or "-"),
+                    ("Market Snapshot", monitor_detail.get("market_snapshot_id") or "-"),
+                    ("Chart Snapshot Match", "Yes" if monitor_detail.get("planner_chart_snapshot_ids_match") else "Not captured / mismatch"),
+                    ("Last Backend Evaluation", format_ts(monitor_detail.get("last_backend_evaluation_at"))),
+                ],
+                columns=4,
+            )
 
-            monitor_actions = ["stop", "evaluate", "reanalyze", "llm-review", "remove"]
+            monitor_actions = ["stop", "reanalyze", "remove"] if monitor_detail.get("plan_stale") else ["stop", "evaluate", "reanalyze", "llm-review", "remove"]
             if monitor_detail.get("state") == "PAUSED":
                 monitor_actions.insert(0, "resume")
             else:
@@ -1804,29 +1833,37 @@ with live_monitor_tab:
                 active_levels = monitor_detail.get("active_levels") or {}
                 planner_levels = monitor_detail.get("planner_levels") or {}
                 st.markdown("**Active Technical Levels**")
-                st.json(active_levels, expanded=False)
-                with st.expander("Edit active level overlay", expanded=False):
-                    editable_level_names = [
-                        "near_confirmation", "primary_entry_trigger", "strong_confirmation",
-                        "major_trend_repair", "invalidation_level", "optional_support_level", "suggested_stop",
-                        "tp1", "tp2", "tp3", "stretch_target", "max_chase_price",
-                    ]
-                    with st.form(f"level_override_form_{selected_watch_id}"):
-                        level_inputs = {
-                            name: st.text_input(pretty_label(name), value="" if active_levels.get(name) is None else str(active_levels.get(name)))
-                            for name in editable_level_names
-                        }
-                        save_levels = st.form_submit_button("Save Manual Overrides", type="primary")
-                    if save_levels:
-                        try:
-                            parsed_levels = {name: (None if value.strip() == "" else float(value)) for name, value in level_inputs.items()}
-                            edit_live_monitor_levels(selected_watch_id, parsed_levels)
-                            st.toast("Manual overlay saved; planner originals remain unchanged.", icon=":material/save:")
-                            st.rerun()
-                        except (TraderAPIError, ValueError) as exc:
-                            st.error(str(exc))
-                with st.expander("Planner original levels", expanded=False):
-                    st.json(planner_levels)
+                if active_levels:
+                    st.json(active_levels, expanded=False)
+                else:
+                    st.caption("No active execution levels are available until this monitor is freshly reanalyzed.")
+                if not monitor_detail.get("plan_stale"):
+                    with st.expander("Edit active level overlay", expanded=False):
+                        editable_level_names = [
+                            "near_confirmation", "primary_entry_trigger", "strong_confirmation",
+                            "major_trend_repair", "invalidation_level", "optional_support_level", "suggested_stop",
+                            "tp1", "tp2", "tp3", "stretch_target", "max_chase_price",
+                        ]
+                        with st.form(f"level_override_form_{selected_watch_id}"):
+                            level_inputs = {
+                                name: st.text_input(pretty_label(name), value="" if active_levels.get(name) is None else str(active_levels.get(name)))
+                                for name in editable_level_names
+                            }
+                            save_levels = st.form_submit_button("Save Manual Overrides", type="primary")
+                        if save_levels:
+                            try:
+                                parsed_levels = {name: (None if value.strip() == "" else float(value)) for name, value in level_inputs.items()}
+                                edit_live_monitor_levels(selected_watch_id, parsed_levels)
+                                st.toast("Manual overlay saved; planner originals remain unchanged.", icon=":material/save:")
+                                st.rerun()
+                            except (TraderAPIError, ValueError) as exc:
+                                st.error(str(exc))
+                with st.expander("Planner original levels" if not monitor_detail.get("plan_stale") else "Previous planner levels (historical / stale)", expanded=False):
+                    st.json(planner_levels or monitor_detail.get("historical_stale_levels") or {})
+                setup_history_rows = monitor_detail.get("setup_history") or []
+                if setup_history_rows:
+                    with st.expander("Old plan vs new plan history", expanded=False):
+                        st.dataframe(pd.DataFrame(setup_history_rows), use_container_width=True, hide_index=True)
             with chart_analysis_tab:
                 chart_payload = {}
                 try:
@@ -1923,21 +1960,21 @@ with live_monitor_tab:
                 if monitor_detail.get("chart_analysis_status") in {"DISAGREEMENT", "STALE"}:
                     st.warning("LEVEL REVIEW REQUIRED: validated chart levels are proposals until you explicitly accept them.")
                 review_controls = st.columns(4)
-                if review_controls[0].button("Run Chart Review", key=f"run_chart_review_{selected_watch_id}", type="primary", use_container_width=True):
+                if review_controls[0].button("Run Chart Review", key=f"run_chart_review_{selected_watch_id}", type="primary", use_container_width=True, disabled=bool(monitor_detail.get("plan_stale"))):
                     try:
                         request_live_monitor_chart_review(selected_watch_id)
                         _load_live_monitor_chart_data.clear()
                         st.rerun()
                     except TraderAPIError as exc:
                         st.error(str(exc))
-                if review_controls[1].button("Accept Validated", key=f"accept_chart_{selected_watch_id}", use_container_width=True):
+                if review_controls[1].button("Accept Validated", key=f"accept_chart_{selected_watch_id}", use_container_width=True, disabled=bool(monitor_detail.get("plan_stale"))):
                     try:
                         decide_live_monitor_chart_levels(selected_watch_id, decision="ACCEPT_VALIDATED")
                         _load_live_monitor_chart_data.clear()
                         st.rerun()
                     except TraderAPIError as exc:
                         st.error(str(exc))
-                if review_controls[2].button("Keep Planner", key=f"keep_planner_{selected_watch_id}", use_container_width=True):
+                if review_controls[2].button("Keep Planner", key=f"keep_planner_{selected_watch_id}", use_container_width=True, disabled=bool(monitor_detail.get("plan_stale"))):
                     try:
                         decide_live_monitor_chart_levels(selected_watch_id, decision="KEEP_PLANNER")
                         _load_live_monitor_chart_data.clear()
@@ -1946,7 +1983,12 @@ with live_monitor_tab:
                         st.error(str(exc))
                 if review_controls[3].button("Reanalyze", key=f"chart_reanalyze_{selected_watch_id}", use_container_width=True):
                     try:
-                        live_monitor_action(selected_watch_id, "reanalyze")
+                        with st.status("Reanalyzing from fresh market data", expanded=True) as reanalysis_status:
+                            st.write("Bypassing market-data and planner caches...")
+                            st.write("Creating a new canonical snapshot and setup version...")
+                            live_monitor_action(selected_watch_id, "reanalyze")
+                            st.write("Generating synchronized charts and validating levels...")
+                            reanalysis_status.update(label="Fresh reanalysis completed", state="complete", expanded=False)
                         _load_live_monitor_chart_data.clear()
                         st.rerun()
                     except TraderAPIError as exc:

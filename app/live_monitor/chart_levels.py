@@ -198,29 +198,102 @@ def detect_stale_plan(
     setup_created_at: datetime,
     structure_bars: list[dict],
     config: LiveMonitorConfig,
+    plan_reference_price: float | None = None,
+    plan_created_at: datetime | None = None,
+    data_consistency_status: str | None = None,
 ) -> dict[str, Any]:
     current = number(current_price)
     atr_value = number(atr) or (current or 1.0) * 0.02
     reasons: list[str] = []
+    warnings: list[str] = []
     invalidation = number(levels.get("invalidation_level"))
     support = number(levels.get("optional_support_level"))
     primary = number(levels.get("primary_entry_trigger"))
+    reference = number(plan_reference_price)
+    drift = None if current is None or reference is None else current - reference
+    drift_pct = None if drift is None else drift / reference
+    drift_atr = None if drift is None else drift / max(atr_value, 1e-9)
     now = datetime.now(timezone.utc)
-    created = setup_created_at if setup_created_at.tzinfo else setup_created_at.replace(tzinfo=timezone.utc)
+    created_source = plan_created_at or setup_created_at
+    created = created_source if created_source.tzinfo else created_source.replace(tzinfo=timezone.utc)
+    if reference is None:
+        reasons.append("PLAN_REFERENCE_MISSING")
+    if drift_pct is not None and abs(drift_pct) > config.plan_price_drift_pct:
+        reasons.append("PRICE_DRIFT")
+    if drift_atr is not None and abs(drift_atr) > config.plan_price_drift_atr:
+        reasons.append("ATR_DRIFT")
     if current is not None and invalidation is not None and current <= invalidation:
-        reasons.append("structural_invalidation_failed")
-    if current is not None and support is not None and current < support - atr_value * 0.35:
-        reasons.append("original_support_failed")
+        reasons.append("STRUCTURE_INVALIDATED")
+    if current is not None and support is not None and current < support - atr_value * config.support_failure_atr:
+        reasons.append("SUPPORT_FAILED")
+        warnings.append("OLD_SUPPORT_LOST")
     if current is not None and primary is not None and (primary - current) / atr_value > config.trigger_max_atr:
-        reasons.append("primary_trigger_many_atrs_from_current_structure")
+        warnings.append("PRIMARY_TRIGGER_SANITY_WARNING")
     if (now - created).days > config.plan_max_age_days:
-        reasons.append("setup_age_exceeds_validity_window")
+        reasons.append("PLAN_TOO_OLD")
     if len(structure_bars) >= 2:
         prior_close = _bar_number(structure_bars[-2], "close")
         last_open = _bar_number(structure_bars[-1], "open")
-        if prior_close and last_open and abs(last_open - prior_close) > atr_value * 1.5:
-            reasons.append("large_gap_changed_structure")
-    return {"stale": bool(reasons), "reasons": reasons, "status": "PLAN_STALE" if reasons else "CURRENT"}
+        if prior_close and last_open and abs(last_open - prior_close) > atr_value * config.major_gap_atr:
+            reasons.append("MAJOR_GAP")
+    recent = structure_bars[-config.new_structure_lookback_bars:]
+    recent_lows = [value for value in (_bar_number(bar, "low") for bar in recent) if value is not None]
+    recent_highs = [value for value in (_bar_number(bar, "high") for bar in recent) if value is not None]
+    if reference is not None and recent_lows and recent_highs:
+        if reference < min(recent_lows) - atr_value * 0.5 or reference > max(recent_highs) + atr_value * 0.5:
+            reasons.append("NEW_STRUCTURE")
+    if data_consistency_status == "MARKET_DATA_MISMATCH":
+        reasons.append("DATA_MISMATCH")
+    reasons = list(dict.fromkeys(reasons))
+    return {
+        "stale": bool(reasons),
+        "reasons": reasons,
+        "warnings": list(dict.fromkeys(warnings)),
+        "status": "PLAN_STALE" if reasons else "CURRENT",
+        "plan_reference_price": reference,
+        "current_price": current,
+        "price_drift_pct": None if drift_pct is None else round(drift_pct, 6),
+        "price_drift_atr": None if drift_atr is None else round(drift_atr, 4),
+        "plan_age_seconds": max(0.0, (now - created).total_seconds()),
+    }
+
+
+def validate_level_semantics(*, current_price: float | None, levels: dict, config: LiveMonitorConfig) -> dict[str, Any]:
+    """Validate long-side labels and short-swing geometry without inventing levels."""
+    current = number(current_price)
+    atr = number(levels.get("atr")) or (current or 1.0) * 0.02
+    primary = number(levels.get("primary_entry_trigger"))
+    support = number(levels.get("optional_support_level"))
+    invalidation = number(levels.get("invalidation_level"))
+    warnings: list[str] = []
+    reclassified: dict[str, str] = {}
+    if current is not None and support is not None and support > current + atr * 0.10:
+        warnings.append("OLD_SUPPORT_LOST")
+        reclassified["optional_support_level"] = "RESISTANCE_OR_HISTORICAL_SUPPORT"
+    if primary is not None and current is not None and (primary - current) / max(atr, 1e-9) > config.trigger_max_atr:
+        warnings.append("PRIMARY_TRIGGER_SANITY_WARNING")
+        reclassified["primary_entry_trigger"] = "MAJOR_TREND_REPAIR_CANDIDATE"
+    if invalidation is not None and primary is not None and invalidation >= primary:
+        warnings.append("INVALIDATION_SEMANTIC_ERROR")
+    target_diagnostics: dict[str, Any] = {}
+    for name in ("tp1", "tp2", "tp3", "stretch_target"):
+        target = number(levels.get(name))
+        if target is None or primary is None:
+            continue
+        distance_atr = (target - primary) / max(atr, 1e-9)
+        target_diagnostics[name] = {
+            "distance_pct": round((target - primary) / primary, 6),
+            "distance_atr": round(distance_atr, 4),
+            "reachable_2_10_days": bool(0 < distance_atr <= config.chart_max_target_atr),
+        }
+        if name == "tp1" and distance_atr > config.chart_max_target_atr:
+            warnings.append("TARGET_REACHABILITY_WARNING")
+    return {
+        "status": "WARNING" if warnings else "VALID",
+        "warnings": list(dict.fromkeys(warnings)),
+        "reclassified_levels": reclassified,
+        "target_diagnostics": target_diagnostics,
+    }
 
 
 def validate_chart_levels(

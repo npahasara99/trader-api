@@ -19,6 +19,7 @@ from app.models import (
     ConfirmationAttempt,
     LearningObservation,
     LearningProposal,
+    MarketSnapshot,
     LiveWatch,
     LLMAdvisoryReview,
     ManualMonitorTrade,
@@ -34,13 +35,22 @@ from app.models import (
 from .advisor import PROMPT_VERSION, build_advisory_packet, review_advisory_packet
 from .baseline import build_monitor_baseline
 from .chart_data import build_chart_bundle
-from .chart_levels import LEVEL_NAMES, check_data_consistency, derive_chart_level_candidates, detect_stale_plan, number, reconcile_levels
+from .chart_levels import (
+    LEVEL_NAMES,
+    check_data_consistency,
+    derive_chart_level_candidates,
+    detect_stale_plan,
+    number,
+    reconcile_levels,
+    validate_level_semantics,
+)
 from .chart_renderer import cleanup_chart_snapshot_retention, render_chart_snapshots
 from .chart_review import review_chart_packet
 from .config import LiveMonitorConfig, load_live_monitor_config
 from .engine import evaluate_monitor
 from .enums import ACTIVE_MONITOR_STATES, MonitorState
 from .learning import aggregate_attempts, hierarchical_weights, similar_case_score
+from .market_snapshot import build_market_snapshot, market_snapshot_payload, persist_market_snapshot
 
 
 def _id() -> str:
@@ -88,6 +98,7 @@ class LiveMonitorService:
         chart_review_provider: Callable[[dict], dict] | None = None,
     ) -> None:
         self.config = config or load_live_monitor_config()
+        self._provided_bars_loader = bars_loader
         self._bars_loader = bars_loader or self._load_live_bars
         self._advisory_provider = advisory_provider
         self._chart_review_provider = chart_review_provider
@@ -102,6 +113,36 @@ class LiveMonitorService:
     def _load_live_bars(ticker: str, timeframe: str, lookback_days: int | None) -> list[dict]:
         ttl = 20 if timeframe == "one_minute" else 30
         return get_bars(ticker, timeframe, lookback_days, cache_ttl_seconds=ttl)
+
+    def _fetch_bars(self, ticker: str, timeframe: str, lookback_days: int | None, *, force_refresh: bool) -> list[dict]:
+        if self._provided_bars_loader is not None:
+            try:
+                return self._provided_bars_loader(ticker, timeframe, lookback_days, force_refresh=force_refresh)  # type: ignore[call-arg]
+            except TypeError:
+                return self._provided_bars_loader(ticker, timeframe, lookback_days)
+        ttl = 0 if force_refresh else (20 if timeframe == "one_minute" else 30)
+        return get_bars(ticker, timeframe, lookback_days, cache_ttl_seconds=ttl)
+
+    def _fresh_market_snapshot(self, ticker: str) -> dict[str, Any]:
+        return build_market_snapshot(
+            ticker,
+            bars_loader=lambda symbol, timeframe, lookback: self._fetch_bars(
+                symbol, timeframe, lookback, force_refresh=True
+            ),
+            force_refresh=True,
+            consistency_max_pct=self.config.market_data_mismatch_pct,
+            consistency_atr_fraction=self.config.market_data_mismatch_atr_fraction,
+        )
+
+    @staticmethod
+    def _require_usable_snapshot(snapshot: dict[str, Any]) -> None:
+        status = str(snapshot.get("consistency_status") or "MARKET_DATA_UNAVAILABLE")
+        if status == "MARKET_DATA_UNAVAILABLE" or number(snapshot.get("reference_price")) is None:
+            raise ValueError("MARKET_DATA_UNAVAILABLE: fresh quote/OHLCV could not be loaded")
+        if status == "MARKET_DATA_MISMATCH":
+            raise ValueError("MARKET_DATA_MISMATCH: intraday prices disagree beyond the configured tolerance")
+        if snapshot.get("freshness_status") == "MARKET_DATA_STALE":
+            raise ValueError("MARKET_DATA_STALE: provider bars are older than the session-aware freshness allowance")
 
     def start(self) -> dict[str, Any]:
         with self._lock:
@@ -235,28 +276,122 @@ class LiveMonitorService:
         symbol = str(ticker or "").strip().upper()
         if not symbol or not symbol.replace(".", "").replace("-", "").isalnum():
             raise ValueError("A valid ticker is required")
+        snapshot = self._fresh_market_snapshot(symbol)
+        self._require_usable_snapshot(snapshot)
         watch_id: str
+        should_review = False
         with SessionLocal() as db:
+            persist_market_snapshot(db, snapshot)
             watch = db.query(LiveWatch).filter(LiveWatch.ticker == symbol).one_or_none()
-            if watch and watch.monitor_active and watch.removed_at is None and watch.current_setup_id:
-                return self._watch_payload(db, watch, include_detail=True)
-            baseline = build_monitor_baseline(db, symbol, supplied_plan=planner_payload, config=self.config)
             now = _utcnow()
             if watch is None:
                 watch = LiveWatch(id=_id(), ticker=symbol, source=source, created_at=now)
                 db.add(watch)
                 db.flush()
+            old_setup = db.get(MonitorSetup, watch.current_setup_id) if watch.current_setup_id else None
+            replacement_reason = None
+            if old_setup is not None and watch.monitor_active and watch.removed_at is None:
+                old_levels = _loads(old_setup.active_levels_json)
+                staleness = detect_stale_plan(
+                    current_price=snapshot.get("reference_price"),
+                    levels=old_levels,
+                    atr=old_levels.get("atr"),
+                    setup_created_at=old_setup.created_at,
+                    plan_reference_price=old_setup.plan_reference_price,
+                    plan_created_at=old_setup.plan_created_at,
+                    structure_bars=(snapshot.get("bars") or {}).get("thirty_minute") or [],
+                    data_consistency_status=snapshot.get("consistency_status"),
+                    config=self.config,
+                )
+                if not staleness["stale"]:
+                    watch.current_price = snapshot.get("reference_price")
+                    watch.market_data_as_of = _as_datetime(snapshot.get("quote_timestamp"))
+                    watch.market_snapshot_id = snapshot.get("market_snapshot_id")
+                    watch.last_market_data_update_at = watch.market_data_as_of or now
+                    watch.updated_at = now
+                    self._event(
+                        db,
+                        watch,
+                        setup=old_setup,
+                        event_type="MARKET_DATA_REFRESHED",
+                        message="Existing active setup validated against a fresh market snapshot",
+                        snapshot={"market_snapshot_id": snapshot.get("market_snapshot_id"), "staleness": staleness},
+                    )
+                    db.commit()
+                    return self._watch_payload(db, watch, include_detail=True)
+                replacement_reason = ",".join(staleness["reasons"])
+                old_setup.plan_stale = True
+                old_setup.plan_stale_reason = replacement_reason
+                old_setup.plan_stale_reasons_json = _dumps(staleness["reasons"])
+                self._event(
+                    db,
+                    watch,
+                    setup=old_setup,
+                    event_type="PLAN_STALE_DETECTED",
+                    message="Existing monitor plan became stale during activation refresh",
+                    snapshot=staleness,
+                )
+
+            baseline = build_monitor_baseline(
+                db,
+                symbol,
+                supplied_plan=planner_payload,
+                config=self.config,
+                market_snapshot=snapshot,
+                allow_source_reuse=old_setup is None,
+            )
             watch.source = source
             watch.monitor_active = True
             watch.removed_at = None
             watch.state = MonitorState.WATCHING.value
-            watch.current_price = baseline["plan"].get("current_price")
+            watch.current_price = snapshot.get("reference_price")
+            watch.market_data_as_of = _as_datetime(snapshot.get("quote_timestamp"))
+            watch.market_snapshot_id = snapshot.get("market_snapshot_id")
+            watch.last_market_data_update_at = watch.market_data_as_of or now
             watch.updated_at = now
-            setup = self._create_setup(db, watch, baseline)
-            self._event(db, watch, setup=setup, event_type="monitor_added", to_state=watch.state, message=f"{symbol} added to live monitor")
+            setup = self._create_setup(
+                db,
+                watch,
+                baseline,
+                previous_setup=old_setup,
+                replacement_reason=replacement_reason,
+            )
+            if old_setup:
+                old_setup.status = "replaced"
+                old_setup.replaced_by_setup_id = setup.id
+                old_setup.updated_at = now
+            self._event(
+                db,
+                watch,
+                setup=setup,
+                event_type="MARKET_DATA_REFRESHED",
+                message="Fresh quote and OHLCV were captured in the canonical market snapshot",
+                snapshot={
+                    "market_snapshot_id": setup.market_snapshot_id,
+                    "quote_timestamp": snapshot.get("quote_timestamp"),
+                    "data_source": snapshot.get("data_source"),
+                    "cache_status": snapshot.get("cache_status"),
+                    "freshness_status": snapshot.get("freshness_status"),
+                },
+            )
+            self._event(
+                db,
+                watch,
+                setup=setup,
+                event_type="MONITOR_CREATED_FROM_FRESH_SNAPSHOT",
+                to_state=watch.state,
+                message=f"{symbol} activated from canonical snapshot {setup.market_snapshot_id}",
+                snapshot={
+                    "market_snapshot_id": setup.market_snapshot_id,
+                    "plan_reference_price": setup.plan_reference_price,
+                    "source_plan_reused": baseline.get("source_plan_reused"),
+                    "source_plan_validation": baseline.get("source_plan_validation"),
+                },
+            )
             db.commit()
             watch_id = watch.id
-        if self.config.chart_review_on_add:
+            should_review = True
+        if should_review and self.config.chart_review_on_add:
             try:
                 self.run_chart_review(
                     watch_id,
@@ -269,7 +404,15 @@ class LiveMonitorService:
                 pass
         return self.get_monitor(watch_id)
 
-    def _create_setup(self, db: Session, watch: LiveWatch, baseline: dict) -> MonitorSetup:
+    def _create_setup(
+        self,
+        db: Session,
+        watch: LiveWatch,
+        baseline: dict,
+        *,
+        previous_setup: MonitorSetup | None = None,
+        replacement_reason: str | None = None,
+    ) -> MonitorSetup:
         current_max = db.query(func.max(MonitorSetup.version)).filter(MonitorSetup.watch_id == watch.id).scalar() or 0
         plan = baseline["plan"]
         levels = baseline["levels"]
@@ -289,6 +432,14 @@ class LiveMonitorService:
             industry=plan.get("industry"),
             market_regime=plan.get("market_regime"),
             planner_baseline_json=_dumps(plan),
+            market_snapshot_id=plan.get("market_snapshot_id"),
+            plan_reference_price=plan.get("plan_reference_price"),
+            plan_created_at=_as_datetime(plan.get("plan_created_at")),
+            market_data_timestamp=_as_datetime(plan.get("market_data_timestamp")),
+            plan_stale=False,
+            plan_stale_reasons_json=_dumps([]),
+            previous_setup_id=previous_setup.id if previous_setup else None,
+            replacement_reason=replacement_reason,
             planner_levels_json=_dumps(levels),
             active_levels_json=_dumps(levels),
             manual_overrides_json=_dumps({}),
@@ -378,6 +529,8 @@ class LiveMonitorService:
             if watch is None or not watch.current_setup_id:
                 raise LookupError("Active setup not found")
             setup = db.get(MonitorSetup, watch.current_setup_id)
+            if setup.plan_stale:
+                raise ValueError("PLAN_STALE: reanalyze before editing active execution levels")
             active = _loads(setup.active_levels_json)
             manual = _loads(setup.manual_overrides_json)
             sources = _loads(setup.level_sources_json)
@@ -400,18 +553,79 @@ class LiveMonitorService:
             watch = db.get(LiveWatch, watch_id)
             if watch is None:
                 raise LookupError("Monitor not found")
+            self._event(db, watch, event_type="REANALYSIS_STARTED", message="Forced fresh monitor reanalysis started")
+            db.commit()
+            symbol = watch.ticker
+        snapshot = self._fresh_market_snapshot(symbol)
+        try:
+            self._require_usable_snapshot(snapshot)
+        except ValueError:
+            with SessionLocal() as db:
+                watch = db.get(LiveWatch, watch_id)
+                if watch:
+                    self._event(db, watch, event_type="DATA_MISMATCH", message="Reanalysis stopped because fresh market data was unavailable or inconsistent", snapshot=snapshot)
+                    db.commit()
+            raise
+        with SessionLocal() as db:
+            watch = db.get(LiveWatch, watch_id)
+            if watch is None:
+                raise LookupError("Monitor not found")
+            persist_market_snapshot(db, snapshot)
             old_setup = db.get(MonitorSetup, watch.current_setup_id) if watch.current_setup_id else None
-            baseline = build_monitor_baseline(db, watch.ticker, supplied_plan=planner_payload, config=self.config)
-            new_setup = self._create_setup(db, watch, baseline)
+            baseline = build_monitor_baseline(
+                db,
+                watch.ticker,
+                supplied_plan=planner_payload or (_loads(old_setup.planner_baseline_json) if old_setup else None),
+                config=self.config,
+                market_snapshot=snapshot,
+                allow_source_reuse=False,
+            )
+            replacement_reason = "FORCED_FRESH_REANALYSIS"
+            new_setup = self._create_setup(
+                db,
+                watch,
+                baseline,
+                previous_setup=old_setup,
+                replacement_reason=replacement_reason,
+            )
             if old_setup:
                 old_setup.status = "replaced"
                 old_setup.replaced_by_setup_id = new_setup.id
+                old_setup.replacement_reason = replacement_reason
                 old_setup.updated_at = _utcnow()
             previous = watch.state
             watch.state = MonitorState.WATCHING.value
             watch.monitor_active = True
+            watch.current_price = snapshot.get("reference_price")
+            watch.market_data_as_of = _as_datetime(snapshot.get("quote_timestamp"))
+            watch.market_snapshot_id = snapshot.get("market_snapshot_id")
+            watch.last_market_data_update_at = watch.market_data_as_of or _utcnow()
             watch.updated_at = _utcnow()
-            self._event(db, watch, setup=new_setup, event_type="setup_reanalyzed", from_state=previous, to_state=watch.state, message="Planner baseline reanalyzed; prior setup preserved")
+            self._event(
+                db,
+                watch,
+                setup=new_setup,
+                event_type="NEW_PLAN_CREATED",
+                from_state=previous,
+                to_state=watch.state,
+                message="Fresh canonical planner baseline created; prior setup preserved",
+                snapshot={
+                    "old_setup_id": old_setup.id if old_setup else None,
+                    "old_market_snapshot_id": old_setup.market_snapshot_id if old_setup else None,
+                    "new_setup_id": new_setup.id,
+                    "market_snapshot_id": new_setup.market_snapshot_id,
+                    "plan_reference_price": new_setup.plan_reference_price,
+                },
+            )
+            if old_setup:
+                self._event(
+                    db,
+                    watch,
+                    setup=new_setup,
+                    event_type="OLD_PLAN_REPLACED",
+                    message="Old setup retained as history and replaced by fresh reanalysis",
+                    snapshot={"old_setup_id": old_setup.id, "new_setup_id": new_setup.id, "replacement_reason": replacement_reason},
+                )
             db.commit()
         try:
             self.run_chart_review(
@@ -431,16 +645,26 @@ class LiveMonitorService:
             .order_by(ConfirmationAttempt.attempt_number.asc())
             .all()
         )
-        return build_chart_bundle(
+        snapshot_row = db.get(MarketSnapshot, setup.market_snapshot_id) if setup.market_snapshot_id else None
+        snapshot = market_snapshot_payload(snapshot_row)
+        bundle = build_chart_bundle(
             db,
             ticker=watch.ticker,
             levels=_loads(setup.active_levels_json),
             level_sources=_loads(setup.level_sources_json),
             bars_loader=self._bars_loader,
-            decision_time_boundary=boundary,
+            decision_time_boundary=boundary or setup.plan_created_at,
             max_bars=self.config.chart_max_bars,
             attempts=attempts,
+            market_snapshot=snapshot or None,
         )
+        bundle["planner_market_snapshot_id"] = setup.market_snapshot_id
+        bundle["snapshot_ids_match"] = bool(
+            setup.market_snapshot_id
+            and bundle.get("market_snapshot_id") == setup.market_snapshot_id
+            and _loads(setup.planner_baseline_json).get("market_snapshot_id") == setup.market_snapshot_id
+        )
+        return bundle
 
     def chart_bundle(self, watch_id: str) -> dict[str, Any]:
         with SessionLocal() as db:
@@ -452,6 +676,11 @@ class LiveMonitorService:
             bundle["planner_price"] = _loads(setup.planner_baseline_json).get("current_price")
             bundle["monitor_price"] = watch.current_price
             bundle["chart_analysis_status"] = setup.chart_analysis_status
+            bundle["plan_stale"] = setup.plan_stale
+            if setup.plan_stale:
+                bundle["historical_levels"] = bundle.get("levels") or []
+                bundle["levels"] = []
+                bundle["levels_status"] = "HISTORICAL_STALE"
             return bundle
 
     def _automatic_chart_review_allowed(self, db: Session, setup: MonitorSetup) -> bool:
@@ -504,20 +733,33 @@ class LiveMonitorService:
             planner_levels = _loads(setup.planner_levels_json)
             active_levels = _loads(setup.active_levels_json)
             chart_close = bundle.get("latest_chart_close")
-            current_price = number(watch.current_price) or number(chart_close) or number(baseline.get("current_price"))
+            current_price = number(bundle.get("reference_price")) or number(chart_close) or number(setup.plan_reference_price)
             atr = number(active_levels.get("atr")) or number(baseline.get("atr")) or (current_price or 1.0) * 0.02
             consistency = check_data_consistency(
-                planner_price=baseline.get("current_price"),
+                planner_price=setup.plan_reference_price,
                 monitor_price=watch.current_price,
                 chart_close=chart_close,
                 atr=atr,
             )
+            if not bundle.get("snapshot_ids_match"):
+                consistency = {
+                    **consistency,
+                    "status": "MARKET_DATA_MISMATCH",
+                    "snapshot_id_mismatch": {
+                        "planner": setup.market_snapshot_id,
+                        "chart": bundle.get("market_snapshot_id"),
+                        "baseline": baseline.get("market_snapshot_id"),
+                    },
+                }
             stale = detect_stale_plan(
-                current_price=current_price,
+                current_price=watch.current_price or current_price,
                 levels=active_levels,
                 atr=atr,
                 setup_created_at=setup.created_at,
+                plan_reference_price=setup.plan_reference_price,
+                plan_created_at=setup.plan_created_at,
                 structure_bars=((bundle.get("timeframes") or {}).get("structure") or {}).get("bars") or [],
+                data_consistency_status=consistency.get("status"),
                 config=self.config,
             )
             snapshots: list[ChartSnapshot] = []
@@ -540,13 +782,17 @@ class LiveMonitorService:
                 "review_type": normalized_type,
                 "ticker": watch.ticker,
                 "current_price": current_price,
+                "market_snapshot_id": setup.market_snapshot_id,
+                "plan_reference_price": setup.plan_reference_price,
+                "plan_created_at": setup.plan_created_at,
                 "atr": atr,
                 "broader_structure": setup.broader_structure,
                 "setup_type": setup.setup_type,
                 "execution_structure": setup.execution_structure,
                 "market_regime": setup.market_regime,
-                "planner_levels": planner_levels,
-                "active_levels": active_levels,
+                "planner_levels": planner_levels if not stale["stale"] else {},
+                "active_levels": active_levels if not stale["stale"] else {},
+                "historical_stale_plan": {"levels": planner_levels, "status": "HISTORICAL_STALE"} if stale["stale"] else None,
                 "stale_plan": stale,
                 "data_consistency": consistency,
                 "data_source": bundle.get("data_source"),
@@ -559,18 +805,22 @@ class LiveMonitorService:
                 "historical_profile": self._profile_for(db, setup),
                 "image_paths": [row.image_path for row in snapshots],
             }
-            if consistency["status"] == "CHART_DATA_MISMATCH" or current_price is None:
+            blocked = consistency["status"] in {"CHART_DATA_MISMATCH", "MARKET_DATA_MISMATCH"} or current_price is None or stale["stale"]
+            if blocked:
+                blocked_status = "PLAN_STALE" if stale["stale"] else (
+                    "MARKET_DATA_MISMATCH" if consistency["status"] == "MARKET_DATA_MISMATCH" else "CHART_DATA_MISMATCH"
+                )
                 review = {
-                    "status": "CHART_DATA_MISMATCH" if consistency["status"] == "CHART_DATA_MISMATCH" else "UNAVAILABLE",
+                    "status": blocked_status if current_price is not None else "UNAVAILABLE",
                     "model": None,
                     "prompt_version": "chart-structure-review-v1",
                     "output": {},
                     "proposed_levels": {},
                     "validated_levels": {},
-                    "validation": {"status": "SKIPPED", "reason": consistency["status"]},
+                    "validation": {"status": "SKIPPED", "reason": blocked_status, "stale_plan": stale},
                     "decision": "MANUAL_REVIEW",
                     "confidence": 0.0,
-                    "reason_summary": "Chart recommendation skipped because canonical prices are inconsistent or unavailable.",
+                    "reason_summary": "Chart recommendation skipped because the active plan is stale or canonical snapshot IDs/prices are inconsistent.",
                 }
             else:
                 review = review_chart_packet(packet, provider=self._chart_review_provider, config=self.config)
@@ -591,12 +841,13 @@ class LiveMonitorService:
                     "has_disagreement": False,
                 }
             analysis_status = review.get("status") or "VALIDATION_FAILED"
-            if normalized_type == "CHART_STRUCTURE_REVIEW" and analysis_status not in {"CHART_DATA_MISMATCH", "UNAVAILABLE", "VALIDATION_FAILED"}:
+            if normalized_type == "CHART_STRUCTURE_REVIEW" and analysis_status not in {"CHART_DATA_MISMATCH", "MARKET_DATA_MISMATCH", "PLAN_STALE", "UNAVAILABLE", "VALIDATION_FAILED"}:
                 analysis_status = "DISAGREEMENT" if candidate_reconciliation["has_disagreement"] else "AGREES"
             row = ChartStructureReview(
                 id=_id(),
                 watch_id=watch.id,
                 setup_id=setup.id,
+                market_snapshot_id=setup.market_snapshot_id,
                 ticker=watch.ticker,
                 review_type=normalized_type,
                 status=analysis_status,
@@ -621,6 +872,8 @@ class LiveMonitorService:
                 setup.chart_analysis_status = "STALE" if stale["stale"] else analysis_status
             setup.latest_chart_review_id = row.id
             setup.plan_stale_reason = "; ".join(stale["reasons"]) or None
+            setup.plan_stale = bool(stale["stale"])
+            setup.plan_stale_reasons_json = _dumps(stale["reasons"])
             setup.proposed_setup_json = _dumps(candidate_reconciliation)
             setup.updated_at = _utcnow()
             if normalized_type == "CONFIRMED_TRADE_REVIEW":
@@ -677,6 +930,8 @@ class LiveMonitorService:
             if watch is None or not watch.current_setup_id:
                 raise LookupError("Active monitor setup not found")
             setup = db.get(MonitorSetup, watch.current_setup_id)
+            if setup.plan_stale:
+                raise ValueError("PLAN_STALE: reanalyze before accepting or retaining active chart levels")
             previous = _loads(setup.active_levels_json)
             planner = _loads(setup.planner_levels_json)
             manual = _loads(setup.manual_overrides_json)
@@ -770,9 +1025,9 @@ class LiveMonitorService:
 
             levels = _loads(setup.active_levels_json)
             if bars_1m is None:
-                bars_1m = self._bars_loader(watch.ticker, "one_minute", 1)
+                bars_1m = self._fetch_bars(watch.ticker, "one_minute", 1, force_refresh=False)
             if bars_5m is None:
-                bars_5m = self._bars_loader(watch.ticker, "five_minute", 5)
+                bars_5m = self._fetch_bars(watch.ticker, "five_minute", 5, force_refresh=False)
             attempt_count = db.query(ConfirmationAttempt).filter(ConfirmationAttempt.setup_id == setup.id).count()
             evaluation = evaluate_monitor(
                 previous_state=watch.state,
@@ -784,25 +1039,65 @@ class LiveMonitorService:
                 config=self.config,
                 prior_attempt_count=attempt_count,
             )
+            latest_5m_close = number((bars_5m[-1] if bars_5m else {}).get("close"))
+            runtime_consistency = check_data_consistency(
+                planner_price=None,
+                monitor_price=evaluation.get("current_price"),
+                chart_close=latest_5m_close,
+                atr=levels.get("atr"),
+            )
+            runtime_reference = number(evaluation.get("current_price")) or latest_5m_close or 1.0
+            runtime_tolerance = max(
+                self.config.market_data_mismatch_pct,
+                (number(levels.get("atr")) or 0.0) / runtime_reference,
+            )
+            runtime_mismatch = bool(
+                runtime_consistency.get("max_difference_pct") is not None
+                and float(runtime_consistency["max_difference_pct"]) > runtime_tolerance
+            )
+            runtime_consistency["configured_tolerance_pct"] = round(runtime_tolerance, 6)
+            runtime_consistency["status"] = "MARKET_DATA_MISMATCH" if runtime_mismatch else "CONSISTENT"
+            semantic_validation = validate_level_semantics(
+                current_price=evaluation.get("current_price"),
+                levels=levels,
+                config=self.config,
+            )
             stale_plan = detect_stale_plan(
                 current_price=evaluation.get("current_price"),
                 levels=levels,
                 atr=levels.get("atr"),
                 setup_created_at=setup.created_at,
+                plan_reference_price=setup.plan_reference_price,
+                plan_created_at=setup.plan_created_at,
                 structure_bars=bars_5m,
+                data_consistency_status=(
+                    "MARKET_DATA_MISMATCH" if runtime_mismatch else None
+                ),
                 config=self.config,
             )
-            if stale_plan["stale"] and evaluation["state"] not in {
-                MonitorState.INVALIDATED.value,
-                MonitorState.DATA_STALE.value,
-            }:
-                evaluation["pre_stale_state"] = evaluation["state"]
-                evaluation["state"] = MonitorState.PLAN_STALE.value
+            evaluation["market_snapshot_id"] = setup.market_snapshot_id
+            evaluation["plan_reference_price"] = setup.plan_reference_price
+            evaluation["plan_created_at"] = setup.plan_created_at
+            evaluation["price_drift_pct"] = stale_plan.get("price_drift_pct")
+            evaluation["price_drift_atr"] = stale_plan.get("price_drift_atr")
+            evaluation["plan_age_seconds"] = stale_plan.get("plan_age_seconds")
+            evaluation["level_semantic_validation"] = semantic_validation
+            evaluation["runtime_data_consistency"] = runtime_consistency
+            if stale_plan["stale"]:
+                if evaluation["state"] not in {MonitorState.INVALIDATED.value, MonitorState.DATA_STALE.value}:
+                    evaluation["pre_stale_state"] = evaluation["state"]
+                    evaluation["state"] = MonitorState.PLAN_STALE.value
                 evaluation["plan_stale"] = True
                 evaluation["plan_stale_reasons"] = stale_plan["reasons"]
+                evaluation["plan_stale_warnings"] = stale_plan.get("warnings") or []
                 evaluation.setdefault("hard_blockers", []).append("plan_stale_reanalysis_required")
+                evaluation["manual_order_plan"] = None
+                evaluation["current_executable_rr"] = None
+                evaluation["current_rr_tp1"] = None
                 setup.chart_analysis_status = "STALE"
+                setup.plan_stale = True
                 setup.plan_stale_reason = "; ".join(stale_plan["reasons"])
+                setup.plan_stale_reasons_json = _dumps(stale_plan["reasons"])
                 if self.config.auto_propose_reanalysis_on_stale:
                     current = number(evaluation.get("current_price"))
                     atr = number(levels.get("atr")) or (current or 1.0) * 0.02
@@ -819,13 +1114,18 @@ class LiveMonitorService:
                         )
             else:
                 evaluation["plan_stale"] = False
+                evaluation["plan_stale_reasons"] = []
+                setup.plan_stale = False
                 setup.plan_stale_reason = None
+                setup.plan_stale_reasons_json = _dumps([])
                 if setup.chart_analysis_status == "STALE":
                     setup.chart_analysis_status = "MODIFIED" if setup.trigger_source in {"MANUAL", "VALIDATED_CHART_LLM"} else "AGREES"
             previous = watch.state
             watch.state = evaluation["state"]
             watch.current_price = evaluation.get("current_price")
             watch.market_data_as_of = evaluation.get("market_data_as_of")
+            watch.last_market_data_update_at = evaluation.get("market_data_as_of")
+            watch.last_backend_evaluation_at = current_time
             watch.session_label = evaluation.get("market_session")
             watch.latest_evaluation_json = _dumps(evaluation)
             watch.last_polled_at = current_time
@@ -833,6 +1133,17 @@ class LiveMonitorService:
             watch.last_event = evaluation.get("rejection_reason") or watch.state
             attempt = self._update_attempt(db, watch, setup, previous, evaluation)
             if previous != watch.state:
+                if watch.state == MonitorState.PLAN_STALE.value:
+                    self._event(
+                        db,
+                        watch,
+                        setup=setup,
+                        event_type="PLAN_STALE_DETECTED",
+                        from_state=previous,
+                        to_state=watch.state,
+                        message="Active plan is stale; reanalysis is required before approval or order planning",
+                        snapshot=stale_plan,
+                    )
                 self._event(
                     db,
                     watch,
@@ -941,6 +1252,8 @@ class LiveMonitorService:
             if watch is None or not watch.current_setup_id:
                 raise LookupError("Monitor not found")
             setup = db.get(MonitorSetup, watch.current_setup_id)
+            if setup.plan_stale or watch.state in {MonitorState.PLAN_STALE.value, MonitorState.DATA_STALE.value}:
+                raise ValueError("PLAN_STALE: fresh reanalysis is required before LLM review")
             snapshot = (
                 db.query(MonitorDecisionSnapshot)
                 .filter(MonitorDecisionSnapshot.setup_id == setup.id)
@@ -954,6 +1267,13 @@ class LiveMonitorService:
             return review
 
     def _request_llm_review(self, db: Session, watch: LiveWatch, setup: MonitorSetup, attempt: ConfirmationAttempt | None, evaluation: dict) -> dict[str, Any]:
+        if setup.plan_stale or evaluation.get("plan_stale"):
+            return {
+                "status": "blocked",
+                "decision": "WAIT",
+                "confidence": 0.0,
+                "reason_summary": "Fresh reanalysis is required; stale levels were not sent to the LLM.",
+            }
         baseline = _loads(setup.planner_baseline_json)
         profile = self._profile_for(db, setup)
         similar = self._similar_cases(db, setup, attempt)
@@ -989,6 +1309,8 @@ class LiveMonitorService:
             if watch is None or not watch.current_setup_id:
                 raise LookupError("Monitor not found")
             setup = db.get(MonitorSetup, watch.current_setup_id)
+            if setup.plan_stale and action == "entered":
+                raise ValueError("PLAN_STALE: manual order tracking requires a fresh active plan")
             attempt = db.query(ConfirmationAttempt).filter(ConfirmationAttempt.setup_id == setup.id).order_by(ConfirmationAttempt.attempt_number.desc()).first()
             if action == "entered":
                 trade = ManualMonitorTrade(
@@ -1250,6 +1572,21 @@ class LiveMonitorService:
         setup = db.get(MonitorSetup, watch.current_setup_id) if watch.current_setup_id else None
         levels = _loads(setup.active_levels_json) if setup else {}
         evaluation = _loads(watch.latest_evaluation_json)
+        plan_stale = bool(setup and (setup.plan_stale or watch.state == MonitorState.PLAN_STALE.value))
+        display_levels = {} if plan_stale else levels
+        reference_price = setup.plan_reference_price if setup else None
+        price_drift_pct = evaluation.get("price_drift_pct")
+        if price_drift_pct is None and number(watch.current_price) is not None and number(reference_price) is not None:
+            price_drift_pct = (float(watch.current_price) - float(reference_price)) / float(reference_price)
+        snapshot_row = db.get(MarketSnapshot, setup.market_snapshot_id) if setup and setup.market_snapshot_id else None
+        snapshot = market_snapshot_payload(snapshot_row)
+        latest_chart_snapshot = (
+            db.query(ChartSnapshot)
+            .filter(ChartSnapshot.setup_id == setup.id)
+            .order_by(ChartSnapshot.generated_at.desc())
+            .first()
+            if setup else None
+        )
         payload = {
             "id": watch.id,
             "ticker": watch.ticker,
@@ -1257,40 +1594,62 @@ class LiveMonitorService:
             "monitor_active": watch.monitor_active,
             "state": watch.state,
             "current_setup_id": watch.current_setup_id,
+            "market_snapshot_id": setup.market_snapshot_id if setup else None,
+            "current_market_snapshot_id": watch.market_snapshot_id,
             "current_price": watch.current_price,
+            "current_price_timestamp": watch.market_data_as_of,
+            "plan_reference_price": reference_price,
+            "plan_created_at": setup.plan_created_at if setup else None,
+            "market_data_timestamp": setup.market_data_timestamp if setup else None,
+            "price_drift_pct": price_drift_pct,
+            "price_drift_atr": evaluation.get("price_drift_atr"),
+            "plan_stale": plan_stale,
+            "plan_stale_reasons": _loads(setup.plan_stale_reasons_json, []) if setup else [],
+            "action_required": "REANALYZE_REQUIRED" if plan_stale else None,
             "market_data_as_of": watch.market_data_as_of,
             "market_session": watch.session_label,
             "last_event": watch.last_event,
             "last_polled_at": watch.last_polled_at,
+            "last_backend_evaluation_at": watch.last_backend_evaluation_at,
+            "last_market_data_update_at": watch.last_market_data_update_at,
             "updated_at": watch.updated_at,
-            "primary_trigger": levels.get("primary_entry_trigger"),
-            "near_confirmation": levels.get("near_confirmation"),
-            "strong_confirmation": levels.get("strong_confirmation"),
-            "major_trend_repair": levels.get("major_trend_repair"),
+            "primary_trigger": display_levels.get("primary_entry_trigger"),
+            "near_confirmation": display_levels.get("near_confirmation"),
+            "strong_confirmation": display_levels.get("strong_confirmation"),
+            "major_trend_repair": display_levels.get("major_trend_repair"),
+            "previous_planner_primary_trigger": levels.get("primary_entry_trigger") if plan_stale else None,
             "distance_to_trigger_pct": evaluation.get("distance_to_trigger_pct"),
             "rvol_1m": evaluation.get("rvol_1m"),
             "rvol_5m": evaluation.get("rvol_5m"),
             "price_confirmation": evaluation.get("price_confirmation"),
             "volume_confirmation": evaluation.get("volume_confirmation"),
-            "setup_valid": setup.valid_setup if setup else False,
+            "setup_valid": bool(setup and setup.valid_setup and not plan_stale),
             "setup_type": setup.setup_type if setup else None,
             "broader_structure": setup.broader_structure if setup else None,
             "execution_structure": setup.execution_structure if setup else None,
             "trigger_source": setup.trigger_source if setup else None,
             "live_confirmation_score": evaluation.get("live_confirmation_score"),
-            "current_rr_tp1": evaluation.get("current_rr_tp1"),
-            "planned_rr_at_primary_trigger": evaluation.get("planned_rr_at_primary_trigger"),
-            "current_executable_rr": evaluation.get("current_executable_rr"),
+            "current_rr_tp1": None if plan_stale else evaluation.get("current_rr_tp1"),
+            "planned_rr_at_primary_trigger": None if plan_stale else evaluation.get("planned_rr_at_primary_trigger"),
+            "current_executable_rr": None if plan_stale else evaluation.get("current_executable_rr"),
             "data_age_seconds": evaluation.get("data_age_seconds"),
-            "max_chase_price": levels.get("max_chase_price"),
+            "max_chase_price": display_levels.get("max_chase_price"),
             "chart_analysis_status": setup.chart_analysis_status if setup else "NOT_RUN",
             "plan_stale_reason": setup.plan_stale_reason if setup else None,
+            "planner_chart_snapshot_ids_match": bool(
+                setup
+                and setup.market_snapshot_id
+                and latest_chart_snapshot
+                and latest_chart_snapshot.market_snapshot_id == setup.market_snapshot_id
+            ),
         }
         if include_detail and setup:
             payload.update({
                 "planner_baseline": _loads(setup.planner_baseline_json),
-                "planner_levels": _loads(setup.planner_levels_json),
-                "active_levels": levels,
+                "planner_levels": {} if plan_stale else _loads(setup.planner_levels_json),
+                "active_levels": display_levels,
+                "historical_stale_levels": levels if plan_stale else {},
+                "market_snapshot": {key: value for key, value in snapshot.items() if key != "bars"},
                 "manual_overrides": _loads(setup.manual_overrides_json),
                 "llm_proposed_levels": _loads(setup.llm_proposed_levels_json),
                 "validated_chart_levels": _loads(setup.validated_chart_levels_json),
@@ -1305,6 +1664,25 @@ class LiveMonitorService:
                 "manual_trades": [self._trade_payload(row) for row in db.query(ManualMonitorTrade).filter(ManualMonitorTrade.setup_id == setup.id).order_by(ManualMonitorTrade.created_at.desc()).all()],
                 "journal": [self._event_payload(row) for row in db.query(MonitorEvent).filter(MonitorEvent.watch_id == watch.id).order_by(MonitorEvent.created_at.desc()).limit(200).all()],
                 "historical_profile": self._profile_for(db, setup),
+                "setup_history": [
+                    {
+                        "setup_id": row.id,
+                        "version": row.version,
+                        "status": row.status,
+                        "market_snapshot_id": row.market_snapshot_id,
+                        "plan_reference_price": row.plan_reference_price,
+                        "plan_created_at": row.plan_created_at,
+                        "previous_setup_id": row.previous_setup_id,
+                        "replaced_by_setup_id": row.replaced_by_setup_id,
+                        "replacement_reason": row.replacement_reason,
+                        "primary_entry_trigger": _loads(row.planner_levels_json).get("primary_entry_trigger"),
+                        "optional_support_level": _loads(row.planner_levels_json).get("optional_support_level"),
+                        "tp1": _loads(row.planner_levels_json).get("tp1"),
+                        "tp2": _loads(row.planner_levels_json).get("tp2"),
+                        "tp3": _loads(row.planner_levels_json).get("tp3"),
+                    }
+                    for row in db.query(MonitorSetup).filter(MonitorSetup.watch_id == watch.id).order_by(MonitorSetup.version.desc()).all()
+                ],
             })
         return payload
 
@@ -1337,6 +1715,7 @@ class LiveMonitorService:
         return {
             "id": row.id,
             "review_type": row.review_type,
+            "market_snapshot_id": row.market_snapshot_id,
             "status": row.status,
             "model": row.model,
             "prompt_version": row.prompt_version,
@@ -1359,6 +1738,7 @@ class LiveMonitorService:
             "id": row.id,
             "timeframe": row.timeframe,
             "event_type": row.event_type,
+            "market_snapshot_id": row.market_snapshot_id,
             "image_path": row.image_path,
             "data_source": row.data_source,
             "data_last_bar_at": row.data_last_bar_at,

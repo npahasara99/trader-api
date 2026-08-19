@@ -241,18 +241,30 @@ def build_chart_bundle(
     decision_time_boundary: datetime | None = None,
     max_bars: int = 180,
     attempts: list[ConfirmationAttempt] | list[dict] | None = None,
+    market_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one source-of-truth bundle for UI, renderer, validator, and LLM."""
-    boundary = decision_time_boundary or datetime.now(timezone.utc)
+    canonical = dict(market_snapshot or {})
+    snapshot_created = _timestamp(canonical.get("created_at"))
+    boundary = decision_time_boundary or snapshot_created or datetime.now(timezone.utc)
     if boundary.tzinfo is None:
         boundary = boundary.replace(tzinfo=timezone.utc)
     raw_by_key: dict[str, list[dict]] = {}
-    daily = _daily_db_bars(db, ticker, limit=max(max_bars, 260))
-    raw_by_key["daily"] = daily or bars_loader(ticker, "daily", 420)
-    for key, (timeframe, lookback) in TIMEFRAME_SPECS.items():
-        if key == "daily":
-            continue
-        raw_by_key[key] = bars_loader(ticker, timeframe, lookback)
+    canonical_bars = canonical.get("bars") or {}
+    if canonical:
+        raw_by_key = {
+            "daily": list(canonical_bars.get("daily") or []),
+            "hourly": list(canonical_bars.get("hourly") or []),
+            "structure": list(canonical_bars.get("thirty_minute") or []),
+            "execution": list(canonical_bars.get("five_minute") or []),
+        }
+    else:
+        daily = _daily_db_bars(db, ticker, limit=max(max_bars, 260))
+        raw_by_key["daily"] = daily or bars_loader(ticker, "daily", 420)
+        for key, (timeframe, lookback) in TIMEFRAME_SPECS.items():
+            if key == "daily":
+                continue
+            raw_by_key[key] = bars_loader(ticker, timeframe, lookback)
 
     timeframes: dict[str, dict[str, Any]] = {}
     all_sources: set[str] = set()
@@ -293,10 +305,20 @@ def build_chart_bundle(
     freshness = None if last_bar_at is None else max(0.0, (boundary - last_bar_at).total_seconds())
     return {
         "ticker": ticker.upper(),
+        "market_snapshot_id": canonical.get("market_snapshot_id"),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "decision_time_boundary": boundary.isoformat(),
-        "data_source": ",".join(sorted(all_sources)) if all_sources else "unavailable",
-        "data_timestamp": boundary.isoformat(),
+        "data_source": canonical.get("data_source") or (",".join(sorted(all_sources)) if all_sources else "unavailable"),
+        "data_timestamp": canonical.get("quote_timestamp") or boundary.isoformat(),
+        "quote_timestamp": canonical.get("quote_timestamp"),
+        "reference_price": canonical.get("reference_price"),
+        "snapshot_consistency_status": canonical.get("consistency_status"),
+        "cache_status": canonical.get("cache_status"),
+        "one_min_last_bar_at": canonical.get("one_min_last_bar_at"),
+        "five_min_last_bar_at": canonical.get("five_min_last_bar_at"),
+        "thirty_min_last_bar_at": canonical.get("thirty_min_last_bar_at"),
+        "hourly_last_bar_at": canonical.get("hourly_last_bar_at"),
+        "daily_last_bar_at": canonical.get("daily_last_bar_at"),
         "last_bar_timestamp": last_bar_at.isoformat() if last_bar_at else None,
         "data_freshness_seconds": freshness,
         "latest_chart_close": next(

@@ -212,6 +212,7 @@ def render_chart_snapshots(
             id=str(__import__("uuid").uuid4()),
             watch_id=watch.id,
             setup_id=setup.id,
+            market_snapshot_id=bundle.get("market_snapshot_id"),
             decision_event_id=decision_event_id,
             ticker=watch.ticker,
             timeframe=timeframe,
@@ -225,6 +226,7 @@ def render_chart_snapshots(
             metadata_json=json.dumps(
                 {
                     "decision_time_boundary": bundle.get("decision_time_boundary"),
+                    "market_snapshot_id": bundle.get("market_snapshot_id"),
                     "data_source": bundle.get("data_source"),
                     "data_freshness_seconds": bundle.get("data_freshness_seconds"),
                     "bar_count": timeframe_payload.get("bar_count"),

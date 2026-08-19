@@ -83,8 +83,22 @@ def _ensure_runtime_columns() -> None:
         "latest_chart_review_id": "VARCHAR(80)",
         "plan_stale_reason": "TEXT",
         "proposed_setup_json": "TEXT",
+        "market_snapshot_id": "VARCHAR(80)",
+        "plan_reference_price": "DOUBLE PRECISION",
+        "plan_created_at": "TIMESTAMP",
+        "market_data_timestamp": "TIMESTAMP",
+        "plan_stale": "BOOLEAN NOT NULL DEFAULT FALSE",
+        "plan_stale_reasons_json": "TEXT",
+        "previous_setup_id": "VARCHAR(80)",
+        "replacement_reason": "TEXT",
     }
-    snapshot_cols = {"image_data_base64": "TEXT"}
+    watch_cols = {
+        "market_snapshot_id": "VARCHAR(80)",
+        "last_backend_evaluation_at": "TIMESTAMP",
+        "last_market_data_update_at": "TIMESTAMP",
+    }
+    snapshot_cols = {"image_data_base64": "TEXT", "market_snapshot_id": "VARCHAR(80)"}
+    review_cols = {"market_snapshot_id": "VARCHAR(80)"}
     try:
         with engine.begin() as conn:
             dialect = conn.dialect.name
@@ -103,6 +117,13 @@ def _ensure_runtime_columns() -> None:
                 for col, col_type in monitor_cols.items():
                     if col not in monitor_existing:
                         conn.execute(text(f"ALTER TABLE monitor_setups ADD COLUMN {col} {col_type}"))
+                watch_existing = {
+                    row[1]
+                    for row in conn.execute(text("PRAGMA table_info(live_watches)")).fetchall()
+                }
+                for col, col_type in watch_cols.items():
+                    if col not in watch_existing:
+                        conn.execute(text(f"ALTER TABLE live_watches ADD COLUMN {col} {col_type}"))
                 snapshot_existing = {
                     row[1]
                     for row in conn.execute(text("PRAGMA table_info(chart_snapshots)")).fetchall()
@@ -110,14 +131,25 @@ def _ensure_runtime_columns() -> None:
                 for col, col_type in snapshot_cols.items():
                     if col not in snapshot_existing:
                         conn.execute(text(f"ALTER TABLE chart_snapshots ADD COLUMN {col} {col_type}"))
+                review_existing = {
+                    row[1]
+                    for row in conn.execute(text("PRAGMA table_info(chart_structure_reviews)")).fetchall()
+                }
+                for col, col_type in review_cols.items():
+                    if col not in review_existing:
+                        conn.execute(text(f"ALTER TABLE chart_structure_reviews ADD COLUMN {col} {col_type}"))
                 return
 
             for col, col_type in required_cols.items():
                 conn.execute(text(f"ALTER TABLE swing_decisions ADD COLUMN IF NOT EXISTS {col} {col_type}"))
             for col, col_type in monitor_cols.items():
                 conn.execute(text(f"ALTER TABLE monitor_setups ADD COLUMN IF NOT EXISTS {col} {col_type}"))
+            for col, col_type in watch_cols.items():
+                conn.execute(text(f"ALTER TABLE live_watches ADD COLUMN IF NOT EXISTS {col} {col_type}"))
             for col, col_type in snapshot_cols.items():
                 conn.execute(text(f"ALTER TABLE chart_snapshots ADD COLUMN IF NOT EXISTS {col} {col_type}"))
+            for col, col_type in review_cols.items():
+                conn.execute(text(f"ALTER TABLE chart_structure_reviews ADD COLUMN IF NOT EXISTS {col} {col_type}"))
             if dialect == "postgresql":
                 conn.execute(
                     text(

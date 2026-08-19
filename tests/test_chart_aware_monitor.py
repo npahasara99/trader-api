@@ -141,11 +141,13 @@ def test_stale_plan_detects_failed_support_and_distant_trigger():
         atr=2.0,
         setup_created_at=NOW - timedelta(days=2),
         structure_bars=reaction_bars(),
+        plan_reference_price=102.5,
         config=CONFIG,
     )
     assert stale["status"] == "PLAN_STALE"
-    assert "original_support_failed" in stale["reasons"]
-    assert "primary_trigger_many_atrs_from_current_structure" in stale["reasons"]
+    assert "SUPPORT_FAILED" in stale["reasons"]
+    assert "PRICE_DRIFT" in stale["reasons"]
+    assert "PRIMARY_TRIGGER_SANITY_WARNING" in stale["warnings"]
 
 
 def _monitor_bars(prices: list[float], *, minutes: int) -> list[dict]:
@@ -327,7 +329,7 @@ def test_chart_levels_remain_proposals_until_user_accepts(monkeypatch, tmp_path)
 
     service = LiveMonitorService(
         config=replace(CONFIG, chart_review_on_add=False, chart_snapshot_dir=str(tmp_path / "snapshots")),
-        bars_loader=lambda *_args: reaction_bars(),
+        bars_loader=lambda *_args: reaction_bars(start=datetime.now(timezone.utc) - timedelta(hours=6)),
         chart_review_provider=provider,
     )
     plan = {
@@ -354,6 +356,7 @@ def test_chart_levels_remain_proposals_until_user_accepts(monkeypatch, tmp_path)
         snapshots = db.query(ChartSnapshot).all()
         assert {snapshot.timeframe for snapshot in snapshots} == {"daily", "structure", "execution"}
         assert all(snapshot.image_data_base64 for snapshot in snapshots)
+        assert all(snapshot.market_snapshot_id == before["market_snapshot_id"] for snapshot in snapshots)
         assert all(
             (snapshot.decision_time_boundary if snapshot.decision_time_boundary.tzinfo else snapshot.decision_time_boundary.replace(tzinfo=timezone.utc))
             <= datetime.now(timezone.utc)

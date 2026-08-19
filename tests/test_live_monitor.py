@@ -149,7 +149,19 @@ def isolated_service(monkeypatch, tmp_path):
     import app.live_monitor.service as service_module
 
     monkeypatch.setattr(service_module, "SessionLocal", factory)
-    service = LiveMonitorService(config=replace(CONFIG, auto_llm_min_setup_score=0.0), bars_loader=lambda *_args: [])
+    def snapshot_loader(_ticker, timeframe, _lookback):
+        interval = {"one_minute": 1, "five_minute": 5, "thirty_minute": 30, "hourly": 60, "daily": 390}.get(timeframe, 1)
+        return bars([99.0] * 21, timeframe_minutes=interval)
+
+    service = LiveMonitorService(
+        config=replace(
+            CONFIG,
+            auto_llm_min_setup_score=0.0,
+            chart_review_on_add=False,
+            chart_snapshot_dir=str(tmp_path / "chart_snapshots"),
+        ),
+        bars_loader=snapshot_loader,
+    )
     return service, factory
 
 

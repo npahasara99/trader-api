@@ -142,7 +142,7 @@ def evaluate_monitor(
     latest_5m = closed_5m[-1] if closed_5m else {}
     current = _number(latest_1m.get("close")) or _number(latest_5m.get("close"))
     data_at = _timestamp(latest_1m) or _timestamp(latest_5m)
-    session = market_session(data_at or evaluated_at)
+    session = market_session(evaluated_at)
     trigger = _number(levels.get("primary_entry_trigger"))
     invalidation = _number(levels.get("invalidation_level"))
     stop = _number(levels.get("suggested_stop"))
@@ -153,7 +153,14 @@ def evaluate_monitor(
     rvol_5m = relative_volume(closed_5m, config.volume_lookback_bars)
     quality = candle_quality(latest_5m)
     stale_seconds = None if data_at is None else max(0.0, (evaluated_at - data_at.astimezone(timezone.utc)).total_seconds())
-    stale = current is None or data_at is None or stale_seconds > config.stale_data_seconds
+    allowed_age_seconds = float(config.stale_data_seconds)
+    if session == "AFTER_HOURS":
+        allowed_age_seconds = max(allowed_age_seconds, 8 * 60 * 60)
+    elif session == "PREMARKET":
+        allowed_age_seconds = max(allowed_age_seconds, 18 * 60 * 60)
+    elif session == "CLOSED":
+        allowed_age_seconds = max(allowed_age_seconds, 72 * 60 * 60)
+    stale = current is None or data_at is None or stale_seconds > allowed_age_seconds
 
     distance_pct = None if current is None or trigger is None else round((current - trigger) / trigger, 6)
     one_minute_close = bool(current is not None and trigger is not None and current >= trigger)
@@ -279,6 +286,7 @@ def evaluate_monitor(
         "setup_valid": not invalidated,
         "data_stale": stale,
         "data_age_seconds": stale_seconds,
+        "allowed_data_age_seconds": allowed_age_seconds,
         "max_chase_price": max_chase,
         "planned_rr_at_primary_trigger": planned_rr,
         "current_executable_rr": current_executable_rr,

@@ -25,6 +25,53 @@ def _price(value: Any) -> float | None:
         return None
 
 
+def _as_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
+def assess_source_plan_freshness(plan: dict, snapshot: dict, config: LiveMonitorConfig) -> dict[str, Any]:
+    """Decide whether scanner geometry is safe to promote into a live setup."""
+    current = _price(snapshot.get("reference_price"))
+    reference = _price(plan.get("plan_reference_price") or plan.get("current_price"))
+    atr = _price(plan.get("atr") or snapshot.get("atr")) or (current or 1.0) * 0.02
+    planned_at = _as_datetime(plan.get("plan_created_at") or plan.get("planned_at"))
+    now = _as_datetime(snapshot.get("created_at")) or datetime.now(timezone.utc)
+    drift = None if current is None or reference is None else current - reference
+    drift_pct = None if drift is None or reference is None else drift / reference
+    drift_atr = None if drift is None else drift / max(atr, 1e-9)
+    reasons: list[str] = []
+    if current is None:
+        reasons.append("MARKET_DATA_UNAVAILABLE")
+    if drift_pct is not None and abs(drift_pct) > config.plan_price_drift_pct:
+        reasons.append("PRICE_DRIFT")
+    if drift_atr is not None and abs(drift_atr) > config.plan_price_drift_atr:
+        reasons.append("ATR_DRIFT")
+    if planned_at is not None and (now - planned_at).total_seconds() > config.source_plan_max_age_minutes * 60:
+        reasons.append("PLAN_TOO_OLD")
+    support = _price(plan.get("nearest_support") or plan.get("support_zone_1") or plan.get("optional_support_level"))
+    if current is not None and support is not None and current < support - atr * config.support_failure_atr:
+        reasons.append("SUPPORT_FAILED")
+    if snapshot.get("consistency_status") == "MARKET_DATA_MISMATCH":
+        reasons.append("DATA_MISMATCH")
+    return {
+        "fresh": not reasons,
+        "reasons": reasons,
+        "source_plan_reference_price": reference,
+        "current_reference_price": current,
+        "price_drift_pct": None if drift_pct is None else round(drift_pct, 6),
+        "price_drift_atr": None if drift_atr is None else round(drift_atr, 4),
+        "source_plan_created_at": planned_at.isoformat() if planned_at else None,
+    }
+
+
 def _daily_bars_from_db(db: Session, ticker: str, limit: int = 360) -> list[dict]:
     rows = (
         db.query(DailyBar)
@@ -56,6 +103,8 @@ def build_monitor_baseline(
     *,
     supplied_plan: dict | None = None,
     config: LiveMonitorConfig,
+    market_snapshot: dict | None = None,
+    allow_source_reuse: bool = True,
 ) -> dict[str, Any]:
     """Return planner payload and normalized live levels.
 
@@ -64,12 +113,22 @@ def build_monitor_baseline(
     no-valid-setup baseline rather than fabricated levels.
     """
     symbol = str(ticker or "").strip().upper()
-    if supplied_plan:
-        plan = dict(supplied_plan)
+    snapshot = dict(market_snapshot or {})
+    snapshot_bars = snapshot.get("bars") or {}
+    source_validation = assess_source_plan_freshness(supplied_plan, snapshot, config) if supplied_plan and snapshot else {
+        "fresh": False,
+        "reasons": ["NO_CANONICAL_SNAPSHOT"] if supplied_plan else [],
+    }
+    reuse_supplied = bool(supplied_plan and allow_source_reuse and source_validation.get("fresh"))
+    if reuse_supplied:
+        plan = dict(supplied_plan or {})
+        plan_source = "validated_scanner_context"
     else:
-        bars = _daily_bars_from_db(db, symbol)
-        if not bars:
-            bars = get_bars(symbol, "daily", 360, cache_ttl_seconds=300)
+        bars = list(snapshot_bars.get("daily") or [])
+        if not bars and not snapshot:
+            bars = _daily_bars_from_db(db, symbol)
+        if not bars and not snapshot:
+            bars = get_bars(symbol, "daily", 360, cache_ttl_seconds=0)
         if not bars:
             plan = {
                 "ticker": symbol,
@@ -78,27 +137,30 @@ def build_monitor_baseline(
                 "setup_status": "NO_VALID_SWING_SETUP",
                 "strategy_reason": "Daily market data is unavailable; reanalysis is required.",
             }
+            plan_source = "fresh_snapshot_unavailable"
         else:
-            current = float(bars[-1]["close"])
+            current = _price(snapshot.get("reference_price")) or float(bars[-1]["close"])
             timeframes = {
-                "hourly": get_bars(symbol, "hourly", 60, cache_ttl_seconds=300),
-                "thirty_minute": get_bars(symbol, "thirty_minute", 30, cache_ttl_seconds=300),
+                "hourly": list(snapshot_bars.get("hourly") or []),
+                "thirty_minute": list(snapshot_bars.get("thirty_minute") or []),
             }
             try:
+                context = supplied_plan or {}
                 plan = generate_structured_plan(
                     ticker=symbol,
                     current_price=current,
                     bars=bars,
                     timeframe_bars=timeframes,
-                    news_items=[],
-                    news_score=0,
-                    earnings_score=0,
-                    earnings_context={},
-                    market_regime="neutral",
+                    news_items=context.get("news_items") or context.get("news") or [],
+                    news_score=context.get("news_score") or 0,
+                    earnings_score=context.get("earnings_score") or 0,
+                    earnings_context=context.get("earnings_context") or {},
+                    market_regime=context.get("market_regime") or "neutral",
                     buy_threshold=4,
                     avoid_threshold=-4,
-                    history_stats={},
+                    history_stats=context.get("history_stats") or {},
                 )
+                plan_source = "fresh_canonical_replan"
             except Exception as exc:
                 plan = {
                     "ticker": symbol,
@@ -108,6 +170,20 @@ def build_monitor_baseline(
                     "setup_status": "NO_VALID_SWING_SETUP",
                     "strategy_reason": f"Planner could not create a valid monitor baseline: {type(exc).__name__}: {exc}",
                 }
+                plan_source = "fresh_canonical_replan_failed"
+
+    snapshot_id = snapshot.get("market_snapshot_id")
+    snapshot_created = snapshot.get("created_at") or datetime.now(timezone.utc).isoformat()
+    snapshot_price = _price(snapshot.get("reference_price")) or _price(plan.get("current_price"))
+    plan["source_plan_context"] = dict(supplied_plan or {}) if supplied_plan and not reuse_supplied else None
+    plan["source_plan_validation"] = source_validation
+    plan["monitor_plan_source"] = plan_source
+    plan["market_snapshot_id"] = snapshot_id
+    plan["plan_reference_price"] = snapshot_price
+    plan["current_price"] = snapshot_price
+    plan["plan_created_at"] = snapshot_created
+    plan["market_data_timestamp"] = snapshot.get("quote_timestamp")
+    plan["market_data_source"] = snapshot.get("data_source")
 
     primary = _price(plan.get("primary_entry_trigger") or plan.get("confirmation_trigger") or plan.get("breakout_level"))
     invalidation = _price(plan.get("invalidation_level") or plan.get("stop_loss"))
@@ -132,8 +208,22 @@ def build_monitor_baseline(
             "max_hold_date": plan.get("max_hold_date"),
         },
     }
+    support = _price(levels.get("optional_support_level"))
+    if snapshot_price is not None and support is not None and support > snapshot_price:
+        levels["historical_support_lost"] = support
+        levels["optional_support_level"] = None
+        plan.setdefault("level_semantic_warnings", []).append("OLD_SUPPORT_LOST")
     levels["max_chase_price"] = derive_max_chase(primary, atr, config)
     valid = bool(plan.get("valid_setup", True) and primary and invalidation and primary > invalidation)
     plan["valid_setup"] = valid
-    return {"plan": plan, "levels": levels, "valid_setup": valid}
+    return {
+        "plan": plan,
+        "levels": levels,
+        "valid_setup": valid,
+        "market_snapshot": snapshot,
+        "source_plan_validation": source_validation,
+        "source_plan_reused": reuse_supplied,
+    }
 
+
+__all__ = ["assess_source_plan_freshness", "build_monitor_baseline"]
