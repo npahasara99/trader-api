@@ -124,9 +124,18 @@ Backward compatibility:
   - `rejected_or_low_priority`
 - The primary daily scanner is now `POST /workflow/sp500/daily-opportunities`.
   It loads current S&P 500 metadata from Wikipedia with a cached repository
-  fallback, cheaply pre-scans the full universe, deeply plans only the configured
-  shortlist, and returns `best_trades_today`, `best_setups`, and
-  `next_to_trigger` separately.
+  fallback, pre-scans the full universe from one cache-only database read,
+  deeply plans only the configured shortlist, and returns `best_trades_today`,
+  `best_setups`, and `next_to_trigger` separately. The full-universe stage never
+  performs one provider refresh per ticker inside the synchronous request.
+- Populate a cold S&P 500 daily-bar cache in bounded batches through
+  `POST /data/daily-bars/backfill` with `use_sp100=false`, `use_sp500=true`,
+  `top_n=600`, and a conservative `batch_size` (for example 10-20). Continue
+  from the returned `next_start_index` until `remaining=0`. Inspect coverage via
+  `GET /data/daily-bars/status?use_sp100=false&use_sp500=true&top_n=600`.
+- S&P 500 scan diagnostics include `daily_bar_cache_coverage` and per-stage
+  timings. Missing or stale broad-universe data now produces a normal workflow
+  response with backfill guidance instead of hundreds of serial provider calls.
 - Daily-opportunity scores remain inspectable as `raw_setup_score`,
   `actionability_score`, `portfolio_fit_score`, and `trade_today_score`.
   Portfolio exposure never changes `raw_setup_score`.

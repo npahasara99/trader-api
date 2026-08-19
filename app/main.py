@@ -20,6 +20,7 @@ from .what_to_watch import build_what_to_watch
 from .watchlist import build_watchlist_profile
 import json
 import os
+import time
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
@@ -44,6 +45,7 @@ from .logic import (
 from .market_data import (
     ensure_cached_daily_closes,
     backfill_universe_daily_bars,
+    build_bulk_cached_daily_loaders,
     fetch_finnhub_daily_bars_with_meta,
     get_bars as get_timeframe_bars,
 )
@@ -693,6 +695,7 @@ class Sp100WorkflowResponse(BaseModel):
 class DailyBarsBackfillRequest(BaseModel):
     symbols: Optional[List[str]] = None
     use_sp100: bool = True
+    use_sp500: bool = False
     top_n: int = 100
     years: int = 10
     refresh: bool = False
@@ -1112,9 +1115,19 @@ def _normalize_symbols(symbols: List[str]) -> List[str]:
     return out
 
 
-def _resolve_universe(symbols: Optional[List[str]], *, use_sp100: bool, top_n: int) -> List[str]:
+def _resolve_universe(
+    symbols: Optional[List[str]],
+    *,
+    use_sp100: bool,
+    use_sp500: bool = False,
+    top_n: int,
+) -> List[str]:
     if symbols:
         return _normalize_symbols(symbols)
+    if use_sp500:
+        n = max(1, min(int(top_n), 600))
+        universe, _, _ = get_sp500_universe(n)
+        return universe
     if use_sp100:
         n = max(1, min(int(top_n), 100))
         return get_sp100_universe(n)
@@ -1190,6 +1203,7 @@ def _rank_pre_scan_universe(
     ticker_metadata_by_ticker: dict[str, dict] | None = None,
     include_earnings: bool = True,
     prefer_bar_close: bool = False,
+    allow_price_fallback: bool = True,
 ) -> List[dict]:
     """Cheap swing pre-scan used to shortlist names before full planning."""
 
@@ -1216,7 +1230,7 @@ def _rank_pre_scan_universe(
             last = None
             if prefer_bar_close and bars:
                 last = bars[-1].get("close")
-            if last is None:
+            if last is None and allow_price_fallback:
                 last = get_last_price_or_recent_close(sym, daily_closes_loader=daily_closes_loader)
             earnings_context = None
             if include_earnings:
@@ -2125,6 +2139,7 @@ def workflow_sp500_daily_opportunities(
 ):
     """Run the staged S&P 500 scan and return three distinct daily leaderboards."""
 
+    workflow_started = time.monotonic()
     planned_at = datetime.now(timezone.utc)
     prescan_limit = max(10, min(int(req.prescan_limit), 200))
     deep_limit = max(1, min(int(req.deep_analysis_limit), prescan_limit, 75))
@@ -2138,15 +2153,49 @@ def workflow_sp500_daily_opportunities(
         sector=req.sector,
         industry=req.industry,
     )
-    daily_closes_loader = _build_daily_closes_loader(db)
-    daily_bars_loader = _build_daily_bars_loader(db)
+    sector_benchmarks = {
+        benchmark
+        for ticker in base_universe
+        if (benchmark := sector_benchmark_symbol_for_meta(metadata_by_ticker.get(ticker)))
+    }
+    prescan_support_symbols = [
+        *base_universe,
+        *DEFAULT_PLANNING_CONFIG.benchmark_symbols,
+        *sorted(sector_benchmarks),
+    ]
+    prescan_closes_loader, prescan_bars_loader, prescan_cache_coverage = build_bulk_cached_daily_loaders(
+        db,
+        prescan_support_symbols,
+        lookback_days=DEFAULT_BAR_LOOKBACK_DAYS,
+        max_age_days=DEFAULT_PLANNING_CONFIG.sp500_prescan_cache_max_age_days,
+        min_history_bars=DEFAULT_PLANNING_CONFIG.pre_scan_min_history_bars,
+    )
+    prescan_cache_coverage["constituent_symbols"] = len(base_universe)
+    prescan_cache_coverage["constituents_current"] = sum(
+        1 for ticker in base_universe if prescan_bars_loader(ticker)
+    )
+    prescan_cache_coverage["constituents_with_sufficient_history"] = sum(
+        1
+        for ticker in base_universe
+        if len(prescan_bars_loader(ticker)) >= DEFAULT_PLANNING_CONFIG.pre_scan_min_history_bars
+    )
+    prescan_cache_coverage["missing_symbols"] = list(prescan_cache_coverage.get("missing_symbols") or [])[:25]
+    prescan_cache_coverage["stale_symbols"] = list(prescan_cache_coverage.get("stale_symbols") or [])[:25]
     ranked_prescan = _rank_pre_scan_universe(
         base_universe,
-        daily_closes_loader=daily_closes_loader,
-        daily_bars_loader=daily_bars_loader,
+        daily_closes_loader=prescan_closes_loader,
+        daily_bars_loader=prescan_bars_loader,
         ticker_metadata_by_ticker=metadata_by_ticker,
         include_earnings=False,
         prefer_bar_close=True,
+        allow_price_fallback=False,
+    )
+    prescan_seconds = round(time.monotonic() - workflow_started, 3)
+    print(
+        "SP500 workflow pre-scan complete: "
+        f"universe={len(base_universe)} current_cache={prescan_cache_coverage['constituents_current']} "
+        f"eligible={sum(1 for item in ranked_prescan if not item.get('scan_rejection_reason'))} "
+        f"seconds={prescan_seconds}"
     )
     prescan_failures = [item for item in ranked_prescan if item.get("prescan_error")]
     prescan_rejected = [
@@ -2162,7 +2211,14 @@ def workflow_sp500_daily_opportunities(
         for item in shortlist
     }
 
+    # Only the small deep-analysis set may invoke provider-backed refreshes.
+    daily_closes_loader = _build_daily_closes_loader(db)
+    daily_bars_loader = _build_daily_bars_loader(db)
+    deep_analysis_started = time.monotonic()
+
     try:
+        if not deep_universe:
+            raise ValueError("No current cached constituents were available for regime breadth")
         regime_snapshot = detect_market_regime(deep_universe[:20], daily_closes_loader=daily_closes_loader)
     except Exception as exc:
         regime_snapshot = {
@@ -2194,20 +2250,27 @@ def workflow_sp500_daily_opportunities(
     except Exception:
         history_stats = {}
 
-    rows = build_swing_plan(
-        deep_universe,
-        regime=regime_snapshot["regime"],
-        buy_threshold=thresholds["buy_threshold"],
-        avoid_threshold=thresholds["avoid_threshold"],
-        daily_closes_loader=daily_closes_loader,
-        daily_bars_loader=daily_bars_loader,
-        timeframe_bars_loader=get_timeframe_bars,
-        history_stats_by_ticker=history_stats,
-        pre_scan_by_ticker=pre_scan_by_ticker,
-        ticker_metadata_by_ticker=metadata_by_ticker,
-        llm_provider=req.llm_provider,
-        llm_model=req.llm_model,
-        llm_style=req.llm_style,
+    rows = []
+    if deep_universe:
+        rows = build_swing_plan(
+            deep_universe,
+            regime=regime_snapshot["regime"],
+            buy_threshold=thresholds["buy_threshold"],
+            avoid_threshold=thresholds["avoid_threshold"],
+            daily_closes_loader=daily_closes_loader,
+            daily_bars_loader=daily_bars_loader,
+            timeframe_bars_loader=get_timeframe_bars,
+            history_stats_by_ticker=history_stats,
+            pre_scan_by_ticker=pre_scan_by_ticker,
+            ticker_metadata_by_ticker=metadata_by_ticker,
+            llm_provider=req.llm_provider,
+            llm_model=req.llm_model,
+            llm_style=req.llm_style,
+        )
+    deep_analysis_seconds = round(time.monotonic() - deep_analysis_started, 3)
+    print(
+        "SP500 workflow deep analysis complete: "
+        f"requested={len(deep_universe)} rows={len(rows)} seconds={deep_analysis_seconds}"
     )
 
     candidates_with_price = 0
@@ -2311,11 +2374,18 @@ def workflow_sp500_daily_opportunities(
         for reason in str(item.get("scan_rejection_reason") or "missing_required_data").split(",")
         if reason.strip()
     )
-    selection_message = (
-        f"{len(best_trades_today)} high-quality trade{'s' if len(best_trades_today) != 1 else ''} confirmed today."
-        if best_trades_today
-        else "NO HIGH-QUALITY TRADE CURRENTLY CONFIRMED"
-    )
+    if not shortlist:
+        selection_message = (
+            "NO CURRENT S&P 500 DAILY-BAR COVERAGE WAS AVAILABLE FOR DEEP ANALYSIS. "
+            "Populate the cache with /data/daily-bars/backfill using use_sp500=true, then rerun."
+        )
+    elif best_trades_today:
+        selection_message = (
+            f"{len(best_trades_today)} high-quality trade"
+            f"{'s' if len(best_trades_today) != 1 else ''} confirmed today."
+        )
+    else:
+        selection_message = "NO HIGH-QUALITY TRADE CURRENTLY CONFIRMED"
     scan_summary = {
         "universe": "SP500",
         "universe_size": len(base_universe),
@@ -2330,6 +2400,10 @@ def workflow_sp500_daily_opportunities(
             1 for item in ranking["all_candidates"] if item["grade"] in {"A-", "A", "A+"}
         ),
         "market_regime": regime_snapshot["regime"],
+        "cached_constituents_current": prescan_cache_coverage["constituents_current"],
+        "cached_constituents_with_sufficient_history": prescan_cache_coverage[
+            "constituents_with_sufficient_history"
+        ],
         "target_actionable_trades_per_day": DEFAULT_PLANNING_CONFIG.target_actionable_trades_per_day,
         "min_required_trades_per_day": DEFAULT_PLANNING_CONFIG.min_required_trades_per_day,
     }
@@ -2367,6 +2441,12 @@ def workflow_sp500_daily_opportunities(
         "prescan_rejected_count": len(prescan_rejected),
         "market_regime_details": regime_snapshot,
         "portfolio_read_error": portfolio_error,
+        "daily_bar_cache_coverage": prescan_cache_coverage,
+        "stage_seconds": {
+            "prescan": prescan_seconds,
+            "deep_analysis": deep_analysis_seconds,
+            "total_before_reporting_persistence": round(time.monotonic() - workflow_started, 3),
+        },
     }
     response = Sp500DailyOpportunitiesResponse(
         planned_at=planned_at,
@@ -2401,6 +2481,11 @@ def workflow_sp500_daily_opportunities(
     response.supabase_persisted = bool((supabase_status or {}).get("persisted"))
     response.supabase_scan_run_id = (supabase_status or {}).get("scan_run_id")
     response.supabase_persistence_error = (supabase_status or {}).get("error")
+    print(
+        "SP500 workflow complete: "
+        f"selected={response.selected_count} rows_logged={response.rows_logged} "
+        f"seconds={round(time.monotonic() - workflow_started, 3)}"
+    )
     return response
 
 
@@ -2808,9 +2893,17 @@ def workflow_swing_plan_log(
 
 @app.post("/data/daily-bars/backfill", response_model=DailyBarsBackfillResponse)
 def daily_bars_backfill(req: DailyBarsBackfillRequest, db: Session = Depends(get_db), _=Depends(require_bearer_token)):
-    universe = _resolve_universe(req.symbols, use_sp100=req.use_sp100, top_n=req.top_n)
+    universe = _resolve_universe(
+        req.symbols,
+        use_sp100=req.use_sp100,
+        use_sp500=req.use_sp500,
+        top_n=req.top_n,
+    )
     if not universe:
-        raise HTTPException(status_code=400, detail="No symbols provided. Pass symbols or set use_sp100=true.")
+        raise HTTPException(
+            status_code=400,
+            detail="No symbols provided. Pass symbols or set use_sp100=true/use_sp500=true.",
+        )
 
     years = max(1, min(int(req.years), 15))
     commit_every = max(1, min(int(req.commit_every), 50))
@@ -2869,13 +2962,22 @@ def daily_bars_backfill(req: DailyBarsBackfillRequest, db: Session = Depends(get
 def daily_bars_status(
     symbols: Optional[List[str]] = Query(default=None),
     use_sp100: bool = True,
+    use_sp500: bool = False,
     top_n: int = 100,
     db: Session = Depends(get_db),
     _=Depends(require_bearer_token),
 ):
-    universe = _resolve_universe(symbols, use_sp100=use_sp100, top_n=top_n)
+    universe = _resolve_universe(
+        symbols,
+        use_sp100=use_sp100,
+        use_sp500=use_sp500,
+        top_n=top_n,
+    )
     if not universe:
-        raise HTTPException(status_code=400, detail="No symbols provided. Pass symbols or set use_sp100=true.")
+        raise HTTPException(
+            status_code=400,
+            detail="No symbols provided. Pass symbols or set use_sp100=true/use_sp500=true.",
+        )
 
     rows = _daily_bars_status_rows(db, universe)
     symbols_with_data = sum(1 for r in rows if int(r.count) > 0)

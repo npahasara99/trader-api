@@ -4,7 +4,7 @@ import io
 import threading
 import time
 import requests
-from typing import Protocol
+from typing import Callable, Protocol
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
 
@@ -57,6 +57,117 @@ class StructuredMarketDataProvider(Protocol):
     """Provider-neutral interface consumed by chart-context planning."""
 
     def get_bars(self, ticker: str, timeframe: str, lookback_days: int | None = None) -> list[dict]: ...
+
+
+def build_bulk_cached_daily_loaders(
+    db: Session,
+    symbols: list[str],
+    *,
+    lookback_days: int = 320,
+    max_age_days: int | None = None,
+    min_history_bars: int = 60,
+) -> tuple[
+    Callable[[str, date, date], dict[date, float]],
+    Callable[[str], list[dict]],
+    dict,
+]:
+    """Load a large universe from ``daily_bars`` without provider calls.
+
+    Broad scans must not refresh hundreds of symbols synchronously. This helper
+    performs one database query, then exposes the same loader interfaces used by
+    the scanner. Provider-backed loaders can still be used for the much smaller
+    deep-analysis shortlist.
+    """
+
+    normalized = sorted(
+        {
+            str(symbol or "").strip().upper()
+            for symbol in symbols
+            if str(symbol or "").strip()
+        }
+    )
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=max(30, int(lookback_days)))
+    freshness_cutoff = None if max_age_days is None else end - timedelta(days=max(0, int(max_age_days)))
+    bars_by_symbol: dict[str, list[dict]] = {symbol: [] for symbol in normalized}
+
+    if normalized:
+        rows = (
+            db.query(
+                DailyBar.symbol,
+                DailyBar.bar_date,
+                DailyBar.open,
+                DailyBar.high,
+                DailyBar.low,
+                DailyBar.close,
+                DailyBar.volume,
+                DailyBar.adjusted_close,
+                DailyBar.source,
+            )
+            .filter(DailyBar.symbol.in_(normalized))
+            .filter(DailyBar.bar_date >= start)
+            .filter(DailyBar.bar_date <= end)
+            .order_by(DailyBar.symbol.asc(), DailyBar.bar_date.asc())
+            .all()
+        )
+        for row in rows:
+            symbol = str(row.symbol).upper()
+            bars_by_symbol.setdefault(symbol, []).append(
+                {
+                    "symbol": symbol,
+                    "bar_date": row.bar_date,
+                    "open": row.open,
+                    "high": row.high,
+                    "low": row.low,
+                    "close": row.close,
+                    "volume": row.volume,
+                    "adjusted_close": row.adjusted_close,
+                    "source": row.source,
+                }
+            )
+
+    latest_by_symbol = {
+        symbol: bars[-1]["bar_date"]
+        for symbol, bars in bars_by_symbol.items()
+        if bars
+    }
+    stale_symbols = {
+        symbol
+        for symbol, latest in latest_by_symbol.items()
+        if freshness_cutoff is not None and latest < freshness_cutoff
+    }
+
+    def _bars_loader(symbol: str) -> list[dict]:
+        normalized_symbol = str(symbol or "").strip().upper()
+        if normalized_symbol in stale_symbols:
+            return []
+        return list(bars_by_symbol.get(normalized_symbol, []))
+
+    def _closes_loader(symbol: str, frm: date, to: date) -> dict[date, float]:
+        return {
+            bar["bar_date"]: float(bar["close"])
+            for bar in _bars_loader(symbol)
+            if frm <= bar["bar_date"] <= to and bar.get("close") is not None
+        }
+
+    sufficient_history_symbols = {
+        symbol
+        for symbol, bars in bars_by_symbol.items()
+        if len(bars) >= max(1, int(min_history_bars)) and symbol not in stale_symbols
+    }
+    current_symbols = set(latest_by_symbol) - stale_symbols
+    cache_as_of = max(latest_by_symbol.values()) if latest_by_symbol else None
+    coverage = {
+        "requested_symbols": len(normalized),
+        "symbols_with_data": len(latest_by_symbol),
+        "symbols_current": len(current_symbols),
+        "symbols_with_sufficient_history": len(sufficient_history_symbols),
+        "cache_as_of": cache_as_of.isoformat() if cache_as_of else None,
+        "freshness_cutoff": freshness_cutoff.isoformat() if freshness_cutoff else None,
+        "missing_symbols": [symbol for symbol in normalized if symbol not in latest_by_symbol],
+        "stale_symbols": sorted(stale_symbols),
+    }
+    return _closes_loader, _bars_loader, coverage
 
 
 def _normalize_symbol_for_yahoo(symbol: str) -> str:
@@ -653,7 +764,8 @@ def backfill_symbol_daily_bars(
         min_date = coverage.get("min_date")
         max_date = coverage.get("max_date")
         count = int(coverage.get("count", 0))
-        if min_date and max_date and count > 1800:
+        expected_trading_days = max(180, int(years * 252 * 0.78))
+        if min_date and max_date and count >= expected_trading_days:
             if min_date <= (start + timedelta(days=15)) and max_date >= (end - timedelta(days=5)):
                 return {
                     "symbol": symbol,

@@ -68,6 +68,7 @@ class PlanningConfig:
     sp500_universe_cache_seconds: int = 21_600
     sp500_prescan_limit: int = 75
     sp500_deep_analysis_limit: int = 30
+    sp500_prescan_cache_max_age_days: int = 7
     best_setups_count: int = 10
     best_trades_today_max: int = 2
     next_to_trigger_count: int = 5

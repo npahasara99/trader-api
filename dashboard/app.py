@@ -340,6 +340,8 @@ def _render_runner_workflow_result(result: dict) -> None:
 def _render_sp500_workflow_result(result: dict) -> None:
     summary = result.get("scan_summary") or {}
     portfolio = result.get("portfolio_summary") or {}
+    diagnostics = result.get("diagnostics") or {}
+    cache_coverage = diagnostics.get("daily_bar_cache_coverage") or {}
     metric_cols = st.columns(5)
     with metric_cols[0]:
         render_kpi_card("Market", result.get("market_regime") or "-")
@@ -359,6 +361,18 @@ def _render_sp500_workflow_result(result: dict) -> None:
         )
     else:
         st.caption(f"Universe as of {result.get('universe_as_of')} | Source: {result.get('universe_source')}")
+
+    current_cache_count = int(cache_coverage.get("constituents_current") or 0)
+    sufficient_cache_count = int(cache_coverage.get("constituents_with_sufficient_history") or 0)
+    universe_size = int(result.get("universe_size") or 0)
+    if cache_coverage:
+        st.caption(
+            f"Daily-bar cache: {current_cache_count}/{universe_size} current constituents; "
+            f"{sufficient_cache_count} have enough history for pre-screening. "
+            f"Cache as of {cache_coverage.get('cache_as_of') or 'unknown'}."
+        )
+    if not (result.get("best_setups") or []) and result.get("selection_message"):
+        st.warning(str(result.get("selection_message")))
 
     if result.get("supabase_persisted"):
         st.toast("S&P 500 scan persisted to the reporting database.", icon=":material/check_circle:")
@@ -408,7 +422,7 @@ def _render_sp500_workflow_result(result: dict) -> None:
         st.caption("No high-quality setup is currently close to a defined trigger.")
 
     with st.expander("Scanner Diagnostics", expanded=False):
-        st.json(result.get("diagnostics") or {})
+        st.json(diagnostics)
 
 
 def _render_runner_plan_result(rows: list[dict], *, planned_at: str | None = None, market_regime: str | None = None) -> None:

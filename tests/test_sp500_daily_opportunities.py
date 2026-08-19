@@ -1,6 +1,8 @@
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from app.config import DEFAULT_PLANNING_CONFIG
+from app.market_data import build_bulk_cached_daily_loaders
 from app.opportunity_ranking import (
     build_daily_actionability_profile,
     build_portfolio_snapshot,
@@ -235,3 +237,93 @@ def test_missing_ticker_plan_is_isolated_in_failure_diagnostics():
     assert result["failures"] == [
         {"ticker": "FAIL", "reason": "missing_required_data", "details": "bars unavailable"}
     ]
+
+
+class _FakeDailyBarQuery:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def filter(self, *_args):
+        return self
+
+    def order_by(self, *_args):
+        return self
+
+    def all(self):
+        return self.rows
+
+
+class _FakeDailyBarSession:
+    def __init__(self, rows):
+        self.rows = rows
+        self.query_count = 0
+
+    def query(self, *_args):
+        self.query_count += 1
+        return _FakeDailyBarQuery(self.rows)
+
+
+def _cached_bar_row(symbol: str, bar_date, close: float):
+    return SimpleNamespace(
+        symbol=symbol,
+        bar_date=bar_date,
+        open=close - 0.5,
+        high=close + 1.0,
+        low=close - 1.0,
+        close=close,
+        volume=2_000_000.0,
+        adjusted_close=close,
+        source="test",
+    )
+
+
+def test_bulk_cached_prescan_loader_uses_one_query_and_excludes_stale_data():
+    today = datetime.now(timezone.utc).date()
+    rows = [
+        _cached_bar_row("FRESH", today - timedelta(days=69 - index), 100.0 + index)
+        for index in range(70)
+    ]
+    rows.extend(
+        _cached_bar_row("STALE", today - timedelta(days=90 - index), 50.0 + index)
+        for index in range(30)
+    )
+    db = _FakeDailyBarSession(rows)
+
+    closes_loader, bars_loader, coverage = build_bulk_cached_daily_loaders(
+        db,
+        ["FRESH", "STALE", "MISSING"],
+        lookback_days=320,
+        max_age_days=7,
+        min_history_bars=60,
+    )
+
+    assert db.query_count == 1
+    assert len(bars_loader("FRESH")) == 70
+    assert bars_loader("STALE") == []
+    assert bars_loader("MISSING") == []
+    assert closes_loader("FRESH", today - timedelta(days=5), today)[today] == 169.0
+    assert coverage["symbols_current"] == 1
+    assert coverage["symbols_with_sufficient_history"] == 1
+    assert coverage["missing_symbols"] == ["MISSING"]
+    assert coverage["stale_symbols"] == ["STALE"]
+
+
+def test_cache_only_prescan_does_not_fall_back_to_live_price(monkeypatch):
+    import app.main as main_module
+
+    def _unexpected_provider_call(*_args, **_kwargs):
+        raise AssertionError("cache-only pre-scan attempted a provider-backed price lookup")
+
+    monkeypatch.setattr(main_module, "get_last_price_or_recent_close", _unexpected_provider_call)
+    ranked = main_module._rank_pre_scan_universe(
+        ["MISSING"],
+        daily_closes_loader=lambda *_args: {},
+        daily_bars_loader=lambda *_args: [],
+        ticker_metadata_by_ticker={"MISSING": {"sector": "Industrials", "industry": "Machinery"}},
+        include_earnings=False,
+        prefer_bar_close=True,
+        allow_price_fallback=False,
+    )
+
+    assert ranked[0]["ticker"] == "MISSING"
+    assert ranked[0]["scan_rejection_reason"] == "insufficient_history"
