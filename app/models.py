@@ -408,3 +408,265 @@ class TradingViewSignalEvent(Base):
     processing_status: Mapped[str] = mapped_column(String(40), default="pending_replan", index=True)
     re_evaluation_requested: Mapped[bool] = mapped_column(Boolean, default=True)
     execution_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class LiveWatch(Base):
+    """Mutable pointer to the latest setup for a manually monitored symbol."""
+
+    __tablename__ = "live_watches"
+    __table_args__ = (
+        UniqueConstraint("ticker", name="uq_live_watches_ticker"),
+        Index("ix_live_watches_active_state", "monitor_active", "state"),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    source: Mapped[str] = mapped_column(String(40), default="manual")
+    monitor_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    state: Mapped[str] = mapped_column(String(40), default="WATCHING", index=True)
+    current_setup_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    current_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_data_as_of: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    session_label: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    last_event: Mapped[str | None] = mapped_column(Text, nullable=True)
+    latest_evaluation_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MonitorSetup(Base):
+    """Versioned planner baseline plus a non-destructive active level overlay."""
+
+    __tablename__ = "monitor_setups"
+    __table_args__ = (
+        UniqueConstraint("watch_id", "version", name="uq_monitor_setups_watch_version"),
+        Index("ix_monitor_setups_watch_status", "watch_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    watch_id: Mapped[str] = mapped_column(String(80), index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(40), default="active", index=True)
+    valid_setup: Mapped[bool] = mapped_column(Boolean, default=True)
+    setup_quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    broader_structure: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    setup_type: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    execution_structure: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    sector: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    industry: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    market_regime: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
+    planner_baseline_json: Mapped[str] = mapped_column(Text)
+    planner_levels_json: Mapped[str] = mapped_column(Text)
+    active_levels_json: Mapped[str] = mapped_column(Text)
+    manual_overrides_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trigger_source: Mapped[str] = mapped_column(String(20), default="PLANNER")
+    max_chase_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    invalidation_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    invalidation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    replaced_by_setup_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    rule_version: Mapped[str] = mapped_column(String(60), default="live-monitor-v1")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ConfirmationAttempt(Base):
+    __tablename__ = "confirmation_attempts"
+    __table_args__ = (
+        UniqueConstraint("setup_id", "attempt_number", name="uq_confirmation_attempt_number"),
+        Index("ix_confirmation_attempts_setup_started", "setup_id", "started_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    watch_id: Mapped[str] = mapped_column(String(80), index=True)
+    setup_id: Mapped[str] = mapped_column(String(80), index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    trigger_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    peak_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lowest_retest_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rvol_1m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rvol_5m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_confirmation: Mapped[bool] = mapped_column(Boolean, default=False)
+    volume_confirmation: Mapped[bool] = mapped_column(Boolean, default=False)
+    retest_result: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    confirmation_method: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
+    outcome: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MonitorEvent(Base):
+    """Append-only decision journal event."""
+
+    __tablename__ = "monitor_events"
+    __table_args__ = (Index("ix_monitor_events_watch_created", "watch_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    watch_id: Mapped[str] = mapped_column(String(80), index=True)
+    setup_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    attempt_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    event_type: Mapped[str] = mapped_column(String(80), index=True)
+    from_state: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    to_state: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    message: Mapped[str] = mapped_column(Text)
+    snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class MonitorDecisionSnapshot(Base):
+    __tablename__ = "monitor_decision_snapshots"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    watch_id: Mapped[str] = mapped_column(String(80), index=True)
+    setup_id: Mapped[str] = mapped_column(String(80), index=True)
+    attempt_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    snapshot_type: Mapped[str] = mapped_column(String(60), index=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class LLMAdvisoryReview(Base):
+    __tablename__ = "llm_advisory_reviews"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    watch_id: Mapped[str] = mapped_column(String(80), index=True)
+    setup_id: Mapped[str] = mapped_column(String(80), index=True)
+    attempt_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    prompt_version: Mapped[str] = mapped_column(String(60), default="live-advisor-v1")
+    decision: Mapped[str] = mapped_column(String(20), index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(40), default="available")
+    reason_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_snapshot_json: Mapped[str] = mapped_column(Text)
+    output_json: Mapped[str] = mapped_column(Text)
+    hard_blockers_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    final_user_action: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    actual_outcome_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ManualMonitorTrade(Base):
+    """User-reported trade record. This table is never a broker submission queue."""
+
+    __tablename__ = "manual_monitor_trades"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    watch_id: Mapped[str] = mapped_column(String(80), index=True)
+    setup_id: Mapped[str] = mapped_column(String(80), index=True)
+    attempt_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    planned_entry: Mapped[float | None] = mapped_column(Float, nullable=True)
+    actual_entry: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    targets_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    entered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    exited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    realised_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    r_multiple: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mfe_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mae_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class RecommendationOutcome(Base):
+    __tablename__ = "recommendation_outcomes"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    watch_id: Mapped[str] = mapped_column(String(80), index=True)
+    setup_id: Mapped[str] = mapped_column(String(80), index=True)
+    attempt_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    user_action: Mapped[str] = mapped_column(String(40), index=True)
+    outcome: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
+    entry_distance_from_trigger_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mfe_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mae_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    r_multiple: Mapped[float | None] = mapped_column(Float, nullable=True)
+    details_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class StockBehaviorProfile(Base):
+    __tablename__ = "stock_behavior_profiles"
+    __table_args__ = (UniqueConstraint("scope_type", "scope_value", name="uq_stock_behavior_scope"),)
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    scope_type: Mapped[str] = mapped_column(String(40), index=True)
+    scope_value: Mapped[str] = mapped_column(String(160), index=True)
+    observation_count: Mapped[int] = mapped_column(Integer, default=0)
+    evidence_strength: Mapped[str] = mapped_column(String(30), default="INSUFFICIENT")
+    statistics_json: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class LearningObservation(Base):
+    __tablename__ = "learning_observations"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    scope_type: Mapped[str] = mapped_column(String(40), index=True)
+    scope_value: Mapped[str] = mapped_column(String(160), index=True)
+    observation_type: Mapped[str] = mapped_column(String(80), index=True)
+    summary: Mapped[str] = mapped_column(Text)
+    sample_size: Mapped[int] = mapped_column(Integer, default=0)
+    evidence_strength: Mapped[str] = mapped_column(String(30), default="INSUFFICIENT")
+    evidence_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class LearningProposal(Base):
+    __tablename__ = "learning_proposals"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    observation_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    scope_type: Mapped[str] = mapped_column(String(40), index=True)
+    scope_value: Mapped[str] = mapped_column(String(160), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
+    title: Mapped[str] = mapped_column(Text)
+    proposed_change_json: Mapped[str] = mapped_column(Text)
+    evidence_json: Mapped[str] = mapped_column(Text)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class MonitorRuleVersion(Base):
+    __tablename__ = "monitor_rule_versions"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    version: Mapped[str] = mapped_column(String(60), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    proposal_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    rules_json: Mapped[str] = mapped_column(Text)
+    approved_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ShadowRuleEvaluation(Base):
+    __tablename__ = "shadow_rule_evaluations"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(String(80), index=True)
+    watch_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    setup_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    production_decision: Mapped[str] = mapped_column(String(40))
+    shadow_decision: Mapped[str] = mapped_column(String(40))
+    evidence_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

@@ -20,11 +20,18 @@ import streamlit as st
 
 from dashboard.api_client import (
     TraderAPIError,
+    add_live_monitor,
     api_config_status,
     bot_action,
+    decide_learning_proposal,
+    edit_live_monitor_levels,
     fetch_earnings_calendar,
     fetch_earnings_detail,
     fetch_live_quotes,
+    fetch_live_monitor_detail,
+    fetch_live_monitors,
+    fetch_monitor_journal,
+    fetch_monitor_learning,
     fetch_bot_config,
     fetch_bot_payload,
     fetch_bot_rows,
@@ -33,6 +40,7 @@ from dashboard.api_client import (
     run_single_stock_workflow,
     run_sp100_workflow,
     run_sp500_daily_opportunities,
+    live_monitor_action,
     update_bot_config,
 )
 from dashboard.components import (
@@ -406,6 +414,12 @@ def _render_sp500_workflow_result(result: dict) -> None:
         for index, item in enumerate(trades):
             with trade_cols[index % len(trade_cols)]:
                 render_daily_trade_card(item)
+                if st.button("Add to Live Monitor", key=f"monitor_trade_{item.get('ticker')}_{index}", use_container_width=True):
+                    try:
+                        add_live_monitor(str(item.get("ticker") or ""), source="best_trades_today", planner_payload=item)
+                        st.toast(f"{item.get('ticker')} added to Live Monitor.", icon=":material/visibility:")
+                    except TraderAPIError as exc:
+                        st.error(str(exc))
 
     st.markdown("### Highest-Ranked Watch Candidates" if quality_state in {"weak_scan", "no_quality_setups"} else "### Best Setups")
     st.caption("Objective individual setup quality. Portfolio concentration does not change this ranking.")
@@ -426,6 +440,23 @@ def _render_sp500_workflow_result(result: dict) -> None:
             for item in setups
         ]
         st.dataframe(pd.DataFrame(setup_rows), use_container_width=True, hide_index=True)
+        selected_setup_tickers = st.multiselect(
+            "Add best setups to Live Monitor",
+            options=[str(item.get("ticker")) for item in setups if item.get("ticker")],
+            key="monitor_best_setup_selection",
+        )
+        if selected_setup_tickers and st.button("Add Selected Setups", key="monitor_add_selected_setups"):
+            by_ticker = {str(item.get("ticker")): item for item in setups}
+            errors = []
+            for ticker in selected_setup_tickers:
+                try:
+                    add_live_monitor(ticker, source="best_setups", planner_payload=by_ticker.get(ticker))
+                except TraderAPIError as exc:
+                    errors.append(f"{ticker}: {exc}")
+            if errors:
+                st.error(" | ".join(errors))
+            else:
+                st.toast("Selected setups added to Live Monitor.", icon=":material/visibility:")
     else:
         st.caption("No setups completed the deep-analysis stage.")
 
@@ -436,6 +467,12 @@ def _render_sp500_workflow_result(result: dict) -> None:
         for index, item in enumerate(next_items):
             with trigger_cols[index % len(trigger_cols)]:
                 render_next_trigger_card(item)
+                if st.button("Add to Live Monitor", key=f"monitor_trigger_{item.get('ticker')}_{index}", use_container_width=True):
+                    try:
+                        add_live_monitor(str(item.get("ticker") or ""), source="next_to_trigger", planner_payload=item)
+                        st.toast(f"{item.get('ticker')} added to Live Monitor.", icon=":material/visibility:")
+                    except TraderAPIError as exc:
+                        st.error(str(exc))
     else:
         st.caption("No high-quality setup is currently close to a defined trigger.")
 
@@ -615,7 +652,9 @@ render_header(
     latest_data_ts=latest_data_ts,
 )
 
-scanner_tab, bot_tab, active_tab, earnings_tab, history_tab = st.tabs(["Run Scanner", "Trading Bot", "Active Dashboard", "Earnings", "History"])
+scanner_tab, bot_tab, live_monitor_tab, journal_tab, learning_tab, active_tab, earnings_tab, history_tab = st.tabs(
+    ["Run Scanner", "Trading Bot", "Live Monitor", "Decision Journal", "Learning / Research", "Active Dashboard", "Earnings", "History"]
+)
 
 with scanner_tab:
     st.markdown("### Scanner / Runner")
@@ -1602,5 +1641,281 @@ with history_tab:
             use_container_width=True,
             hide_index=True,
         )
+
+
+with live_monitor_tab:
+    st.markdown("### Live Swing Monitor")
+    st.caption(
+        "Advisory-only 1m/5m monitoring of selected symbols. It does not submit IBKR orders. "
+        "A trigger touch arms the setup; a fresh 5-minute close, relative volume, candle quality, current R:R, and chase limits govern approval."
+    )
+    add_col, filter_col, refresh_col = st.columns([2, 1, 1], gap="medium")
+    with add_col:
+        with st.form("live_monitor_add_symbol", clear_on_submit=True):
+            symbol = st.text_input("+ Add Symbol", placeholder="INTC")
+            add_symbol_submitted = st.form_submit_button("Add to Live Monitor", type="primary", use_container_width=True)
+        if add_symbol_submitted:
+            try:
+                added = add_live_monitor(symbol, source="manual_dashboard")
+                st.toast(f"{added.get('ticker')} added. Planner baseline created.", icon=":material/visibility:")
+                st.rerun()
+            except (TraderAPIError, ValueError) as exc:
+                st.error(str(exc))
+    with filter_col:
+        show_inactive_monitors = st.checkbox("Show paused / stopped", value=False)
+    with refresh_col:
+        if st.button("Refresh Monitor", key="live_monitor_refresh", use_container_width=True):
+            st.rerun()
+
+    monitor_error = None
+    try:
+        monitor_rows = fetch_live_monitors(include_inactive=show_inactive_monitors)
+    except TraderAPIError as exc:
+        monitor_rows = []
+        monitor_error = str(exc)
+    if monitor_error:
+        st.error(monitor_error)
+    elif not monitor_rows:
+        st.info("No symbols are in the live monitor. Add one manually or from the scanner result cards.")
+    else:
+        monitor_df = pd.DataFrame(monitor_rows)
+        monitor_columns = [
+            "ticker", "current_price", "primary_trigger", "distance_to_trigger_pct", "rvol_1m", "rvol_5m",
+            "price_confirmation", "volume_confirmation", "state", "setup_valid", "live_confirmation_score",
+            "current_rr_tp1", "trigger_source", "market_session", "market_data_as_of", "last_event",
+        ]
+        visible_monitor_columns = [column for column in monitor_columns if column in monitor_df.columns]
+        display_monitor_df = monitor_df[visible_monitor_columns].copy()
+        for column in ("distance_to_trigger_pct",):
+            if column in display_monitor_df:
+                display_monitor_df[column] = pd.to_numeric(display_monitor_df[column], errors="coerce") * 100.0
+        st.dataframe(
+            display_monitor_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "current_price": st.column_config.NumberColumn("Current Price", format="$%.2f"),
+                "primary_trigger": st.column_config.NumberColumn("Primary Trigger", format="$%.2f"),
+                "distance_to_trigger_pct": st.column_config.NumberColumn("Distance %", format="%.2f%%"),
+                "rvol_1m": st.column_config.NumberColumn("1m RVOL", format="%.2fx"),
+                "rvol_5m": st.column_config.NumberColumn("5m RVOL", format="%.2fx"),
+                "live_confirmation_score": st.column_config.NumberColumn("Confirm / 10", format="%.2f"),
+                "current_rr_tp1": st.column_config.NumberColumn("Current R:R", format="%.2f"),
+            },
+        )
+
+        monitor_options = {row["id"]: f"{row['ticker']} | {row['state']}" for row in monitor_rows}
+        selected_watch_id = st.selectbox(
+            "Monitor Detail",
+            options=list(monitor_options),
+            format_func=lambda value: monitor_options[value],
+            key="live_monitor_detail_id",
+        )
+        try:
+            monitor_detail = fetch_live_monitor_detail(selected_watch_id)
+        except TraderAPIError as exc:
+            st.error(str(exc))
+            monitor_detail = {}
+
+        if monitor_detail:
+            detail_cols = st.columns(6)
+            detail_cols[0].metric("Ticker", monitor_detail.get("ticker") or "-")
+            detail_cols[1].metric("State", monitor_detail.get("state") or "-")
+            detail_cols[2].metric("Current", format_price(monitor_detail.get("current_price")))
+            detail_cols[3].metric("Trigger", format_price(monitor_detail.get("primary_trigger")))
+            detail_cols[4].metric("5m RVOL", "-" if monitor_detail.get("rvol_5m") is None else f"{float(monitor_detail['rvol_5m']):.2f}x")
+            detail_cols[5].metric("Current R:R", "-" if monitor_detail.get("current_rr_tp1") is None else f"{float(monitor_detail['current_rr_tp1']):.2f}")
+
+            action_columns = st.columns(7)
+            monitor_actions = ["pause", "resume", "stop", "evaluate", "reanalyze", "llm-review", "remove"]
+            for index, action in enumerate(monitor_actions):
+                if action_columns[index].button(action.replace("-", " ").title(), key=f"monitor_action_{action}_{selected_watch_id}", use_container_width=True):
+                    try:
+                        live_monitor_action(selected_watch_id, action)
+                        st.rerun()
+                    except TraderAPIError as exc:
+                        st.error(str(exc))
+
+            overview_tab, evidence_tab, attempts_tab, plan_tab, trade_tab, monitor_debug_tab = st.tabs(
+                ["Setup", "Confirmation", "Attempts", "Manual Order Plan", "Manual Trade", "Raw"]
+            )
+            with overview_tab:
+                render_key_value_grid(
+                    [
+                        ("Broader Structure", pretty_label(monitor_detail.get("broader_structure"))),
+                        ("Setup Type", pretty_label(monitor_detail.get("setup_type"))),
+                        ("Execution", pretty_label(monitor_detail.get("execution_structure"))),
+                        ("Trigger Source", monitor_detail.get("trigger_source") or "PLANNER"),
+                        ("Setup Valid", "Yes" if monitor_detail.get("setup_valid") else "No"),
+                        ("Session", monitor_detail.get("market_session") or "-"),
+                    ],
+                    columns=3,
+                )
+                active_levels = monitor_detail.get("active_levels") or {}
+                planner_levels = monitor_detail.get("planner_levels") or {}
+                st.markdown("**Active Technical Levels**")
+                st.json(active_levels, expanded=False)
+                with st.expander("Edit active level overlay", expanded=False):
+                    editable_level_names = [
+                        "near_confirmation", "primary_entry_trigger", "strong_confirmation",
+                        "major_trend_repair", "invalidation_level", "optional_support_level", "suggested_stop", "max_chase_price",
+                    ]
+                    with st.form(f"level_override_form_{selected_watch_id}"):
+                        level_inputs = {
+                            name: st.text_input(pretty_label(name), value="" if active_levels.get(name) is None else str(active_levels.get(name)))
+                            for name in editable_level_names
+                        }
+                        save_levels = st.form_submit_button("Save Manual Overrides", type="primary")
+                    if save_levels:
+                        try:
+                            parsed_levels = {name: (None if value.strip() == "" else float(value)) for name, value in level_inputs.items()}
+                            edit_live_monitor_levels(selected_watch_id, parsed_levels)
+                            st.toast("Manual overlay saved; planner originals remain unchanged.", icon=":material/save:")
+                            st.rerun()
+                        except (TraderAPIError, ValueError) as exc:
+                            st.error(str(exc))
+                with st.expander("Planner original levels", expanded=False):
+                    st.json(planner_levels)
+            with evidence_tab:
+                evaluation = monitor_detail.get("latest_evaluation") or {}
+                render_key_value_grid(
+                    [
+                        ("Price Confirmed", evaluation.get("price_confirmation")),
+                        ("Volume Confirmed", evaluation.get("volume_confirmation")),
+                        ("Candle Quality", pretty_label(evaluation.get("breakout_candle_quality"))),
+                        ("Upper Wick", evaluation.get("upper_wick_ratio")),
+                        ("Close Location", evaluation.get("close_location_value")),
+                        ("Retest", pretty_label(evaluation.get("retest_result"))),
+                        ("Data Stale", evaluation.get("data_stale")),
+                        ("Max Chase", format_price(evaluation.get("max_chase_price"))),
+                        ("Confirmation / 10", evaluation.get("live_confirmation_score")),
+                    ],
+                    columns=3,
+                )
+                components = evaluation.get("confirmation_components") or {}
+                if components:
+                    st.dataframe(
+                        pd.DataFrame([{"Component": pretty_label(key), **value} for key, value in components.items()]),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+            with attempts_tab:
+                attempts = monitor_detail.get("attempts") or []
+                if attempts:
+                    st.dataframe(pd.DataFrame(attempts), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No confirmation attempt has started yet.")
+            with plan_tab:
+                plan = (monitor_detail.get("latest_evaluation") or {}).get("manual_order_plan")
+                if plan:
+                    st.info("Manual execution only. This plan is never submitted to IBKR by the monitor.")
+                    st.json(plan, expanded=True)
+                else:
+                    st.caption("A refreshed manual order plan appears after current market data is evaluated.")
+                reviews = monitor_detail.get("llm_reviews") or []
+                if reviews:
+                    st.markdown("**Latest LLM Advisory**")
+                    st.json(reviews[0], expanded=False)
+            with trade_tab:
+                st.warning("These controls only journal a trade you placed manually. They do not place an order.")
+                trade_action = st.selectbox("Manual Action", ["entered", "skipped", "exited"], key=f"manual_action_{selected_watch_id}")
+                with st.form(f"manual_trade_form_{selected_watch_id}_{trade_action}"):
+                    manual_trade_id = st.text_input("Trade ID (required for exit)") if trade_action == "exited" else ""
+                    manual_quantity = st.number_input("Quantity", min_value=0.0, value=0.0) if trade_action == "entered" else None
+                    manual_entry = st.number_input("Actual Entry", min_value=0.0, value=0.0) if trade_action == "entered" else None
+                    manual_stop = st.number_input("Stop Price", min_value=0.0, value=0.0) if trade_action == "entered" else None
+                    manual_exit = st.number_input("Exit Price", min_value=0.0, value=0.0) if trade_action == "exited" else None
+                    manual_notes = st.text_area("Notes")
+                    save_manual_action = st.form_submit_button("Record Manual Action", type="primary")
+                if save_manual_action:
+                    action_payload = {"action": trade_action, "notes": manual_notes}
+                    if trade_action == "entered":
+                        action_payload.update({"quantity": manual_quantity, "actual_entry": manual_entry, "stop_price": manual_stop})
+                    elif trade_action == "exited":
+                        action_payload.update({"trade_id": manual_trade_id, "exit_price": manual_exit})
+                    try:
+                        live_monitor_action(selected_watch_id, "manual-trades", action_payload)
+                        st.toast("Manual action recorded.", icon=":material/bookmark_added:")
+                        st.rerun()
+                    except TraderAPIError as exc:
+                        st.error(str(exc))
+                trades = monitor_detail.get("manual_trades") or []
+                if trades:
+                    st.dataframe(pd.DataFrame(trades), use_container_width=True, hide_index=True)
+            with monitor_debug_tab:
+                st.json(monitor_detail, expanded=False)
+
+
+with journal_tab:
+    st.markdown("### Decision Journal")
+    st.caption("Append-only monitor transitions, attempts, rejections, approvals, advisory reviews, and manual actions.")
+    journal_ticker = st.text_input("Filter ticker", placeholder="Optional", key="monitor_journal_ticker").strip().upper()
+    try:
+        journal_rows = fetch_monitor_journal(ticker=journal_ticker or None)
+    except TraderAPIError as exc:
+        st.error(str(exc))
+        journal_rows = []
+    if journal_rows:
+        journal_df = pd.DataFrame(journal_rows)
+        journal_columns = [column for column in ("created_at", "ticker", "event_type", "from_state", "to_state", "message", "attempt_id", "setup_id") if column in journal_df.columns]
+        st.dataframe(journal_df[journal_columns], use_container_width=True, hide_index=True)
+        selected_event_id = st.selectbox("Event evidence", options=journal_df["id"].tolist(), key="journal_event_id")
+        selected_event = next(row for row in journal_rows if row.get("id") == selected_event_id)
+        with st.expander("Immutable event snapshot", expanded=False):
+            st.json(selected_event.get("snapshot") or {})
+    else:
+        st.caption("No decision journal events match this filter.")
+
+
+with learning_tab:
+    st.markdown("### Learning / Research")
+    st.caption(
+        "Statistics are deterministic and sample-size weighted. Learning proposals never activate themselves; "
+        "Approve, reject, or paper-test each proposal explicitly."
+    )
+    try:
+        learning_payload = fetch_monitor_learning()
+    except TraderAPIError as exc:
+        st.error(str(exc))
+        learning_payload = {}
+    stock_profiles_tab, observations_tab, proposals_tab, rule_versions_tab = st.tabs(
+        ["Stock Profiles", "Observations", "Pending Proposals", "Rule Versions"]
+    )
+    with stock_profiles_tab:
+        profiles = learning_payload.get("profiles") or []
+        if profiles:
+            st.dataframe(pd.DataFrame(profiles), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Profiles are created after historical observations are aggregated.")
+    with observations_tab:
+        observations = learning_payload.get("observations") or []
+        if observations:
+            st.dataframe(pd.DataFrame(observations), use_container_width=True, hide_index=True)
+        else:
+            st.caption("No evidence-qualified learning observations yet.")
+    with proposals_tab:
+        proposals = learning_payload.get("proposals") or []
+        if not proposals:
+            st.caption("No pending proposals. Rules cannot change without an explicit proposal and user decision.")
+        for proposal in proposals:
+            with st.container(border=True):
+                st.markdown(f"**{proposal.get('title')}**")
+                st.caption(f"{proposal.get('scope_type')}: {proposal.get('scope_value')} | {proposal.get('status')}")
+                st.json({"proposed_change": proposal.get("proposed_change"), "evidence": proposal.get("evidence")}, expanded=False)
+                if proposal.get("status") == "PENDING":
+                    decision_cols = st.columns(3)
+                    for index, decision in enumerate(("APPROVE", "REJECT", "PAPER_TEST")):
+                        if decision_cols[index].button(decision.replace("_", " ").title(), key=f"proposal_{proposal.get('id')}_{decision}", use_container_width=True):
+                            try:
+                                decide_learning_proposal(str(proposal.get("id")), decision)
+                                st.rerun()
+                            except TraderAPIError as exc:
+                                st.error(str(exc))
+    with rule_versions_tab:
+        versions = learning_payload.get("rule_versions") or []
+        if versions:
+            st.dataframe(pd.DataFrame(versions), use_container_width=True, hide_index=True)
+        else:
+            st.caption("No user-approved live-monitor rule version exists yet.")
 
 

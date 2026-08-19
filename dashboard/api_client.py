@@ -180,6 +180,31 @@ def put_json(path: str, payload: dict[str, Any], *, timeout: int = 180) -> dict[
     return data
 
 
+def patch_json(path: str, payload: dict[str, Any], *, timeout: int = 120) -> dict[str, Any]:
+    base_url = get_api_base_url()
+    url = f"{base_url}{path}"
+    try:
+        response = requests.patch(url, json=payload, headers=_headers(), timeout=timeout)
+    except requests.Timeout as exc:
+        raise TraderAPIError(f"The trader API did not finish within {timeout} seconds for {path}.") from exc
+    except requests.RequestException as exc:
+        raise TraderAPIError(f"Could not reach the trader API at {url}: {exc}") from exc
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if not response.ok:
+        detail = data.get("detail") if isinstance(data, dict) else data
+        raise TraderAPIError(
+            f"Trader API returned HTTP {response.status_code} for {path}. {detail or ''}".strip(),
+            status_code=response.status_code,
+            detail=detail,
+        )
+    if not isinstance(data, dict):
+        raise TraderAPIError(f"Trader API returned a malformed response for {path}.")
+    return data
+
+
 def run_sp100_workflow(payload: dict[str, Any]) -> dict[str, Any]:
     return post_json(
         "/workflow/sp100/top10-log",
@@ -281,3 +306,54 @@ def fetch_bot_rows(path: str) -> list[dict[str, Any]]:
 
 def fetch_bot_payload(path: str) -> dict[str, Any]:
     return get_json(path, timeout=get_api_timeout_seconds(120))
+
+
+def fetch_live_monitors(*, include_inactive: bool = False) -> list[dict[str, Any]]:
+    payload = get_json(
+        "/live-monitor",
+        params={"include_inactive": str(bool(include_inactive)).lower()},
+        timeout=get_api_timeout_seconds(90),
+    )
+    return payload.get("rows") if isinstance(payload.get("rows"), list) else []
+
+
+def fetch_live_monitor_detail(watch_id: str) -> dict[str, Any]:
+    return get_json(f"/live-monitor/{watch_id}", timeout=get_api_timeout_seconds(90))
+
+
+def add_live_monitor(ticker: str, *, source: str = "dashboard", planner_payload: dict | None = None) -> dict[str, Any]:
+    return post_json(
+        "/live-monitor",
+        {"ticker": ticker, "source": source, "planner_payload": planner_payload},
+        timeout=get_api_timeout_seconds(240),
+    )
+
+
+def live_monitor_action(watch_id: str, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    return post_json(f"/live-monitor/{watch_id}/{action}", payload or {}, timeout=get_api_timeout_seconds(240))
+
+
+def edit_live_monitor_levels(watch_id: str, levels: dict[str, float | None]) -> dict[str, Any]:
+    return patch_json(f"/live-monitor/{watch_id}/levels", {"levels": levels}, timeout=get_api_timeout_seconds(120))
+
+
+def fetch_monitor_journal(*, watch_id: str | None = None, ticker: str | None = None) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {"limit": 500}
+    if watch_id:
+        params["watch_id"] = watch_id
+    if ticker:
+        params["ticker"] = ticker
+    payload = get_json("/live-monitor/journal", params=params, timeout=get_api_timeout_seconds(90))
+    return payload.get("rows") if isinstance(payload.get("rows"), list) else []
+
+
+def fetch_monitor_learning() -> dict[str, Any]:
+    return get_json("/live-monitor/learning", timeout=get_api_timeout_seconds(90))
+
+
+def decide_learning_proposal(proposal_id: str, decision: str) -> dict[str, Any]:
+    return post_json(
+        f"/live-monitor/learning/proposals/{proposal_id}/decision",
+        {"decision": decision, "decided_by": "dashboard_user"},
+        timeout=get_api_timeout_seconds(90),
+    )

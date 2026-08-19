@@ -28,6 +28,10 @@ _TIMEFRAME_CACHE: dict[tuple[str, str, int], tuple[float, list[dict]]] = {}
 _TIMEFRAME_CACHE_LOCK = threading.Lock()
 
 TIMEFRAME_ALIASES = {
+    "1m": "one_minute",
+    "one_minute": "one_minute",
+    "5m": "five_minute",
+    "five_minute": "five_minute",
     "d": "daily",
     "1d": "daily",
     "daily": "daily",
@@ -41,12 +45,16 @@ TIMEFRAME_ALIASES = {
 }
 
 YAHOO_INTERVALS = {
+    "one_minute": "1m",
+    "five_minute": "5m",
     "daily": "1d",
     "hourly": "60m",
     "thirty_minute": "30m",
 }
 
 DEFAULT_TIMEFRAME_LOOKBACK_DAYS = {
+    "one_minute": 1,
+    "five_minute": 5,
     "daily": 320,
     "hourly": 90,
     "thirty_minute": 30,

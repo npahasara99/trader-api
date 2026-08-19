@@ -1,5 +1,6 @@
 ﻿
 from fastapi import FastAPI, Depends, Header, HTTPException, Query
+from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 from datetime import datetime, timezone, timedelta, date
@@ -59,6 +60,8 @@ from .market_data import (
     get_bars as get_timeframe_bars,
 )
 from .bot.api import router as bot_router
+from .live_monitor.api import router as live_monitor_router
+from .live_monitor.service import get_live_monitor_service
 from .tradingview_webhook import NormalizedTradingViewEvent, create_tradingview_router
 
 
@@ -103,12 +106,23 @@ def _ensure_runtime_columns() -> None:
 Base.metadata.create_all(bind=engine)
 _ensure_runtime_columns()
 
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    if settings.LIVE_MONITOR_ENABLED:
+        get_live_monitor_service().start()
+    try:
+        yield
+    finally:
+        get_live_monitor_service().stop_service()
+
+
 app = FastAPI(
     title="Trader Backend (Stocks Only)",
     version="0.1.3",
     servers=[
         {"url": "https://trader-api-production-7875.up.railway.app", "description": "Production"}
     ],
+    lifespan=app_lifespan,
 )
 
 
@@ -132,6 +146,7 @@ def require_bearer_token(authorization: Optional[str] = Header(default=None)):
 
 
 app.include_router(bot_router, dependencies=[Depends(require_bearer_token)])
+app.include_router(live_monitor_router, dependencies=[Depends(require_bearer_token)])
 
 
 def _persist_tradingview_monitoring_event(event: NormalizedTradingViewEvent) -> None:

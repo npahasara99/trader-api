@@ -78,7 +78,10 @@ Railway services using this repository must keep their start commands separate:
 The API launcher validates Railway's `PORT` and enforces a single Uvicorn worker,
 which is required by the in-process bot and its persistent IBKR connection.
 
-The dashboard now includes a `Trading Bot` tab alongside the existing scanner and watchlist views.
+The dashboard includes `Live Monitor`, `Decision Journal`, and `Learning / Research`
+tabs alongside the scanner and active watchlist. The live monitor is advisory-only
+and never submits an IBKR order. See `docs/live_swing_monitor.md` for its API,
+state machine, persistence, and safety rules.
 
 ## Apply schema updates
 
