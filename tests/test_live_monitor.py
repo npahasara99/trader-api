@@ -16,7 +16,7 @@ from app.live_monitor.service import LiveMonitorService
 from app.models import ConfirmationAttempt, LearningProposal, ManualMonitorTrade, MonitorRuleVersion, RecommendationOutcome, ShadowRuleEvaluation
 
 
-NOW = datetime(2026, 8, 19, 15, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc).replace(second=0, microsecond=0)
 CONFIG = LiveMonitorConfig(stale_data_seconds=300, auto_llm_min_setup_score=0.0)
 LEVELS = {
     "primary_entry_trigger": 100.0,
@@ -100,11 +100,11 @@ def test_missed_and_invalidated_hard_states():
 
 
 def test_stale_data_blocks_new_approval():
-    old = NOW - timedelta(minutes=10)
     one = bars([100.4] * 21)
     five = bars([100.5] * 21, latest_volume=200.0, timeframe_minutes=5)
-    one[-1]["date"] = old
-    five[-1]["date"] = old
+    for bar in one + five:
+        # Closed-market sessions intentionally allow up to 72 hours of age.
+        bar["date"] = bar["date"] - timedelta(days=4)
     result = evaluate("CONFIRMING", one, five)
     assert result["state"] == "DATA_STALE"
     assert "data_stale" in result["hard_blockers"]

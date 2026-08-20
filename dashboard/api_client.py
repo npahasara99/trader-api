@@ -394,3 +394,11 @@ def decide_learning_proposal(proposal_id: str, decision: str) -> dict[str, Any]:
         {"decision": decision, "decided_by": "dashboard_user"},
         timeout=get_api_timeout_seconds(90),
     )
+
+
+def run_monitor_learning_cycle(trading_date: str | None = None) -> dict[str, Any]:
+    return post_json(
+        "/live-monitor/learning/run",
+        {"trading_date": trading_date},
+        timeout=get_api_timeout_seconds(300),
+    )

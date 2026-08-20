@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from threading import Event, Lock, Thread
 import time
 from typing import Any, Callable
 import uuid
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -16,15 +17,21 @@ from app.models import (
     ChartLevelDecision,
     ChartSnapshot,
     ChartStructureReview,
+    BehaviorProfileVersion,
     ConfirmationAttempt,
+    LearnedAdjustment,
+    LearningJobRun,
     LearningObservation,
     LearningProposal,
     MarketSnapshot,
     LiveWatch,
     LLMAdvisoryReview,
+    LLMDecisionPostmortem,
+    LevelRevision,
     ManualMonitorTrade,
     MonitorDecisionSnapshot,
     MonitorEvent,
+    MonitorDailySummary,
     MonitorRuleVersion,
     MonitorSetup,
     RecommendationOutcome,
@@ -49,7 +56,17 @@ from .chart_review import review_chart_packet
 from .config import LiveMonitorConfig, load_live_monitor_config
 from .engine import evaluate_monitor
 from .enums import ACTIVE_MONITOR_STATES, MonitorState
-from .learning import aggregate_attempts, hierarchical_weights, similar_case_score
+from .learning import adjustment_breakdown, aggregate_attempts, hierarchical_weights, similar_case_score
+from .level_sanity import LEVEL_ROLES, can_auto_apply_chart_correction, evaluate_level_sanity
+from .memory import (
+    learned_adjustment_payloads,
+    load_historical_context,
+    past_postmortems,
+    persist_adjustments,
+    persist_completed_bars,
+    refresh_profile,
+    run_daily_learning_cycle,
+)
 from .market_snapshot import build_market_snapshot, market_snapshot_payload, persist_market_snapshot
 
 
@@ -108,6 +125,7 @@ class LiveMonitorService:
         self._running = False
         self._last_cycle_at: datetime | None = None
         self._last_cycle_error: str | None = None
+        self._last_learning_date: date | None = None
 
     @staticmethod
     def _load_live_bars(ticker: str, timeframe: str, lookback_days: int | None) -> list[dict]:
@@ -270,7 +288,30 @@ class LiveMonitorService:
                         )
                         db.commit()
                 results.append({"watch_id": watch_id, "error": f"{type(exc).__name__}: {exc}"})
+        self._maybe_run_daily_learning_cycle()
         return results
+
+    def _maybe_run_daily_learning_cycle(self) -> None:
+        now_et = _utcnow().astimezone(ZoneInfo("America/New_York"))
+        refresh_time = (self.config.profile_refresh_hour_et, self.config.profile_refresh_minute_et)
+        if (now_et.hour, now_et.minute) < refresh_time or self._last_learning_date == now_et.date():
+            return
+        try:
+            self.run_learning_cycle(now_et.date())
+            self._last_learning_date = now_et.date()
+        except Exception as exc:
+            self._last_cycle_error = f"learning_cycle: {type(exc).__name__}: {exc}"
+
+    def run_learning_cycle(self, trading_date: date | str | None = None) -> dict[str, Any]:
+        target = trading_date
+        if isinstance(target, str):
+            target = date.fromisoformat(target)
+        if target is None:
+            target = _utcnow().astimezone(ZoneInfo("America/New_York")).date()
+        with SessionLocal() as db:
+            result = run_daily_learning_cycle(db, target, self.config)
+            db.commit()
+            return result
 
     def add_monitor(self, ticker: str, *, source: str = "manual", planner_payload: dict | None = None) -> dict[str, Any]:
         symbol = str(ticker or "").strip().upper()
@@ -356,6 +397,7 @@ class LiveMonitorService:
                 previous_setup=old_setup,
                 replacement_reason=replacement_reason,
             )
+            self._attach_historical_context(db, watch, setup)
             if old_setup:
                 old_setup.status = "replaced"
                 old_setup.replaced_by_setup_id = setup.id
@@ -388,6 +430,17 @@ class LiveMonitorService:
                     "source_plan_validation": baseline.get("source_plan_validation"),
                 },
             )
+            db.add(MonitorDecisionSnapshot(
+                id=_id(), watch_id=watch.id, setup_id=setup.id, ticker=watch.ticker,
+                snapshot_type="MONITOR_CREATED",
+                payload_json=_dumps({
+                    "market_snapshot_id": setup.market_snapshot_id,
+                    "planner_baseline": _loads(setup.planner_baseline_json),
+                    "planner_levels": _loads(setup.planner_levels_json),
+                    "active_levels": _loads(setup.active_levels_json),
+                    "profile_version": (_loads(setup.planner_baseline_json).get("historical_context_at_creation") or {}),
+                }),
+            ))
             db.commit()
             watch_id = watch.id
             should_review = True
@@ -452,7 +505,52 @@ class LiveMonitorService:
         db.add(setup)
         db.flush()
         watch.current_setup_id = setup.id
+        self._record_level_revisions(
+            db, watch=watch, setup=setup, review_row=None,
+            planner_levels=levels, proposed_levels={}, validated_levels={},
+            final_levels=levels,
+            sources={name: "PLANNER" for name in LEVEL_NAMES if number(levels.get(name)) is not None},
+            sanity={}, validation={}, llm_output={},
+        )
         return setup
+
+    def _attach_historical_context(self, db: Session, watch: LiveWatch, setup: MonitorSetup) -> dict[str, Any]:
+        """Retrieve history at bootstrap and persist bounded, decision-time adjustments."""
+        context = load_historical_context(db, setup, self.config)
+        levels = _loads(setup.active_levels_json)
+        entry = number(levels.get("primary_entry_trigger"))
+        tp1 = number(levels.get("tp1"))
+        atr = number(levels.get("atr")) or number(_loads(setup.planner_baseline_json).get("atr"))
+        features = {
+            "tp1_distance_atr": None if entry is None or tp1 is None or atr is None else (tp1 - entry) / atr,
+            "level_source": setup.trigger_source,
+        }
+        applied = persist_adjustments(
+            db, watch=watch, setup=setup, context=context,
+            current_features=features, config=self.config,
+        )
+        baseline = _loads(setup.planner_baseline_json)
+        baseline["historical_context_at_creation"] = {
+            "profile_version_id": (context.get("ticker_profile") or {}).get("profile_version_id"),
+            "profile_version": (context.get("ticker_profile") or {}).get("profile_version"),
+            "profile_last_updated_at": (context.get("ticker_profile") or {}).get("profile_last_updated_at"),
+            "evidence_strength": (context.get("ticker_profile") or {}).get("evidence_strength"),
+            "hierarchical_weights": context.get("hierarchical_weights"),
+            "recommendation_breakdown": applied["recommendation_breakdown"],
+        }
+        setup.planner_baseline_json = _dumps(baseline)
+        self._event(
+            db, watch, setup=setup, event_type="HISTORICAL_PROFILE_APPLIED",
+            message=(
+                f"Historical context loaded with "
+                f"{(context.get('ticker_profile') or {}).get('evidence_strength', 'INSUFFICIENT')} evidence"
+            ),
+            snapshot={
+                "historical_context": baseline["historical_context_at_creation"],
+                "learned_adjustments": applied["adjustments"],
+            },
+        )
+        return {**context, **applied}
 
     def list_monitors(self, *, include_inactive: bool = False) -> list[dict[str, Any]]:
         with SessionLocal() as db:
@@ -544,6 +642,12 @@ class LiveMonitorService:
             setup.chart_analysis_status = "MANUAL_OVERRIDE"
             setup.max_chase_price = active.get("max_chase_price")
             setup.updated_at = _utcnow()
+            self._record_level_revisions(
+                db, watch=watch, setup=setup, review_row=None,
+                planner_levels=_loads(setup.planner_levels_json), proposed_levels={},
+                validated_levels={}, final_levels=active, sources=sources,
+                sanity={}, validation={}, llm_output={},
+            )
             self._event(db, watch, setup=setup, event_type="levels_overridden", message="Manual level overlay updated", snapshot={"manual_overrides": manual, "planner_originals": _loads(setup.planner_levels_json)})
             db.commit()
             return self._watch_payload(db, watch, include_detail=True)
@@ -588,6 +692,7 @@ class LiveMonitorService:
                 previous_setup=old_setup,
                 replacement_reason=replacement_reason,
             )
+            self._attach_historical_context(db, watch, new_setup)
             if old_setup:
                 old_setup.status = "replaced"
                 old_setup.replaced_by_setup_id = new_setup.id
@@ -717,7 +822,7 @@ class LiveMonitorService:
         snapshot_event_type: str | None = None,
     ) -> dict[str, Any]:
         normalized_type = str(review_type or "CHART_STRUCTURE_REVIEW").strip().upper()
-        if normalized_type not in {"CHART_STRUCTURE_REVIEW", "CONFIRMED_TRADE_REVIEW"}:
+        if normalized_type not in {"CHART_STRUCTURE_REVIEW", "CHART_LEVEL_REVIEW", "CONFIRMED_TRADE_REVIEW"}:
             raise ValueError("Unsupported chart review type")
         with SessionLocal() as db:
             watch = db.get(LiveWatch, watch_id)
@@ -778,6 +883,16 @@ class LiveMonitorService:
                 render_error = f"{type(exc).__name__}: {exc}"
             structure_bars = ((bundle.get("timeframes") or {}).get("structure") or {}).get("bars") or []
             execution_bars = ((bundle.get("timeframes") or {}).get("execution") or {}).get("bars") or []
+            sanity = evaluate_level_sanity(
+                current_price=float(current_price or 0.0),
+                atr=float(atr), levels=active_levels,
+                structure_bars=structure_bars, execution_bars=execution_bars,
+                config=self.config,
+            ) if current_price else {"status": "UNAVAILABLE", "anomalies": ["MARKET_DATA_UNAVAILABLE"], "review_required": False}
+            historical_context = load_historical_context(db, setup, self.config)
+            latest_attempt = db.query(ConfirmationAttempt).filter(
+                ConfirmationAttempt.setup_id == setup.id,
+            ).order_by(ConfirmationAttempt.attempt_number.desc()).first()
             packet = {
                 "review_type": normalized_type,
                 "ticker": watch.ticker,
@@ -802,7 +917,13 @@ class LiveMonitorService:
                 "structure_bars": structure_bars,
                 "execution_bars": execution_bars,
                 "latest_evaluation": _loads(watch.latest_evaluation_json),
-                "historical_profile": self._profile_for(db, setup),
+                "level_sanity": sanity,
+                "pricing_anomalies": sanity.get("anomalies") or [],
+                "historical_profile": historical_context.get("ticker_profile"),
+                "broader_historical_profiles": historical_context.get("broader_profiles"),
+                "similar_historical_cases": self._similar_cases(db, setup, latest_attempt),
+                "learned_adjustments": learned_adjustment_payloads(db, setup.id),
+                "past_llm_postmortems": past_postmortems(db, setup.ticker),
                 "image_paths": [row.image_path for row in snapshots],
             }
             blocked = consistency["status"] in {"CHART_DATA_MISMATCH", "MARKET_DATA_MISMATCH"} or current_price is None or stale["stale"]
@@ -826,7 +947,7 @@ class LiveMonitorService:
                 review = review_chart_packet(packet, provider=self._chart_review_provider, config=self.config)
             proposed = review.get("proposed_levels") or {}
             validated = review.get("validated_levels") or {}
-            if normalized_type == "CHART_STRUCTURE_REVIEW":
+            if normalized_type in {"CHART_STRUCTURE_REVIEW", "CHART_LEVEL_REVIEW"}:
                 candidate_reconciliation = reconcile_levels(
                     planner_levels=planner_levels,
                     proposed_levels=proposed,
@@ -841,7 +962,7 @@ class LiveMonitorService:
                     "has_disagreement": False,
                 }
             analysis_status = review.get("status") or "VALIDATION_FAILED"
-            if normalized_type == "CHART_STRUCTURE_REVIEW" and analysis_status not in {"CHART_DATA_MISMATCH", "MARKET_DATA_MISMATCH", "PLAN_STALE", "UNAVAILABLE", "VALIDATION_FAILED"}:
+            if normalized_type in {"CHART_STRUCTURE_REVIEW", "CHART_LEVEL_REVIEW"} and analysis_status not in {"CHART_DATA_MISMATCH", "MARKET_DATA_MISMATCH", "PLAN_STALE", "UNAVAILABLE", "VALIDATION_FAILED"}:
                 analysis_status = "DISAGREEMENT" if candidate_reconciliation["has_disagreement"] else "AGREES"
             row = ChartStructureReview(
                 id=_id(),
@@ -866,7 +987,55 @@ class LiveMonitorService:
                 data_consistency_status=str(consistency.get("status") or "INSUFFICIENT_DATA"),
             )
             db.add(row)
-            if normalized_type == "CHART_STRUCTURE_REVIEW":
+            auto_policy = {"allowed": False, "blockers": ["not_automatic_level_review"]}
+            if automatic and normalized_type in {"CHART_STRUCTURE_REVIEW", "CHART_LEVEL_REVIEW"}:
+                auto_policy = can_auto_apply_chart_correction(
+                    review=review,
+                    manual_overrides=_loads(setup.manual_overrides_json),
+                    sanity=sanity,
+                    config=self.config,
+                )
+                if auto_policy["allowed"]:
+                    previous_active = dict(active_levels)
+                    active_levels = candidate_reconciliation["final_active_levels"]
+                    level_sources = candidate_reconciliation["level_sources"]
+                    setup.active_levels_json = _dumps(active_levels)
+                    setup.level_sources_json = _dumps(level_sources)
+                    setup.trigger_source = "VALIDATED_CHART_LLM"
+                    setup.max_chase_price = active_levels.get("max_chase_price")
+                    analysis_status = "AUTO_CORRECTED"
+                    row.status = analysis_status
+                    db.add(ChartLevelDecision(
+                        id=_id(), watch_id=watch.id, setup_id=setup.id,
+                        chart_review_id=row.id, ticker=watch.ticker,
+                        decision="AUTO_ACCEPT_VALIDATED",
+                        previous_active_levels_json=_dumps(previous_active),
+                        selected_levels_json=_dumps(active_levels),
+                        level_sources_json=_dumps(level_sources),
+                        decided_by="system_high_confidence_validator",
+                    ))
+                    self._event(
+                        db, watch, setup=setup, event_type="LEVEL_CORRECTED",
+                        message="High-confidence validated chart levels replaced anomalous current levels",
+                        snapshot={
+                            "review_id": row.id, "auto_policy": auto_policy,
+                            "anomalies": sanity.get("anomalies"),
+                            "previous_active_levels": previous_active,
+                            "final_active_levels": active_levels,
+                        },
+                    )
+                elif sanity.get("review_required") and candidate_reconciliation.get("has_disagreement"):
+                    analysis_status = "MANUAL_REVIEW_REQUIRED"
+                    row.status = analysis_status
+            self._record_level_revisions(
+                db, watch=watch, setup=setup, review_row=row,
+                planner_levels=planner_levels, proposed_levels=proposed,
+                validated_levels=validated, final_levels=active_levels,
+                sources=(candidate_reconciliation.get("level_sources") if auto_policy.get("allowed") else _loads(setup.level_sources_json)),
+                sanity=sanity, validation=review.get("validation") or {},
+                llm_output=review.get("output") or {}, auto_policy=auto_policy,
+            )
+            if normalized_type in {"CHART_STRUCTURE_REVIEW", "CHART_LEVEL_REVIEW"}:
                 setup.llm_proposed_levels_json = _dumps(proposed)
                 setup.validated_chart_levels_json = _dumps(validated)
                 setup.chart_analysis_status = "STALE" if stale["stale"] else analysis_status
@@ -907,12 +1076,60 @@ class LiveMonitorService:
                     "planner_levels": planner_levels,
                     "proposed_levels": proposed,
                     "validated_levels": validated,
+                    "level_sanity": sanity,
+                    "auto_correction": auto_policy,
                 },
             )
             for snapshot in snapshots:
                 snapshot.decision_event_id = review_event.id
             db.commit()
             return self._chart_review_payload(row)
+
+    def _record_level_revisions(
+        self,
+        db: Session,
+        *,
+        watch: LiveWatch,
+        setup: MonitorSetup,
+        review_row: ChartStructureReview | None,
+        planner_levels: dict[str, Any],
+        proposed_levels: dict[str, Any],
+        validated_levels: dict[str, Any],
+        final_levels: dict[str, Any],
+        sources: dict[str, Any],
+        sanity: dict[str, Any],
+        validation: dict[str, Any],
+        llm_output: dict[str, Any],
+        auto_policy: dict[str, Any] | None = None,
+    ) -> None:
+        level_payload = llm_output.get("levels") or {}
+        targets = llm_output.get("targets") or {}
+        rejected = validation.get("rejected_levels") or {}
+        for name in LEVEL_NAMES:
+            planner_price = number(planner_levels.get(name))
+            proposed_price = number(proposed_levels.get(name))
+            validated_price = number(validated_levels.get(name))
+            final_price = number(final_levels.get(name))
+            if all(value is None for value in (planner_price, proposed_price, validated_price, final_price)):
+                continue
+            raw_reason = targets.get(name) if name.startswith("tp") or name == "stretch_target" else level_payload.get(name)
+            reason = raw_reason.get("reason") if isinstance(raw_reason, dict) else None
+            db.add(LevelRevision(
+                id=_id(), watch_id=watch.id, setup_id=setup.id,
+                chart_review_id=review_row.id if review_row else None,
+                market_snapshot_id=setup.market_snapshot_id, ticker=setup.ticker,
+                level_name=name, level_role=LEVEL_ROLES.get(name, name.upper()),
+                planner_price=planner_price, llm_proposed_price=proposed_price,
+                validated_price=validated_price,
+                manual_price=number(_loads(setup.manual_overrides_json).get(name)),
+                final_active_price=final_price,
+                source=str(sources.get(name) or "PLANNER"),
+                validation_result=("REJECTED" if name in rejected else "VALIDATED" if validated_price is not None else "NOT_PROPOSED"),
+                confidence=float(review_row.confidence if review_row else 1.0),
+                reason=reason or (review_row.reason_summary if review_row else "Manual level decision"),
+                anomaly_flags_json=_dumps(sanity.get("anomalies") or []),
+                outcome_json=_dumps({"auto_policy": auto_policy or {}}),
+            ))
 
     def apply_chart_level_decision(
         self,
@@ -994,6 +1211,17 @@ class LiveMonitorService:
                 decided_by=decided_by,
             )
             db.add(row)
+            latest_review = db.get(ChartStructureReview, setup.latest_chart_review_id) if setup.latest_chart_review_id else None
+            review_input = _loads(latest_review.deterministic_input_json) if latest_review else {}
+            review_validation = _loads(latest_review.validation_json) if latest_review else {}
+            self._record_level_revisions(
+                db, watch=watch, setup=setup, review_row=latest_review,
+                planner_levels=planner, proposed_levels=proposed,
+                validated_levels=validated, final_levels=selected, sources=sources,
+                sanity=review_input.get("level_sanity") or {},
+                validation=review_validation,
+                llm_output=_loads(latest_review.llm_output_json) if latest_review else {},
+            )
             self._event(
                 db,
                 watch,
@@ -1062,6 +1290,12 @@ class LiveMonitorService:
                 levels=levels,
                 config=self.config,
             )
+            level_sanity = evaluate_level_sanity(
+                current_price=float(evaluation.get("current_price") or runtime_reference),
+                atr=float(number(levels.get("atr")) or runtime_reference * 0.02),
+                levels=levels, structure_bars=bars_5m,
+                execution_bars=bars_1m, config=self.config,
+            )
             stale_plan = detect_stale_plan(
                 current_price=evaluation.get("current_price"),
                 levels=levels,
@@ -1082,6 +1316,7 @@ class LiveMonitorService:
             evaluation["price_drift_atr"] = stale_plan.get("price_drift_atr")
             evaluation["plan_age_seconds"] = stale_plan.get("plan_age_seconds")
             evaluation["level_semantic_validation"] = semantic_validation
+            evaluation["level_sanity"] = level_sanity
             evaluation["runtime_data_consistency"] = runtime_consistency
             if stale_plan["stale"]:
                 if evaluation["state"] not in {MonitorState.INVALIDATED.value, MonitorState.DATA_STALE.value}:
@@ -1120,6 +1355,54 @@ class LiveMonitorService:
                 setup.plan_stale_reasons_json = _dumps([])
                 if setup.chart_analysis_status == "STALE":
                     setup.chart_analysis_status = "MODIFIED" if setup.trigger_source in {"MANUAL", "VALIDATED_CHART_LLM"} else "AGREES"
+            evaluation["evaluated_at"] = current_time
+            historical_creation = _loads(setup.planner_baseline_json).get("historical_context_at_creation") or {}
+            evaluation["rule_version"] = setup.rule_version
+            evaluation["learning_profile_version"] = historical_creation.get("profile_version")
+            evaluation["learning_profile_version_id"] = historical_creation.get("profile_version_id")
+            evaluation["llm_prompt_version"] = PROMPT_VERSION
+            learned_adjustments = learned_adjustment_payloads(db, setup.id)
+            score_breakdown = adjustment_breakdown(
+                setup.setup_quality_score,
+                learned_adjustments,
+                self.config.max_historical_score_adjustment,
+            )
+            evaluation["historical_context"] = {
+                "profile": (_loads(setup.planner_baseline_json).get("historical_context_at_creation") or {}),
+                "learned_adjustments": learned_adjustments,
+                "recommendation_breakdown": score_breakdown,
+            }
+            evaluation["base_deterministic_state"] = evaluation["state"]
+            prefers_retest = any(
+                item.get("adjustment_type") == "CONFIRMATION_PREFERENCE"
+                and item.get("evidence_strength") in {"MODERATE", "STRONG"}
+                for item in learned_adjustments
+            )
+            retest_held = str(evaluation.get("retest_result") or "").upper() in {"HELD", "SUCCESS", "PASSED"}
+            hard_state = evaluation["state"] in {
+                MonitorState.INVALIDATED.value, MonitorState.DATA_STALE.value,
+                MonitorState.PLAN_STALE.value, MonitorState.MISSED.value,
+            }
+            if (
+                not hard_state and prefers_retest and not retest_held and attempt_count == 0
+                and evaluation["state"] in {MonitorState.APPROVED.value, MonitorState.STRONGLY_CONFIRMED.value}
+            ):
+                evaluation["state"] = MonitorState.CONFIRMING.value
+                evaluation["historical_recommendation"] = "WAIT_FOR_RETEST"
+                evaluation["historical_adjustment_reason"] = (
+                    "Evidence-qualified comparable setups favor break/retest confirmation over the first touch."
+                )
+                evaluation["manual_order_plan"] = None
+            else:
+                evaluation["historical_recommendation"] = "NO_STATE_OVERRIDE"
+            persist_completed_bars(
+                db, watch=watch, setup=setup, timeframe="1m",
+                bars=bars_1m, evaluation=evaluation,
+            )
+            persist_completed_bars(
+                db, watch=watch, setup=setup, timeframe="5m",
+                bars=bars_5m, evaluation=evaluation,
+            )
             previous = watch.state
             watch.state = evaluation["state"]
             watch.current_price = evaluation.get("current_price")
@@ -1161,6 +1444,13 @@ class LiveMonitorService:
                 setup.invalidated_at = current_time
                 setup.invalidation_price = evaluation.get("current_price")
                 setup.invalidation_reason = "Structural invalidation level lost"
+            if previous != watch.state:
+                db.add(MonitorDecisionSnapshot(
+                    id=_id(), watch_id=watch.id, setup_id=setup.id,
+                    attempt_id=attempt.id if attempt else None, ticker=watch.ticker,
+                    snapshot_type=watch.state, payload_json=_dumps(evaluation),
+                ))
+                self._record_shadow_rule_evaluations(db, watch, setup, evaluation)
             if previous != watch.state and watch.state in {
                 MonitorState.APPROVED.value,
                 MonitorState.STRONGLY_CONFIRMED.value,
@@ -1168,11 +1458,6 @@ class LiveMonitorService:
                 MonitorState.MISSED.value,
                 MonitorState.REJECTED_BREAKOUT.value,
             }:
-                db.add(MonitorDecisionSnapshot(
-                    id=_id(), watch_id=watch.id, setup_id=setup.id,
-                    attempt_id=attempt.id if attempt else None, ticker=watch.ticker,
-                    snapshot_type=watch.state, payload_json=_dumps(evaluation),
-                ))
                 profile = self._profile_for(db, setup, persist=True)
                 self._maybe_generate_observation(db, setup, profile)
             if previous != watch.state and watch.state in {MonitorState.APPROVED.value, MonitorState.STRONGLY_CONFIRMED.value}:
@@ -1196,6 +1481,8 @@ class LiveMonitorService:
                 MonitorState.PLAN_STALE.value,
             }:
                 chart_review_type = "CHART_STRUCTURE_REVIEW"
+            elif level_sanity.get("review_required"):
+                chart_review_type = "CHART_LEVEL_REVIEW"
         if chart_review_type:
             self._schedule_chart_review(watch_id, chart_review_type, str(payload.get("state") or "setup_reanalyzed"))
         return payload
@@ -1275,9 +1562,16 @@ class LiveMonitorService:
                 "reason_summary": "Fresh reanalysis is required; stale levels were not sent to the LLM.",
             }
         baseline = _loads(setup.planner_baseline_json)
-        profile = self._profile_for(db, setup)
+        context = load_historical_context(db, setup, self.config)
+        profile = context.get("ticker_profile") or self._profile_for(db, setup)
         similar = self._similar_cases(db, setup, attempt)
-        packet = build_advisory_packet(baseline=baseline, evaluation=evaluation, historical_profile=profile, similar_cases=similar)
+        packet = build_advisory_packet(
+            baseline=baseline, evaluation=evaluation,
+            historical_profile=profile, similar_cases=similar,
+            learned_adjustments=learned_adjustment_payloads(db, setup.id),
+            broader_profiles=context.get("broader_profiles") or {},
+            past_postmortems=past_postmortems(db, setup.ticker),
+        )
         review = review_advisory_packet(packet, self._advisory_provider)
         row = LLMAdvisoryReview(
             id=_id(), watch_id=watch.id, setup_id=setup.id,
@@ -1392,7 +1686,9 @@ class LiveMonitorService:
             setup = db.query(MonitorSetup).filter(MonitorSetup.ticker == ticker.upper()).order_by(MonitorSetup.created_at.desc()).first()
             if setup is None:
                 return {"ticker": ticker.upper(), "observation_count": 0, "evidence_strength": "INSUFFICIENT", "statistics": {}}
-            return self._profile_for(db, setup)
+            payload = self._profile_for(db, setup, persist=True)
+            db.commit()
+            return payload
 
     def learning_overview(self) -> dict[str, Any]:
         with SessionLocal() as db:
@@ -1400,11 +1696,54 @@ class LiveMonitorService:
             observations = db.query(LearningObservation).order_by(LearningObservation.created_at.desc()).limit(100).all()
             proposals = db.query(LearningProposal).order_by(LearningProposal.created_at.desc()).limit(100).all()
             rules = db.query(MonitorRuleVersion).order_by(MonitorRuleVersion.created_at.desc()).limit(50).all()
+            profile_versions = db.query(BehaviorProfileVersion).order_by(BehaviorProfileVersion.created_at.desc()).limit(200).all()
+            jobs = db.query(LearningJobRun).order_by(LearningJobRun.started_at.desc()).limit(50).all()
+            shadows = db.query(ShadowRuleEvaluation).order_by(ShadowRuleEvaluation.created_at.desc()).limit(100).all()
+            postmortems = db.query(LLMDecisionPostmortem).order_by(LLMDecisionPostmortem.created_at.desc()).limit(200).all()
+            level_revisions = db.query(LevelRevision).all()
+            helpful = sum("LLM_CORRECTION_HELPFUL" in _loads(row.rationale_tags_json, []) for row in postmortems)
             return {
                 "profiles": [{"id": row.id, "scope_type": row.scope_type, "scope_value": row.scope_value, "observation_count": row.observation_count, "evidence_strength": row.evidence_strength, "statistics": _loads(row.statistics_json), "updated_at": row.updated_at} for row in profiles],
                 "observations": [{"id": row.id, "scope_type": row.scope_type, "scope_value": row.scope_value, "observation_type": row.observation_type, "summary": row.summary, "sample_size": row.sample_size, "evidence_strength": row.evidence_strength, "evidence": _loads(row.evidence_json), "created_at": row.created_at} for row in observations],
                 "proposals": [self._proposal_payload(row) for row in proposals],
                 "rule_versions": [{"id": row.id, "version": row.version, "status": row.status, "proposal_id": row.proposal_id, "rules": _loads(row.rules_json), "approved_at": row.approved_at} for row in rules],
+                "profile_versions": [{
+                    "id": row.id, "scope_type": row.scope_type, "scope_value": row.scope_value,
+                    "version": row.version, "observation_count": row.observation_count,
+                    "weighted_observation_count": row.weighted_observation_count,
+                    "evidence_strength": row.evidence_strength, "reliability": row.reliability,
+                    "formula_version": row.formula_version, "source_cutoff_at": row.source_cutoff_at,
+                    "created_at": row.created_at,
+                } for row in profile_versions],
+                "learning_jobs": [{
+                    "id": row.id, "trading_date": row.trading_date, "status": row.status,
+                    "summaries_finalized": row.summaries_finalized,
+                    "profiles_updated": row.profiles_updated,
+                    "observations_created": row.observations_created,
+                    "details": _loads(row.details_json), "started_at": row.started_at,
+                    "completed_at": row.completed_at,
+                } for row in jobs],
+                "paper_tests": [{
+                    "id": row.id, "proposal_id": row.proposal_id,
+                    "production_decision": row.production_decision,
+                    "shadow_decision": row.shadow_decision,
+                    "production_outcome": row.production_outcome,
+                    "shadow_hypothetical_outcome": row.shadow_hypothetical_outcome,
+                    "resolved_at": row.resolved_at,
+                    "evidence": _loads(row.evidence_json), "created_at": row.created_at,
+                } for row in shadows],
+                "llm_performance": {
+                    "evaluated_reviews": len(postmortems),
+                    "aligned_with_outcome": helpful,
+                    "alignment_rate": None if not postmortems else round(helpful / len(postmortems), 4),
+                },
+                "level_accuracy": {
+                    "revision_count": len(level_revisions),
+                    "validated_count": sum(row.validation_result == "VALIDATED" for row in level_revisions),
+                    "planner_active_count": sum(row.source == "PLANNER" for row in level_revisions),
+                    "chart_llm_active_count": sum(row.source == "VALIDATED_CHART_LLM" for row in level_revisions),
+                    "manual_active_count": sum(row.source == "MANUAL" for row in level_revisions),
+                },
             }
 
     def create_learning_observation(self, ticker: str) -> dict[str, Any]:
@@ -1468,13 +1807,16 @@ class LiveMonitorService:
 
     def decide_proposal(self, proposal_id: str, *, decision: str, decided_by: str = "user") -> dict[str, Any]:
         normalized = decision.strip().upper()
-        if normalized not in {"APPROVE", "REJECT", "PAPER_TEST"}:
-            raise ValueError("decision must be APPROVE, REJECT, or PAPER_TEST")
+        if normalized not in {"APPROVE", "REJECT", "PAPER_TEST", "LATER"}:
+            raise ValueError("decision must be APPROVE, REJECT, PAPER_TEST, or LATER")
         with SessionLocal() as db:
             proposal = db.get(LearningProposal, proposal_id)
             if proposal is None:
                 raise LookupError("Proposal not found")
-            proposal.status = {"APPROVE": "APPROVED", "REJECT": "REJECTED", "PAPER_TEST": "PAPER_TESTING"}[normalized]
+            proposal.status = {
+                "APPROVE": "APPROVED", "REJECT": "REJECTED",
+                "PAPER_TEST": "PAPER_TESTING", "LATER": "DEFERRED",
+            }[normalized]
             proposal.decided_at = _utcnow()
             proposal.decided_by = decided_by
             if normalized == "APPROVE":
@@ -1492,46 +1834,177 @@ class LiveMonitorService:
             db.commit()
             return self._proposal_payload(proposal)
 
+    @staticmethod
+    def _proposal_matches_setup(proposal: LearningProposal, setup: MonitorSetup) -> bool:
+        scope = str(proposal.scope_type or "").lower()
+        value = str(proposal.scope_value or "")
+        if scope == "ticker":
+            return value.upper() == setup.ticker.upper()
+        if scope == "setup_type":
+            return value == str(setup.setup_type or "")
+        if scope == "sector":
+            return value == str(setup.sector or "")
+        if scope == "market_regime":
+            return value == str(setup.market_regime or "")
+        return scope in {"global", "all"}
+
+    def _record_shadow_rule_evaluations(
+        self,
+        db: Session,
+        watch: LiveWatch,
+        setup: MonitorSetup,
+        evaluation: dict[str, Any],
+    ) -> None:
+        """Evaluate supported paper rules without changing the production state."""
+        proposals = db.query(LearningProposal).filter(LearningProposal.status == "PAPER_TESTING").all()
+        production = str(evaluation.get("state") or watch.state)
+        retest_held = str(evaluation.get("retest_result") or "").upper() in {"HELD", "SUCCESS", "PASSED"}
+        for proposal in proposals:
+            if not self._proposal_matches_setup(proposal, setup):
+                continue
+            change = _loads(proposal.proposed_change_json)
+            preferred = str(
+                change.get("preferred_confirmation")
+                or change.get("confirmation_preference")
+                or ""
+            ).upper()
+            requires_retest = preferred == "BREAK_RETEST" or number(change.get("retest_weight")) is not None
+            shadow = production
+            if (
+                requires_retest
+                and production in {MonitorState.APPROVED.value, MonitorState.STRONGLY_CONFIRMED.value}
+                and not retest_held
+            ):
+                shadow = "WAIT_FOR_RETEST"
+            db.add(ShadowRuleEvaluation(
+                id=_id(), proposal_id=proposal.id, watch_id=watch.id, setup_id=setup.id,
+                production_decision=production, shadow_decision=shadow,
+                evidence_json=_dumps({
+                    "proposed_change": change,
+                    "production_unchanged": True,
+                    "evaluated_at": evaluation.get("evaluated_at"),
+                    "market_snapshot_id": setup.market_snapshot_id,
+                    "price_confirmation": evaluation.get("price_confirmation"),
+                    "volume_confirmation": evaluation.get("volume_confirmation"),
+                    "retest_result": evaluation.get("retest_result"),
+                    "hard_blockers": evaluation.get("hard_blockers") or [],
+                }),
+                created_at=_as_datetime(evaluation.get("evaluated_at")) or _utcnow(),
+            ))
+
     def _profile_for(self, db: Session, setup: MonitorSetup, *, persist: bool = False) -> dict[str, Any]:
-        attempts = db.query(ConfirmationAttempt).filter(ConfirmationAttempt.ticker == setup.ticker).all()
-        trades = db.query(ManualMonitorTrade).filter(ManualMonitorTrade.ticker == setup.ticker, ManualMonitorTrade.status == "CLOSED").all()
+        profile = refresh_profile(
+            db, scope_type="ticker", scope_value=setup.ticker,
+            config=self.config, force_version=False,
+        )
         chart_reviews = db.query(ChartStructureReview).filter(ChartStructureReview.ticker == setup.ticker).all()
         chart_decisions = db.query(ChartLevelDecision).filter(ChartLevelDecision.ticker == setup.ticker).all()
-        attempt_rows = [{"outcome": row.outcome, "confirmation_method": row.confirmation_method, "attempt_number": row.attempt_number} for row in attempts]
-        trade_rows = [{"r_multiple": row.r_multiple, "mfe_pct": row.mfe_pct, "mae_pct": row.mae_pct} for row in trades]
-        statistics = aggregate_attempts(attempt_rows, trade_rows)
-        setup_samples = db.query(ConfirmationAttempt).join(MonitorSetup, ConfirmationAttempt.setup_id == MonitorSetup.id).filter(MonitorSetup.setup_type == setup.setup_type).count() if setup.setup_type else 0
-        sector_samples = db.query(ConfirmationAttempt).join(MonitorSetup, ConfirmationAttempt.setup_id == MonitorSetup.id).filter(MonitorSetup.sector == setup.sector).count() if setup.sector else 0
-        statistics["hierarchical_weights"] = hierarchical_weights(ticker_samples=len(attempts), setup_samples=setup_samples, sector_samples=sector_samples)
+        level_revisions = db.query(LevelRevision).filter(LevelRevision.ticker == setup.ticker).all()
+        statistics = profile["statistics"]
         statistics["chart_level_history"] = {
             "review_count": len(chart_reviews),
             "disagreement_count": sum(row.status == "DISAGREEMENT" for row in chart_reviews),
             "validation_failure_count": sum(row.status == "VALIDATION_FAILED" for row in chart_reviews),
             "accepted_validated_count": sum(row.decision == "ACCEPT_VALIDATED" for row in chart_decisions),
+            "auto_corrected_count": sum(row.decision == "AUTO_ACCEPT_VALIDATED" for row in chart_decisions),
             "kept_planner_count": sum(row.decision == "KEEP_PLANNER" for row in chart_decisions),
             "manual_override_count": sum(row.decision == "EDIT_MANUALLY" for row in chart_decisions),
+            "level_revision_count": len(level_revisions),
         }
-        payload = {"ticker": setup.ticker, "observation_count": len(attempts), "evidence_strength": statistics["evidence_strength"], "statistics": statistics}
-        if persist:
-            row = db.query(StockBehaviorProfile).filter(StockBehaviorProfile.scope_type == "ticker", StockBehaviorProfile.scope_value == setup.ticker).one_or_none()
-            if row is None:
-                row = StockBehaviorProfile(id=_id(), scope_type="ticker", scope_value=setup.ticker, statistics_json="{}")
-                db.add(row)
-            row.observation_count = len(attempts)
-            row.evidence_strength = statistics["evidence_strength"]
-            row.statistics_json = _dumps(statistics)
-            row.updated_at = _utcnow()
-        return payload
+        profile["ticker"] = setup.ticker
+        profile["statistics"] = statistics
+        return profile
 
     def _similar_cases(self, db: Session, setup: MonitorSetup, attempt: ConfirmationAttempt | None, limit: int = 8) -> list[dict]:
-        rows = db.query(ConfirmationAttempt, MonitorSetup).join(MonitorSetup, ConfirmationAttempt.setup_id == MonitorSetup.id).filter(ConfirmationAttempt.setup_id != setup.id).limit(300).all()
-        current = {"ticker": setup.ticker, "setup_type": setup.setup_type, "sector": setup.sector, "market_regime": setup.market_regime, "confirmation_method": attempt.confirmation_method if attempt else None, "attempt_number": attempt.attempt_number if attempt else None}
+        effective_limit = max(1, min(limit or self.config.similar_case_count, self.config.similar_case_count))
+        baseline = _loads(setup.planner_baseline_json)
+        levels = _loads(setup.active_levels_json)
+        current_price = number(baseline.get("current_price")) or setup.plan_reference_price
+        atr = number(levels.get("atr")) or number(baseline.get("atr"))
+        primary = number(levels.get("primary_entry_trigger"))
+        support = number(levels.get("optional_support_level"))
+        current = {
+            "ticker": setup.ticker, "broader_structure": setup.broader_structure,
+            "setup_type": setup.setup_type, "execution_structure": setup.execution_structure,
+            "sector": setup.sector, "market_regime": setup.market_regime,
+            "confirmation_method": attempt.confirmation_method if attempt else None,
+            "attempt_number": attempt.attempt_number if attempt else None,
+            "atr_pct": baseline.get("atr_pct"), "rsi": baseline.get("rsi"),
+            "distance_from_support_atr": None if not current_price or not atr or support is None else (current_price - support) / atr,
+            "primary_trigger_distance_atr": None if not current_price or not atr or primary is None else (primary - current_price) / atr,
+            "rvol_5m": attempt.rvol_5m if attempt else None,
+            "qqq_condition": baseline.get("qqq_context"),
+            "sector_condition": baseline.get("sector_context"),
+        }
+        rows = db.query(ConfirmationAttempt, MonitorSetup).join(
+            MonitorSetup, ConfirmationAttempt.setup_id == MonitorSetup.id,
+        ).filter(ConfirmationAttempt.setup_id != setup.id).order_by(
+            ConfirmationAttempt.started_at.desc(),
+        ).limit(500).all()
         cases = []
         for candidate, candidate_setup in rows:
-            case = {"attempt_id": candidate.id, "ticker": candidate.ticker, "setup_type": candidate_setup.setup_type, "sector": candidate_setup.sector, "market_regime": candidate_setup.market_regime, "chart_analysis_status": candidate_setup.chart_analysis_status, "level_sources": _loads(candidate_setup.level_sources_json), "confirmation_method": candidate.confirmation_method, "attempt_number": candidate.attempt_number, "outcome": candidate.outcome}
-            case.update(similar_case_score(current, case))
+            evidence = _loads(candidate.evidence_json)
+            candidate_baseline = _loads(candidate_setup.planner_baseline_json)
+            recommendation = db.query(RecommendationOutcome).filter(
+                RecommendationOutcome.attempt_id == candidate.id,
+            ).order_by(RecommendationOutcome.created_at.desc()).first()
+            case = {
+                "attempt_id": candidate.id, "ticker": candidate.ticker,
+                "broader_structure": candidate_setup.broader_structure,
+                "setup_type": candidate_setup.setup_type,
+                "execution_structure": candidate_setup.execution_structure,
+                "sector": candidate_setup.sector, "market_regime": candidate_setup.market_regime,
+                "chart_analysis_status": candidate_setup.chart_analysis_status,
+                "level_sources": _loads(candidate_setup.level_sources_json),
+                "confirmation_method": candidate.confirmation_method,
+                "attempt_number": candidate.attempt_number, "outcome": candidate.outcome,
+                "r_multiple": recommendation.r_multiple if recommendation else None,
+                "rvol_5m": candidate.rvol_5m, "atr_pct": candidate_baseline.get("atr_pct"),
+                "rsi": candidate_baseline.get("rsi"),
+                "distance_from_support_atr": evidence.get("distance_from_support_atr"),
+                "primary_trigger_distance_atr": evidence.get("distance_to_trigger_atr"),
+                "qqq_condition": candidate_baseline.get("qqq_context"),
+                "sector_condition": candidate_baseline.get("sector_context"),
+                "occurred_at": candidate.ended_at or candidate.started_at,
+            }
+            case.update(similar_case_score(
+                current, case,
+                weights=self.config.similarity_weights,
+                continuous_weights=self.config.similarity_continuous,
+            ))
             cases.append(case)
-        return sorted(cases, key=lambda row: row["similarity_score"], reverse=True)[:limit]
+        daily_rows = db.query(MonitorDailySummary).filter(
+            MonitorDailySummary.setup_id != setup.id,
+            MonitorDailySummary.number_of_trigger_attempts == 0,
+        ).order_by(MonitorDailySummary.trading_date.desc()).limit(200).all()
+        for summary in daily_rows:
+            indicators = _loads(summary.indicators_json)
+            context = _loads(summary.context_json)
+            decisions = _loads(summary.decisions_json)
+            outcome = _loads(summary.outcome_json)
+            case = {
+                "daily_summary_id": summary.id, "ticker": summary.ticker,
+                "broader_structure": summary.broader_structure,
+                "setup_type": summary.setup_type,
+                "execution_structure": summary.execution_structure,
+                "sector": summary.sector, "market_regime": summary.market_regime,
+                "confirmation_method": decisions.get("confirmation_method") or "NO_TRIGGER",
+                "attempt_number": 0,
+                "outcome": outcome.get("recommendation_outcome") or summary.highest_state_reached,
+                "r_multiple": summary.recommendation_r_multiple,
+                "atr_pct": indicators.get("atr_pct"), "rsi": indicators.get("rsi"),
+                "rvol_5m": indicators.get("rvol_5m"),
+                "qqq_condition": context.get("qqq_context"),
+                "sector_condition": context.get("sector_context"),
+                "occurred_at": summary.finalized_at,
+            }
+            case.update(similar_case_score(
+                current, case,
+                weights=self.config.similarity_weights,
+                continuous_weights=self.config.similarity_continuous,
+            ))
+            cases.append(case)
+        return sorted(cases, key=lambda row: row["similarity_score"], reverse=True)[:effective_limit]
 
     def _update_open_manual_trades(self, db: Session, watch: LiveWatch, evaluation: dict) -> None:
         current = evaluation.get("current_price")
@@ -1644,6 +2117,30 @@ class LiveMonitorService:
             ),
         }
         if include_detail and setup:
+            adjustment_rows = learned_adjustment_payloads(db, setup.id)
+            profile_payload = self._profile_for(db, setup)
+            score_breakdown = adjustment_breakdown(
+                setup.setup_quality_score, adjustment_rows,
+                self.config.max_historical_score_adjustment,
+            )
+            revision_rows = db.query(LevelRevision).filter(
+                LevelRevision.setup_id == setup.id,
+            ).order_by(LevelRevision.created_at.desc()).all()
+            latest_revision_by_name: dict[str, LevelRevision] = {}
+            for revision in revision_rows:
+                latest_revision_by_name.setdefault(revision.level_name, revision)
+            active_level_metadata = {
+                name: {
+                    "price": display_levels.get(name),
+                    "level_type": LEVEL_ROLES.get(name, name.upper()),
+                    "source": (_loads(setup.level_sources_json).get(name) or "PLANNER"),
+                    "reason": latest_revision_by_name[name].reason if name in latest_revision_by_name else "Current planner/monitor level",
+                    "confidence": latest_revision_by_name[name].confidence if name in latest_revision_by_name else None,
+                    "created_at": latest_revision_by_name[name].created_at if name in latest_revision_by_name else setup.created_at,
+                    "market_snapshot_id": setup.market_snapshot_id,
+                }
+                for name in LEVEL_NAMES if number(display_levels.get(name)) is not None
+            }
             payload.update({
                 "planner_baseline": _loads(setup.planner_baseline_json),
                 "planner_levels": {} if plan_stale else _loads(setup.planner_levels_json),
@@ -1663,7 +2160,19 @@ class LiveMonitorService:
                 "chart_level_decisions": [self._chart_level_decision_payload(row) for row in db.query(ChartLevelDecision).filter(ChartLevelDecision.setup_id == setup.id).order_by(ChartLevelDecision.created_at.desc()).all()],
                 "manual_trades": [self._trade_payload(row) for row in db.query(ManualMonitorTrade).filter(ManualMonitorTrade.setup_id == setup.id).order_by(ManualMonitorTrade.created_at.desc()).all()],
                 "journal": [self._event_payload(row) for row in db.query(MonitorEvent).filter(MonitorEvent.watch_id == watch.id).order_by(MonitorEvent.created_at.desc()).limit(200).all()],
-                "historical_profile": self._profile_for(db, setup),
+                "historical_profile": profile_payload,
+                "learned_adjustments": adjustment_rows,
+                "recommendation_breakdown": score_breakdown,
+                "similar_historical_cases": self._similar_cases(db, setup, None),
+                "past_llm_postmortems": past_postmortems(db, setup.ticker),
+                "active_level_metadata": active_level_metadata,
+                "level_revisions": [self._level_revision_payload(row) for row in revision_rows[:200]],
+                "daily_summaries": [
+                    self._daily_summary_payload(row)
+                    for row in db.query(MonitorDailySummary).filter(
+                        MonitorDailySummary.setup_id == setup.id,
+                    ).order_by(MonitorDailySummary.trading_date.desc()).limit(30).all()
+                ],
                 "setup_history": [
                     {
                         "setup_id": row.id,
@@ -1712,6 +2221,8 @@ class LiveMonitorService:
 
     @staticmethod
     def _chart_review_payload(row: ChartStructureReview) -> dict[str, Any]:
+        deterministic_input = _loads(row.deterministic_input_json)
+        validation = _loads(row.validation_json)
         return {
             "id": row.id,
             "review_type": row.review_type,
@@ -1724,7 +2235,10 @@ class LiveMonitorService:
             "llm_output": _loads(row.llm_output_json),
             "llm_proposed_levels": _loads(row.llm_proposed_levels_json),
             "validated_levels": _loads(row.validated_levels_json),
-            "validation": _loads(row.validation_json),
+            "validation": validation,
+            "level_sanity": deterministic_input.get("level_sanity") or {},
+            "pricing_anomalies": deterministic_input.get("pricing_anomalies") or [],
+            "historical_profile_version": ((deterministic_input.get("historical_profile") or {}).get("profile_version")),
             "decision": row.decision,
             "confidence": row.confidence,
             "reason_summary": row.reason_summary,
@@ -1759,6 +2273,45 @@ class LiveMonitorService:
             "level_sources": _loads(row.level_sources_json),
             "decided_by": row.decided_by,
             "created_at": row.created_at,
+        }
+
+    @staticmethod
+    def _level_revision_payload(row: LevelRevision) -> dict[str, Any]:
+        return {
+            "id": row.id, "chart_review_id": row.chart_review_id,
+            "market_snapshot_id": row.market_snapshot_id,
+            "level_name": row.level_name, "level_role": row.level_role,
+            "planner_price": row.planner_price, "llm_proposed_price": row.llm_proposed_price,
+            "validated_price": row.validated_price, "manual_price": row.manual_price,
+            "final_active_price": row.final_active_price, "source": row.source,
+            "validation_result": row.validation_result, "confidence": row.confidence,
+            "reason": row.reason, "anomaly_flags": _loads(row.anomaly_flags_json, []),
+            "outcome": _loads(row.outcome_json), "created_at": row.created_at,
+        }
+
+    @staticmethod
+    def _daily_summary_payload(row: MonitorDailySummary) -> dict[str, Any]:
+        return {
+            "id": row.id, "trading_date": row.trading_date,
+            "ticker": row.ticker, "setup_id": row.setup_id,
+            "open": row.open_price, "high": row.high_price,
+            "low": row.low_price, "close": row.close_price,
+            "starting_monitor_price": row.starting_monitor_price,
+            "ending_monitor_price": row.ending_monitor_price,
+            "broader_structure": row.broader_structure, "setup_type": row.setup_type,
+            "execution_structure": row.execution_structure, "market_regime": row.market_regime,
+            "levels": _loads(row.levels_json), "indicators": _loads(row.indicators_json),
+            "context": _loads(row.context_json), "decisions": _loads(row.decisions_json),
+            "outcome": _loads(row.outcome_json),
+            "data_quality_flags": _loads(row.data_quality_flags_json, []),
+            "number_of_trigger_attempts": row.number_of_trigger_attempts,
+            "number_of_rejections": row.number_of_rejections,
+            "highest_state_reached": row.highest_state_reached,
+            "mfe_atr": row.mfe_atr, "mae_atr": row.mae_atr,
+            "recommendation_r_multiple": row.recommendation_r_multiple,
+            "actual_trade_executed": row.actual_trade_executed,
+            "actual_trade_r_multiple": row.actual_trade_r_multiple,
+            "finalized_at": row.finalized_at,
         }
 
     @staticmethod

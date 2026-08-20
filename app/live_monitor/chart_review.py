@@ -53,10 +53,10 @@ CHART_REVIEW_SCHEMA: dict[str, Any] = {
                         "properties": {"price": {"type": ["number", "null"]}, "reason": {"type": "string"}},
                         "required": ["price", "reason"],
                     }
-                    for name in ("near_confirmation", "primary_entry_trigger", "strong_confirmation", "major_trend_repair", "structural_invalidation")
+                    for name in ("near_confirmation", "primary_entry_trigger", "strong_confirmation", "major_trend_repair", "structural_invalidation", "suggested_stop")
                 },
             },
-            "required": ["support_zone", "near_confirmation", "primary_entry_trigger", "strong_confirmation", "major_trend_repair", "structural_invalidation"],
+            "required": ["support_zone", "near_confirmation", "primary_entry_trigger", "strong_confirmation", "major_trend_repair", "structural_invalidation", "suggested_stop"],
         },
         "targets": {
             "type": "object",
@@ -68,9 +68,9 @@ CHART_REVIEW_SCHEMA: dict[str, Any] = {
                     "properties": {"price": {"type": ["number", "null"]}, "reason": {"type": "string"}},
                     "required": ["price", "reason"],
                 }
-                for name in ("tp1", "tp2", "tp3")
+                for name in ("tp1", "tp2", "tp3", "stretch_target")
             },
-            "required": ["tp1", "tp2", "tp3"],
+            "required": ["tp1", "tp2", "tp3", "stretch_target"],
         },
         "planner_comparison": {
             "type": "object",
@@ -86,9 +86,14 @@ CHART_REVIEW_SCHEMA: dict[str, Any] = {
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "positive_factors": {"type": "array", "items": {"type": "string"}},
         "risk_factors": {"type": "array", "items": {"type": "string"}},
+        "rationale_tags": {"type": "array", "items": {"type": "string"}},
+        "historical_evidence_used": {"type": "array", "items": {"type": "string"}},
+        "historical_evidence_ignored": {"type": "array", "items": {"type": "string"}},
+        "suggested_level_changes": {"type": "array", "items": {"type": "string"}},
+        "planner_disagreements": {"type": "array", "items": {"type": "string"}},
         "reason_summary": {"type": "string"},
     },
-    "required": ["chart_assessment", "levels", "targets", "planner_comparison", "decision", "confidence", "positive_factors", "risk_factors", "reason_summary"],
+    "required": ["chart_assessment", "levels", "targets", "planner_comparison", "decision", "confidence", "positive_factors", "risk_factors", "rationale_tags", "historical_evidence_used", "historical_evidence_ignored", "suggested_level_changes", "planner_disagreements", "reason_summary"],
 }
 
 
@@ -124,9 +129,12 @@ CONFIRMED_TRADE_REVIEW_SCHEMA: dict[str, Any] = {
         },
         "positive_factors": {"type": "array", "items": {"type": "string"}},
         "risk_factors": {"type": "array", "items": {"type": "string"}},
+        "rationale_tags": {"type": "array", "items": {"type": "string"}},
+        "historical_evidence_used": {"type": "array", "items": {"type": "string"}},
+        "historical_evidence_ignored": {"type": "array", "items": {"type": "string"}},
         "reason_summary": {"type": "string"},
     },
-    "required": ["decision", "confidence", "chart_structure", "confirmation_assessment", "trade_geometry", "historical_assessment", "positive_factors", "risk_factors", "reason_summary"],
+    "required": ["decision", "confidence", "chart_structure", "confirmation_assessment", "trade_geometry", "historical_assessment", "positive_factors", "risk_factors", "rationale_tags", "historical_evidence_used", "historical_evidence_ignored", "reason_summary"],
 }
 
 
@@ -164,8 +172,9 @@ def openai_chart_provider(packet: dict[str, Any], *, model: str) -> dict[str, An
     review_type = packet.get("review_type") or "CHART_STRUCTURE_REVIEW"
     system_prompt = (
         "You review short-duration swing-trade charts. Exact numeric OHLCV values in the supplied JSON are authoritative. "
-        "Use images for structural interpretation only. Distinguish local confirmation from major trend repair. "
-        "Do not invent unsupported levels and do not force a trade."
+        "Use images for structural interpretation only. Distinguish support, near confirmation, primary entry, strong confirmation, "
+        "major trend repair, structural invalidation, executable stop, TP1/TP2/TP3, and stretch target. "
+        "Do not invent unsupported levels and do not force a trade. Explicitly state which supplied historical evidence was used or ignored."
         if review_type == "CHART_STRUCTURE_REVIEW"
         else
         "The deterministic monitor found possible price and volume confirmation. Review chart structure, confirmation quality, "
@@ -296,8 +305,12 @@ def review_chart_packet(
                     "price": candidates.get("invalidation_level"),
                     "reason": "Existing deterministic invalidation retained",
                 },
+                "suggested_stop": {
+                    "price": candidates.get("suggested_stop"),
+                    "reason": "Existing executable stop retained separately from invalidation",
+                },
             },
-            "targets": {name: {"price": candidates.get(name), "reason": "Existing planner target retained"} for name in ("tp1", "tp2", "tp3")},
+            "targets": {name: {"price": candidates.get(name), "reason": "Existing planner target retained"} for name in ("tp1", "tp2", "tp3", "stretch_target")},
             "planner_comparison": {
                 "agrees_with_primary_trigger": not candidates.get("planner_primary_reclassified_as_major_repair"),
                 "planner_trigger_issue": "Planner primary appears to be major trend repair" if candidates.get("planner_primary_reclassified_as_major_repair") else "No material trigger conflict detected",
@@ -307,6 +320,11 @@ def review_chart_packet(
             "confidence": 0.0,
             "positive_factors": [],
             "risk_factors": ["Multimodal model unavailable; deterministic review only"],
+            "rationale_tags": ["LLM_UNAVAILABLE"],
+            "historical_evidence_used": [],
+            "historical_evidence_ignored": ["No multimodal provider was available"],
+            "suggested_level_changes": [],
+            "planner_disagreements": [],
             "reason_summary": "Chart candidates were derived deterministically; no multimodal model was called.",
         }
         status = "DETERMINISTIC_FALLBACK"

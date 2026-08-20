@@ -65,6 +65,10 @@ class ProposalDecisionRequest(BaseModel):
     decided_by: str = "user"
 
 
+class LearningCycleRequest(BaseModel):
+    trading_date: str | None = None
+
+
 def _translate_error(exc: Exception) -> HTTPException:
     if isinstance(exc, LookupError):
         return HTTPException(status_code=404, detail=str(exc))
@@ -107,6 +111,14 @@ def journal(
 @router.get("/learning")
 def learning_overview(service: LiveMonitorService = Depends(get_live_monitor_service)):
     return service.learning_overview()
+
+
+@router.post("/learning/run")
+def run_learning_cycle(request: LearningCycleRequest, service: LiveMonitorService = Depends(get_live_monitor_service)):
+    try:
+        return service.run_learning_cycle(request.trading_date)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
 
 
 @router.post("/learning/observations")

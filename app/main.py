@@ -99,6 +99,11 @@ def _ensure_runtime_columns() -> None:
     }
     snapshot_cols = {"image_data_base64": "TEXT", "market_snapshot_id": "VARCHAR(80)"}
     review_cols = {"market_snapshot_id": "VARCHAR(80)"}
+    shadow_cols = {
+        "production_outcome": "VARCHAR(80)",
+        "shadow_hypothetical_outcome": "VARCHAR(80)",
+        "resolved_at": "TIMESTAMP",
+    }
     try:
         with engine.begin() as conn:
             dialect = conn.dialect.name
@@ -138,6 +143,13 @@ def _ensure_runtime_columns() -> None:
                 for col, col_type in review_cols.items():
                     if col not in review_existing:
                         conn.execute(text(f"ALTER TABLE chart_structure_reviews ADD COLUMN {col} {col_type}"))
+                shadow_existing = {
+                    row[1]
+                    for row in conn.execute(text("PRAGMA table_info(shadow_rule_evaluations)")).fetchall()
+                }
+                for col, col_type in shadow_cols.items():
+                    if col not in shadow_existing:
+                        conn.execute(text(f"ALTER TABLE shadow_rule_evaluations ADD COLUMN {col} {col_type}"))
                 return
 
             for col, col_type in required_cols.items():
@@ -150,6 +162,8 @@ def _ensure_runtime_columns() -> None:
                 conn.execute(text(f"ALTER TABLE chart_snapshots ADD COLUMN IF NOT EXISTS {col} {col_type}"))
             for col, col_type in review_cols.items():
                 conn.execute(text(f"ALTER TABLE chart_structure_reviews ADD COLUMN IF NOT EXISTS {col} {col_type}"))
+            for col, col_type in shadow_cols.items():
+                conn.execute(text(f"ALTER TABLE shadow_rule_evaluations ADD COLUMN IF NOT EXISTS {col} {col_type}"))
             if dialect == "postgresql":
                 conn.execute(
                     text(

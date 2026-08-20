@@ -89,6 +89,37 @@ class Settings(BaseSettings):
     LIVE_MONITOR_CHART_SNAPSHOT_DIR: str = "chart_snapshots"
     LIVE_MONITOR_CHART_MAX_BARS: int = 180
     LIVE_MONITOR_CHART_RETENTION_DAYS: int = 90
+    LIVE_MONITOR_LEVEL_AUTO_CORRECT_CONFIDENCE: float = 0.90
+    LIVE_MONITOR_LEVEL_AUTO_CORRECT_ENABLED: bool = True
+    LIVE_MONITOR_PRIMARY_MAX_DISTANCE_PCT: float = 0.06
+    LIVE_MONITOR_TARGET_REACHABILITY_ATR: float = 4.0
+    LIVE_MONITOR_LEARNING_RECENCY_HALF_LIFE_DAYS: float = 120.0
+    LIVE_MONITOR_LEARNING_TICKER_PRIOR_STRENGTH: float = 20.0
+    LIVE_MONITOR_LEARNING_SETUP_PRIOR_STRENGTH: float = 30.0
+    LIVE_MONITOR_LEARNING_SECTOR_PRIOR_STRENGTH: float = 40.0
+    LIVE_MONITOR_LEARNING_REGIME_PRIOR_STRENGTH: float = 40.0
+    LIVE_MONITOR_MAX_HISTORICAL_SCORE_ADJUSTMENT: float = 1.0
+    LIVE_MONITOR_MAX_RVOL_THRESHOLD_ADJUSTMENT: float = 0.25
+    LIVE_MONITOR_MAX_CHASE_ADJUSTMENT_PCT: float = 0.0025
+    LIVE_MONITOR_MAX_TARGET_EXPECTATION_ADJUSTMENT_ATR: float = 0.75
+    LIVE_MONITOR_SIMILAR_CASE_COUNT: int = 8
+    LIVE_MONITOR_EVIDENCE_THRESHOLDS: str = "8,15,30,60"
+    LIVE_MONITOR_SIMILARITY_WEIGHTS_JSON: str = (
+        '{"ticker":2.0,"broader_structure":1.25,"setup_type":2.0,'
+        '"execution_structure":1.5,"sector":0.75,"market_regime":1.0,'
+        '"confirmation_method":1.25,"attempt_number":0.5,'
+        '"qqq_condition":0.5,"sector_condition":0.5}'
+    )
+    LIVE_MONITOR_SIMILARITY_CONTINUOUS_JSON: str = (
+        '{"atr_pct":[1.0,0.03],"rsi":[0.75,25.0],'
+        '"distance_from_support_atr":[1.0,2.0],'
+        '"primary_trigger_distance_atr":[1.0,2.5],"rvol_5m":[1.0,1.5]}'
+    )
+    LIVE_MONITOR_PROFILE_REFRESH_HOUR_ET: int = 20
+    LIVE_MONITOR_PROFILE_REFRESH_MINUTE_ET: int = 15
+    LIVE_MONITOR_BAR_RETENTION_DAYS: int = 365
+    LIVE_MONITOR_PROPOSAL_MIN_EFFECT_R: float = 0.30
+    LIVE_MONITOR_PAPER_TEST_MIN_OBSERVATIONS: int = 20
 
     LIVE_TRADING_UNLOCKED: bool = False
     LIVE_TRADING_CONFIRMATION: str | None = None

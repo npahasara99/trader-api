@@ -596,6 +596,27 @@ class LLMAdvisoryReview(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class LLMDecisionPostmortem(Base):
+    """Outcome-time review linked to the immutable original LLM decision."""
+
+    __tablename__ = "llm_decision_postmortems"
+    __table_args__ = (UniqueConstraint("llm_review_id", name="uq_llm_postmortem_review"),)
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    llm_review_id: Mapped[str] = mapped_column(String(80), index=True)
+    watch_id: Mapped[str] = mapped_column(String(80), index=True)
+    setup_id: Mapped[str] = mapped_column(String(80), index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    outcome_type: Mapped[str] = mapped_column(String(40), index=True)
+    original_decision: Mapped[str] = mapped_column(String(20), index=True)
+    outcome_json: Mapped[str] = mapped_column(Text)
+    rationale_tags_json: Mapped[str] = mapped_column(Text)
+    lessons_json: Mapped[str] = mapped_column(Text)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    prompt_version: Mapped[str] = mapped_column(String(60))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class ManualMonitorTrade(Base):
     """User-reported trade record. This table is never a broker submission queue."""
 
@@ -656,6 +677,167 @@ class StockBehaviorProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class MonitorBarSummary(Base):
+    """A completed monitor bar retained for evidence without storing every quote poll."""
+
+    __tablename__ = "monitor_bar_summaries"
+    __table_args__ = (
+        UniqueConstraint("setup_id", "timeframe", "bar_timestamp", name="uq_monitor_bar_summary"),
+        Index("ix_monitor_bar_summaries_ticker_time", "ticker", "bar_timestamp"),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    watch_id: Mapped[str] = mapped_column(String(80), index=True)
+    setup_id: Mapped[str] = mapped_column(String(80), index=True)
+    market_snapshot_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(20), index=True)
+    bar_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    open_price: Mapped[float] = mapped_column(Float)
+    high_price: Mapped[float] = mapped_column(Float)
+    low_price: Mapped[float] = mapped_column(Float)
+    close_price: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    indicators_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    data_quality_flags_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class MonitorDailySummary(Base):
+    """Immutable finalized monitor-day evidence, including setups that never traded."""
+
+    __tablename__ = "monitor_daily_summaries"
+    __table_args__ = (
+        UniqueConstraint("setup_id", "trading_date", name="uq_monitor_daily_setup_date"),
+        Index("ix_monitor_daily_ticker_date", "ticker", "trading_date"),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    trading_date: Mapped[date] = mapped_column(Date, index=True)
+    watch_id: Mapped[str] = mapped_column(String(80), index=True)
+    setup_id: Mapped[str] = mapped_column(String(80), index=True)
+    market_snapshot_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    starting_monitor_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ending_monitor_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    broader_structure: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    setup_type: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    execution_structure: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    market_regime: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
+    sector: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    levels_json: Mapped[str] = mapped_column(Text)
+    indicators_json: Mapped[str] = mapped_column(Text)
+    context_json: Mapped[str] = mapped_column(Text)
+    decisions_json: Mapped[str] = mapped_column(Text)
+    outcome_json: Mapped[str] = mapped_column(Text)
+    data_quality_flags_json: Mapped[str] = mapped_column(Text)
+    number_of_trigger_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    number_of_rejections: Mapped[int] = mapped_column(Integer, default=0)
+    highest_state_reached: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    mfe_atr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mae_atr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recommendation_r_multiple: Mapped[float | None] = mapped_column(Float, nullable=True)
+    actual_trade_executed: Mapped[bool] = mapped_column(Boolean, default=False)
+    actual_trade_r_multiple: Mapped[float | None] = mapped_column(Float, nullable=True)
+    finalized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class BehaviorProfileVersion(Base):
+    """Append-only aggregate version so each decision can identify its historical prior."""
+
+    __tablename__ = "behavior_profile_versions"
+    __table_args__ = (
+        UniqueConstraint("scope_type", "scope_value", "version", name="uq_behavior_profile_version"),
+        Index("ix_behavior_profile_scope_created", "scope_type", "scope_value", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    profile_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    scope_type: Mapped[str] = mapped_column(String(40), index=True)
+    scope_value: Mapped[str] = mapped_column(String(160), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    observation_count: Mapped[int] = mapped_column(Integer, default=0)
+    weighted_observation_count: Mapped[float] = mapped_column(Float, default=0.0)
+    evidence_strength: Mapped[str] = mapped_column(String(30), default="INSUFFICIENT")
+    reliability: Mapped[float] = mapped_column(Float, default=0.0)
+    statistics_json: Mapped[str] = mapped_column(Text)
+    formula_version: Mapped[str] = mapped_column(String(60), default="historical-memory-v1")
+    source_cutoff_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class LearnedAdjustment(Base):
+    """Append-only, bounded interpretation change applied to one current setup."""
+
+    __tablename__ = "learned_adjustments"
+    __table_args__ = (Index("ix_learned_adjustments_setup_created", "setup_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    watch_id: Mapped[str] = mapped_column(String(80), index=True)
+    setup_id: Mapped[str] = mapped_column(String(80), index=True)
+    market_snapshot_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    adjustment_type: Mapped[str] = mapped_column(String(80), index=True)
+    base_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    learned_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adjustment_value: Mapped[float] = mapped_column(Float, default=0.0)
+    adjustment_strength: Mapped[float] = mapped_column(Float, default=0.0)
+    evidence_strength: Mapped[str] = mapped_column(String(30), default="INSUFFICIENT")
+    sample_size: Mapped[int] = mapped_column(Integer, default=0)
+    weighted_sample_size: Mapped[float] = mapped_column(Float, default=0.0)
+    reason: Mapped[str] = mapped_column(Text)
+    supporting_stats_json: Mapped[str] = mapped_column(Text)
+    bounds_json: Mapped[str] = mapped_column(Text)
+    profile_version_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class LevelRevision(Base):
+    """Append-only pricing lineage from planner through validation to the active level."""
+
+    __tablename__ = "level_revisions"
+    __table_args__ = (Index("ix_level_revisions_setup_level", "setup_id", "level_name", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    watch_id: Mapped[str] = mapped_column(String(80), index=True)
+    setup_id: Mapped[str] = mapped_column(String(80), index=True)
+    chart_review_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    market_snapshot_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    level_name: Mapped[str] = mapped_column(String(60), index=True)
+    level_role: Mapped[str] = mapped_column(String(60), index=True)
+    planner_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    llm_proposed_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    validated_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    manual_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_active_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(40), index=True)
+    validation_result: Mapped[str] = mapped_column(String(40), index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    anomaly_flags_json: Mapped[str] = mapped_column(Text)
+    outcome_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class LearningJobRun(Base):
+    __tablename__ = "learning_job_runs"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    trading_date: Mapped[date] = mapped_column(Date, index=True)
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    summaries_finalized: Mapped[int] = mapped_column(Integer, default=0)
+    profiles_updated: Mapped[int] = mapped_column(Integer, default=0)
+    observations_created: Mapped[int] = mapped_column(Integer, default=0)
+    details_json: Mapped[str] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class LearningObservation(Base):
     __tablename__ = "learning_observations"
 
@@ -708,7 +890,10 @@ class ShadowRuleEvaluation(Base):
     setup_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     production_decision: Mapped[str] = mapped_column(String(40))
     shadow_decision: Mapped[str] = mapped_column(String(40))
+    production_outcome: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    shadow_hypothetical_outcome: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     evidence_json: Mapped[str] = mapped_column(Text)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 

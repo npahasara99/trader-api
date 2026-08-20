@@ -1,8 +1,52 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import json
 
 from app.settings import settings
+
+
+DEFAULT_SIMILARITY_WEIGHTS = {
+    "ticker": 2.0, "broader_structure": 1.25, "setup_type": 2.0,
+    "execution_structure": 1.5, "sector": 0.75, "market_regime": 1.0,
+    "confirmation_method": 1.25, "attempt_number": 0.5,
+    "qqq_condition": 0.5, "sector_condition": 0.5,
+}
+DEFAULT_SIMILARITY_CONTINUOUS = {
+    "atr_pct": (1.0, 0.03), "rsi": (0.75, 25.0),
+    "distance_from_support_atr": (1.0, 2.0),
+    "primary_trigger_distance_atr": (1.0, 2.5), "rvol_5m": (1.0, 1.5),
+}
+
+
+def _json_mapping(raw: str, fallback: dict[str, float]) -> dict[str, float]:
+    try:
+        parsed = json.loads(raw)
+        return {str(key): max(0.0, float(value)) for key, value in parsed.items()}
+    except (TypeError, ValueError, AttributeError):
+        return dict(fallback)
+
+
+def _continuous_mapping(raw: str) -> dict[str, tuple[float, float]]:
+    try:
+        parsed = json.loads(raw)
+        return {
+            str(key): (max(0.0, float(value[0])), max(1e-9, float(value[1])))
+            for key, value in parsed.items()
+            if isinstance(value, (list, tuple)) and len(value) == 2
+        } or dict(DEFAULT_SIMILARITY_CONTINUOUS)
+    except (TypeError, ValueError, AttributeError):
+        return dict(DEFAULT_SIMILARITY_CONTINUOUS)
+
+
+def _evidence_thresholds(raw: str) -> tuple[float, float, float, float]:
+    try:
+        values = tuple(float(item.strip()) for item in raw.split(","))
+        if len(values) != 4 or any(value <= 0 for value in values) or list(values) != sorted(values):
+            raise ValueError
+        return values
+    except (TypeError, ValueError, AttributeError):
+        return (8.0, 15.0, 30.0, 60.0)
 
 
 @dataclass(frozen=True)
@@ -46,6 +90,28 @@ class LiveMonitorConfig:
     chart_snapshot_dir: str = "chart_snapshots"
     chart_max_bars: int = 180
     chart_retention_days: int = 90
+    level_auto_correct_confidence: float = 0.90
+    level_auto_correct_enabled: bool = True
+    primary_max_distance_pct: float = 0.06
+    target_reachability_atr: float = 4.0
+    learning_recency_half_life_days: float = 120.0
+    ticker_prior_strength: float = 20.0
+    setup_prior_strength: float = 30.0
+    sector_prior_strength: float = 40.0
+    regime_prior_strength: float = 40.0
+    max_historical_score_adjustment: float = 1.0
+    max_rvol_threshold_adjustment: float = 0.25
+    max_chase_adjustment_pct: float = 0.0025
+    max_target_expectation_adjustment_atr: float = 0.75
+    similar_case_count: int = 8
+    evidence_thresholds: tuple[float, float, float, float] = (8.0, 15.0, 30.0, 60.0)
+    similarity_weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_SIMILARITY_WEIGHTS))
+    similarity_continuous: dict[str, tuple[float, float]] = field(default_factory=lambda: dict(DEFAULT_SIMILARITY_CONTINUOUS))
+    profile_refresh_hour_et: int = 20
+    profile_refresh_minute_et: int = 15
+    bar_retention_days: int = 365
+    proposal_min_effect_r: float = 0.30
+    paper_test_min_observations: int = 20
 
 
 def load_live_monitor_config() -> LiveMonitorConfig:
@@ -86,4 +152,26 @@ def load_live_monitor_config() -> LiveMonitorConfig:
         chart_snapshot_dir=str(settings.LIVE_MONITOR_CHART_SNAPSHOT_DIR),
         chart_max_bars=max(40, int(settings.LIVE_MONITOR_CHART_MAX_BARS)),
         chart_retention_days=max(7, int(settings.LIVE_MONITOR_CHART_RETENTION_DAYS)),
+        level_auto_correct_confidence=min(1.0, max(0.5, float(settings.LIVE_MONITOR_LEVEL_AUTO_CORRECT_CONFIDENCE))),
+        level_auto_correct_enabled=bool(settings.LIVE_MONITOR_LEVEL_AUTO_CORRECT_ENABLED),
+        primary_max_distance_pct=max(0.01, float(settings.LIVE_MONITOR_PRIMARY_MAX_DISTANCE_PCT)),
+        target_reachability_atr=max(1.0, float(settings.LIVE_MONITOR_TARGET_REACHABILITY_ATR)),
+        learning_recency_half_life_days=max(14.0, float(settings.LIVE_MONITOR_LEARNING_RECENCY_HALF_LIFE_DAYS)),
+        ticker_prior_strength=max(1.0, float(settings.LIVE_MONITOR_LEARNING_TICKER_PRIOR_STRENGTH)),
+        setup_prior_strength=max(1.0, float(settings.LIVE_MONITOR_LEARNING_SETUP_PRIOR_STRENGTH)),
+        sector_prior_strength=max(1.0, float(settings.LIVE_MONITOR_LEARNING_SECTOR_PRIOR_STRENGTH)),
+        regime_prior_strength=max(1.0, float(settings.LIVE_MONITOR_LEARNING_REGIME_PRIOR_STRENGTH)),
+        max_historical_score_adjustment=max(0.0, float(settings.LIVE_MONITOR_MAX_HISTORICAL_SCORE_ADJUSTMENT)),
+        max_rvol_threshold_adjustment=max(0.0, float(settings.LIVE_MONITOR_MAX_RVOL_THRESHOLD_ADJUSTMENT)),
+        max_chase_adjustment_pct=max(0.0, float(settings.LIVE_MONITOR_MAX_CHASE_ADJUSTMENT_PCT)),
+        max_target_expectation_adjustment_atr=max(0.0, float(settings.LIVE_MONITOR_MAX_TARGET_EXPECTATION_ADJUSTMENT_ATR)),
+        similar_case_count=max(1, min(25, int(settings.LIVE_MONITOR_SIMILAR_CASE_COUNT))),
+        evidence_thresholds=_evidence_thresholds(settings.LIVE_MONITOR_EVIDENCE_THRESHOLDS),
+        similarity_weights=_json_mapping(settings.LIVE_MONITOR_SIMILARITY_WEIGHTS_JSON, DEFAULT_SIMILARITY_WEIGHTS),
+        similarity_continuous=_continuous_mapping(settings.LIVE_MONITOR_SIMILARITY_CONTINUOUS_JSON),
+        profile_refresh_hour_et=min(23, max(0, int(settings.LIVE_MONITOR_PROFILE_REFRESH_HOUR_ET))),
+        profile_refresh_minute_et=min(59, max(0, int(settings.LIVE_MONITOR_PROFILE_REFRESH_MINUTE_ET))),
+        bar_retention_days=max(30, int(settings.LIVE_MONITOR_BAR_RETENTION_DAYS)),
+        proposal_min_effect_r=max(0.05, float(settings.LIVE_MONITOR_PROPOSAL_MIN_EFFECT_R)),
+        paper_test_min_observations=max(5, int(settings.LIVE_MONITOR_PAPER_TEST_MIN_OBSERVATIONS)),
     )

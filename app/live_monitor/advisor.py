@@ -16,6 +16,9 @@ def build_advisory_packet(
     evaluation: dict,
     historical_profile: dict,
     similar_cases: list[dict],
+    learned_adjustments: list[dict] | None = None,
+    broader_profiles: dict[str, Any] | None = None,
+    past_postmortems: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "prompt_version": PROMPT_VERSION,
@@ -36,7 +39,10 @@ def build_advisory_packet(
         "confirmation_evidence": evaluation,
         "deterministic_trade_plan": evaluation.get("manual_order_plan"),
         "historical_stock_profile": historical_profile,
+        "historical_broader_profiles": broader_profiles or {},
         "similar_historical_cases": similar_cases,
+        "learned_adjustments_applied": learned_adjustments or [],
+        "relevant_past_postmortems": past_postmortems or [],
     }
 
 
@@ -52,6 +58,18 @@ def _validate_provider_output(output: dict) -> dict:
         "positive_factors": list(output.get("positive_factors") or []),
         "risk_factors": list(output.get("risk_factors") or []),
         "historical_context_used": list(output.get("historical_context_used") or []),
+        "historical_evidence_ignored": list(output.get("historical_evidence_ignored") or []),
+        "rationale_tags": sorted({str(item).strip().upper() for item in (output.get("rationale_tags") or []) if str(item).strip()}),
+        "chart_structure_assessment": output.get("chart_structure_assessment"),
+        "price_confirmation_assessment": output.get("price_confirmation_assessment"),
+        "volume_confirmation_assessment": output.get("volume_confirmation_assessment"),
+        "retest_assessment": output.get("retest_assessment"),
+        "entry_quality_assessment": output.get("entry_quality_assessment"),
+        "stop_quality_assessment": output.get("stop_quality_assessment"),
+        "target_quality_assessment": output.get("target_quality_assessment"),
+        "rr_assessment": output.get("rr_assessment"),
+        "suggested_level_changes": list(output.get("suggested_level_changes") or []),
+        "planner_disagreements": list(output.get("planner_disagreements") or []),
         "preferred_stop_candidate": output.get("preferred_stop_candidate"),
         "preferred_target_structure": output.get("preferred_target_structure"),
         "manual_order_comment": str(output.get("manual_order_comment") or "Manual execution only."),
@@ -91,6 +109,8 @@ def review_advisory_packet(packet: dict, provider: Callable[[dict], dict] | None
                 "positive_factors": [],
                 "risk_factors": ["llm_unavailable"],
                 "historical_context_used": [],
+                "historical_evidence_ignored": [{"reason": "LLM unavailable"}],
+                "rationale_tags": ["LLM_UNAVAILABLE"],
                 "preferred_stop_candidate": None,
                 "preferred_target_structure": None,
                 "manual_order_comment": "Use the deterministic plan for manual review only.",
@@ -109,9 +129,10 @@ def review_advisory_packet(packet: dict, provider: Callable[[dict], dict] | None
             "positive_factors": [name for name, item in (evidence.get("confirmation_components") or {}).items() if item.get("passed")],
             "risk_factors": [name for name, item in (evidence.get("confirmation_components") or {}).items() if not item.get("passed")],
             "historical_context_used": [f"evidence_strength={historical.get('evidence_strength', 'INSUFFICIENT')}"] if historical else [],
+            "historical_evidence_ignored": [],
+            "rationale_tags": ["PRICE_VOLUME_CONFIRMED"] if approved else ["AWAITING_CONFIRMATION"],
             "preferred_stop_candidate": (evidence.get("manual_order_plan") or {}).get("suggested_stop"),
             "preferred_target_structure": "deterministic_candidates_only",
             "manual_order_comment": "Manual execution only; do not chase beyond the deterministic maximum.",
         }),
     }
-

@@ -46,6 +46,7 @@ from dashboard.api_client import (
     run_sp500_daily_opportunities,
     live_monitor_action,
     request_live_monitor_chart_review,
+    run_monitor_learning_cycle,
     update_bot_config,
 )
 from dashboard.components import (
@@ -1837,6 +1838,42 @@ with live_monitor_tab:
                     st.json(active_levels, expanded=False)
                 else:
                     st.caption("No active execution levels are available until this monitor is freshly reanalyzed.")
+                st.markdown("#### Historical Context")
+                historical_profile = monitor_detail.get("historical_profile") or {}
+                historical_stats = historical_profile.get("statistics") or {}
+                historical_cols = st.columns(4)
+                historical_cols[0].metric("Observations", int(historical_profile.get("observation_count") or 0))
+                historical_cols[1].metric("Evidence", historical_profile.get("evidence_strength") or "INSUFFICIENT")
+                historical_cols[2].metric("Profile Version", historical_profile.get("profile_version") or "-")
+                historical_cols[3].metric("Similar Cases", len(monitor_detail.get("similar_historical_cases") or []))
+                learned_adjustments = monitor_detail.get("learned_adjustments") or []
+                recommendation_breakdown = monitor_detail.get("recommendation_breakdown") or {}
+                render_key_value_grid(
+                    [
+                        ("Raw Setup Score", recommendation_breakdown.get("raw_setup_score")),
+                        ("Historical Adjustment", recommendation_breakdown.get("historical_adjustment_score")),
+                        ("Learned Actionability", recommendation_breakdown.get("learned_actionability_score")),
+                        ("False-Break Rate", format_pct(historical_stats.get("false_breakout_rate"))),
+                    ],
+                    columns=4,
+                )
+                if learned_adjustments:
+                    st.markdown("**Learned Adjustments Applied**")
+                    for adjustment in learned_adjustments:
+                        with st.container(border=True):
+                            st.markdown(f"**{pretty_label(adjustment.get('adjustment_type'))}**")
+                            st.caption(
+                                f"{adjustment.get('evidence_strength')} evidence | "
+                                f"weighted sample {adjustment.get('weighted_sample_size')} | "
+                                f"bounded change {adjustment.get('adjustment_value')}"
+                            )
+                            st.write(adjustment.get("reason") or "Historical evidence adjustment")
+                else:
+                    st.caption("No ticker-specific adjustment is active. Broader priors remain available for cold start.")
+                similar_cases = monitor_detail.get("similar_historical_cases") or []
+                if similar_cases:
+                    with st.expander("Similar Past Setups", expanded=False):
+                        st.dataframe(pd.DataFrame(similar_cases), use_container_width=True, hide_index=True)
                 if not monitor_detail.get("plan_stale"):
                     with st.expander("Edit active level overlay", expanded=False):
                         editable_level_names = [
@@ -1957,6 +1994,14 @@ with live_monitor_tab:
                 )
                 if latest_chart_review.get("reason_summary"):
                     st.info(latest_chart_review.get("reason_summary"))
+                level_sanity = latest_chart_review.get("level_sanity") or (monitor_detail.get("latest_evaluation") or {}).get("level_sanity") or {}
+                if level_sanity:
+                    sanity_status = level_sanity.get("status") or "NOT_RUN"
+                    anomalies = level_sanity.get("anomalies") or []
+                    if anomalies:
+                        st.warning(f"Level sanity: {sanity_status}. " + ", ".join(pretty_label(item) for item in anomalies))
+                    else:
+                        st.success("Level sanity checks found no material pricing anomaly.")
                 if monitor_detail.get("chart_analysis_status") in {"DISAGREEMENT", "STALE"}:
                     st.warning("LEVEL REVIEW REQUIRED: validated chart levels are proposals until you explicitly accept them.")
                 review_controls = st.columns(4)
@@ -2065,6 +2110,14 @@ with live_monitor_tab:
                     st.dataframe(pd.DataFrame(history_rows), use_container_width=True, hide_index=True)
                 else:
                     st.caption("No monitor history has been recorded yet.")
+                daily_summaries = monitor_detail.get("daily_summaries") or []
+                if daily_summaries:
+                    st.markdown("**End-of-Day Evidence**")
+                    st.dataframe(pd.DataFrame(daily_summaries), use_container_width=True, hide_index=True)
+                level_revisions = monitor_detail.get("level_revisions") or []
+                if level_revisions:
+                    st.markdown("**Pricing / Level Lineage**")
+                    st.dataframe(pd.DataFrame(level_revisions), use_container_width=True, hide_index=True)
             with monitor_debug_tab:
                 st.json(monitor_detail, expanded=False)
 
@@ -2096,13 +2149,28 @@ with learning_tab:
         "Statistics are deterministic and sample-size weighted. Learning proposals never activate themselves; "
         "Approve, reject, or paper-test each proposal explicitly."
     )
+    learning_action_col, learning_note_col = st.columns([1, 3])
+    with learning_action_col:
+        if st.button("Run Learning Cycle", key="run_monitor_learning_cycle", use_container_width=True):
+            try:
+                result = run_monitor_learning_cycle()
+                st.toast(
+                    f"Finalized {result.get('summaries_finalized', 0)} summaries and updated "
+                    f"{result.get('profiles_updated', 0)} profiles.",
+                    icon=":material/psychology:",
+                )
+                st.rerun()
+            except TraderAPIError as exc:
+                st.error(str(exc))
+    with learning_note_col:
+        st.caption("This stores end-of-day evidence and refreshes bounded profiles. It never changes broker execution.")
     try:
         learning_payload = fetch_monitor_learning()
     except TraderAPIError as exc:
         st.error(str(exc))
         learning_payload = {}
-    stock_profiles_tab, observations_tab, proposals_tab, rule_versions_tab = st.tabs(
-        ["Stock Profiles", "Observations", "Pending Proposals", "Rule Versions"]
+    stock_profiles_tab, performance_tab, level_llm_tab, observations_tab, proposals_tab, paper_rules_tab = st.tabs(
+        ["Profiles", "Setup Performance", "Levels / LLM", "Observations", "Pending Proposals", "Paper Tests / Rules"]
     )
     with stock_profiles_tab:
         profiles = learning_payload.get("profiles") or []
@@ -2110,6 +2178,31 @@ with learning_tab:
             st.dataframe(pd.DataFrame(profiles), use_container_width=True, hide_index=True)
         else:
             st.caption("Profiles are created after historical observations are aggregated.")
+        profile_versions = learning_payload.get("profile_versions") or []
+        if profile_versions:
+            with st.expander("Profile Version History", expanded=False):
+                st.dataframe(pd.DataFrame(profile_versions), use_container_width=True, hide_index=True)
+    with performance_tab:
+        profiles = learning_payload.get("profiles") or []
+        scoped = [row for row in profiles if row.get("scope_type") in {"setup_type", "sector", "market_regime", "global"}]
+        if scoped:
+            st.dataframe(pd.DataFrame(scoped), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Setup, sector, and regime profiles appear after completed monitor evidence is finalized.")
+    with level_llm_tab:
+        render_key_value_grid(
+            [
+                ("Evaluated LLM Reviews", (learning_payload.get("llm_performance") or {}).get("evaluated_reviews")),
+                ("LLM Outcome Alignment", format_pct((learning_payload.get("llm_performance") or {}).get("alignment_rate"))),
+                ("Level Revisions", (learning_payload.get("level_accuracy") or {}).get("revision_count")),
+                ("Validated Levels", (learning_payload.get("level_accuracy") or {}).get("validated_count")),
+            ],
+            columns=4,
+        )
+        st.json({
+            "llm_performance": learning_payload.get("llm_performance") or {},
+            "level_accuracy": learning_payload.get("level_accuracy") or {},
+        }, expanded=False)
     with observations_tab:
         observations = learning_payload.get("observations") or []
         if observations:
@@ -2126,15 +2219,23 @@ with learning_tab:
                 st.caption(f"{proposal.get('scope_type')}: {proposal.get('scope_value')} | {proposal.get('status')}")
                 st.json({"proposed_change": proposal.get("proposed_change"), "evidence": proposal.get("evidence")}, expanded=False)
                 if proposal.get("status") == "PENDING":
-                    decision_cols = st.columns(3)
-                    for index, decision in enumerate(("APPROVE", "REJECT", "PAPER_TEST")):
+                    decision_cols = st.columns(4)
+                    for index, decision in enumerate(("APPROVE", "REJECT", "PAPER_TEST", "LATER")):
                         if decision_cols[index].button(decision.replace("_", " ").title(), key=f"proposal_{proposal.get('id')}_{decision}", use_container_width=True):
                             try:
                                 decide_learning_proposal(str(proposal.get("id")), decision)
                                 st.rerun()
                             except TraderAPIError as exc:
                                 st.error(str(exc))
-    with rule_versions_tab:
+    with paper_rules_tab:
+        paper_tests = learning_payload.get("paper_tests") or []
+        if paper_tests:
+            st.markdown("**Paper / Shadow Evaluations**")
+            st.dataframe(pd.DataFrame(paper_tests), use_container_width=True, hide_index=True)
+        learning_jobs = learning_payload.get("learning_jobs") or []
+        if learning_jobs:
+            with st.expander("Learning Job History", expanded=False):
+                st.dataframe(pd.DataFrame(learning_jobs), use_container_width=True, hide_index=True)
         versions = learning_payload.get("rule_versions") or []
         if versions:
             st.dataframe(pd.DataFrame(versions), use_container_width=True, hide_index=True)
