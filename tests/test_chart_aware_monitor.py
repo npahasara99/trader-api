@@ -349,7 +349,9 @@ def test_chart_levels_remain_proposals_until_user_accepts(monkeypatch, tmp_path)
     watch_id = added["id"]
     review = service.run_chart_review(watch_id)
     before = service.get_monitor(watch_id)
-    assert review["status"] == "DISAGREEMENT"
+    assert review["status"] == "MANUAL_REVIEW_REQUIRED"
+    assert before["reconciliation_status"] == "MANUAL_REVIEW_REQUIRED"
+    assert before["state"] == "PLAN_REVIEW_REQUIRED"
     assert before["active_levels"]["primary_entry_trigger"] == pytest.approx(107.91)
     assert before["validated_chart_levels"]["primary_entry_trigger"] == pytest.approx(95.65)
     with factory() as db:
@@ -366,6 +368,12 @@ def test_chart_levels_remain_proposals_until_user_accepts(monkeypatch, tmp_path)
     assert accepted["active_levels"]["primary_entry_trigger"] == pytest.approx(95.65)
     assert accepted["active_levels"]["major_trend_repair"] == pytest.approx(107.91)
     assert accepted["level_sources"]["primary_entry_trigger"] == "VALIDATED_CHART_LLM"
+    assert accepted["final_active_plan_id"]
+    chart = service.chart_bundle(watch_id)
+    assert chart["final_active_plan_id"] == accepted["final_active_plan_id"]
+    rendered_primary = next(level for level in chart["levels"] if level["name"] == "primary_entry_trigger")
+    assert rendered_primary["price"] == pytest.approx(95.65)
+    assert rendered_primary["source"] == "VALIDATED_CHART_LLM"
 
 
 def test_backend_evaluates_without_dashboard_and_resume_does_not_fetch(monkeypatch, tmp_path):

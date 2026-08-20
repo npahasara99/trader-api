@@ -149,7 +149,7 @@ def _render_png(
         price_axis.text(
             max(len(bars) - 1, 0),
             float(price),
-            f" {level.get('label')} {float(price):.2f}",
+            f" {level.get('label')} [{level.get('source') or 'PLANNER'}] {float(price):.2f}",
             color=level.get("color") or "#ffffff",
             fontsize=7,
             va="bottom",

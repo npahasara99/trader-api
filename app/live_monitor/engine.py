@@ -99,6 +99,8 @@ def build_manual_order_plan(*, current_price: float, levels: dict, config: LiveM
     entry_high = max_chase if max_chase and max_chase >= entry_low else entry_low
     return {
         "execution": "MANUAL_ONLY",
+        "final_active_plan_id": levels.get("_active_plan_id"),
+        "market_snapshot_id": levels.get("_market_snapshot_id"),
         "suggested_manual_order_type": "BUY LIMIT / STOP-LIMIT",
         "current_entry_candidate": round(current_price, 6),
         "recommended_entry_zone": {"lower": round(entry_low, 6), "upper": round(entry_high, 6)},
@@ -266,6 +268,8 @@ def evaluate_monitor(
     )
     return {
         "state": state.value,
+        "final_active_plan_id": levels.get("_active_plan_id"),
+        "final_active_plan_market_snapshot_id": levels.get("_market_snapshot_id"),
         "evaluated_at": evaluated_at,
         "market_data_as_of": data_at,
         "market_session": session,

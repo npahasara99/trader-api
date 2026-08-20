@@ -1770,12 +1770,30 @@ with live_monitor_tab:
                     "PLAN STALE - REANALYSIS REQUIRED. Previous planner levels are historical only; "
                     "approval, executable R:R, LLM review, and manual order generation are disabled."
                 )
+            integrity_status = monitor_detail.get("plan_integrity_status") or "INVALID"
+            reconciliation_status = monitor_detail.get("reconciliation_status") or "PLANNER_ACCEPTED"
+            if integrity_status == "INVALID":
+                st.error(
+                    "PLAN GEOMETRY INVALID. The live monitor, confirmation approval, R:R activation, "
+                    "and manual-order plan are blocked until the final plan is corrected."
+                )
+            elif integrity_status == "WARNING":
+                st.warning("PLAN INTEGRITY WARNING. Review trigger distance, target reachability, and planned R:R before acting.")
+            if reconciliation_status == "MANUAL_REVIEW_REQUIRED":
+                st.warning(
+                    "LEVEL DISAGREEMENT. A chart proposal was not promoted silently; choose validated levels, "
+                    "explicitly keep the planner, or enter a manual correction."
+                )
+            active_metadata = monitor_detail.get("active_level_metadata") or {}
+            level_sources = monitor_detail.get("level_sources") or {}
+            def _monitor_level_source(name: str) -> str:
+                return str((active_metadata.get(name) or {}).get("source") or level_sources.get(name) or "PLANNER")
             detail_cols = st.columns(8)
             detail_cols[0].metric("Ticker", monitor_detail.get("ticker") or "-")
             detail_cols[1].metric("State", monitor_detail.get("state") or "-")
             detail_cols[2].metric("Current", format_price(monitor_detail.get("current_price")))
             detail_cols[3].metric("Near Confirm", format_price(monitor_detail.get("near_confirmation")))
-            detail_cols[4].metric("Primary", format_price(monitor_detail.get("primary_trigger")))
+            detail_cols[4].metric(f"Primary [{_monitor_level_source('primary_entry_trigger')}]", format_price(monitor_detail.get("primary_trigger")))
             detail_cols[5].metric("Strong", format_price(monitor_detail.get("strong_confirmation")))
             detail_cols[6].metric("Major Repair", format_price(monitor_detail.get("major_trend_repair")))
             detail_cols[7].metric("5m RVOL", "-" if monitor_detail.get("rvol_5m") is None else f"{float(monitor_detail['rvol_5m']):.2f}x")
@@ -1784,6 +1802,8 @@ with live_monitor_tab:
             st.caption(
                 f"Data freshness: {monitor_detail.get('data_age_seconds') if monitor_detail.get('data_age_seconds') is not None else '-'}s | "
                 f"Chart analysis: {monitor_detail.get('chart_analysis_status') or 'NOT_RUN'} | "
+                f"Reconciliation: {reconciliation_status} | Integrity: {integrity_status} | "
+                f"Final plan: {monitor_detail.get('final_active_plan_id') or '-'} | "
                 f"Planned R:R at trigger: {planned_rr if planned_rr is not None else '-'} | "
                 f"Current executable R:R: {executable_rr if executable_rr is not None else 'NOT ACTIVE'}"
             )
@@ -1835,7 +1855,22 @@ with live_monitor_tab:
                 planner_levels = monitor_detail.get("planner_levels") or {}
                 st.markdown("**Active Technical Levels**")
                 if active_levels:
-                    st.json(active_levels, expanded=False)
+                    active_rows = []
+                    for name in (
+                        "near_confirmation", "primary_entry_trigger", "strong_confirmation", "major_trend_repair",
+                        "invalidation_level", "suggested_stop", "tp1", "tp2", "tp3", "stretch_target",
+                    ):
+                        metadata = active_metadata.get(name) or {}
+                        if active_levels.get(name) is not None:
+                            active_rows.append({
+                                "Level": pretty_label(name), "Price": active_levels.get(name),
+                                "Source": metadata.get("source") or level_sources.get(name) or "PLANNER",
+                                "Reason": metadata.get("reason") or "Current structured level",
+                            })
+                    if active_rows:
+                        st.dataframe(pd.DataFrame(active_rows), use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("No operational price levels are present in the final active plan.")
                 else:
                     st.caption("No active execution levels are available until this monitor is freshly reanalyzed.")
                 st.markdown("#### Historical Context")
@@ -1909,6 +1944,31 @@ with live_monitor_tab:
                     st.error(str(exc))
                 if chart_payload:
                     available_levels = chart_payload.get("levels") or []
+                    show_original_planner = st.checkbox(
+                        "Show original planner levels",
+                        value=False,
+                        key=f"show_original_planner_levels_{selected_watch_id}",
+                        help="Diagnostic overlay only. Final active levels remain the operational source of truth.",
+                    )
+                    if show_original_planner:
+                        existing_names = {level.get("name") for level in available_levels}
+                        for name, value in (monitor_detail.get("planner_levels") or {}).items():
+                            if name.startswith("_") or value is None:
+                                continue
+                            active_value = (monitor_detail.get("active_levels") or {}).get(name)
+                            if active_value == value and name in existing_names:
+                                continue
+                            try:
+                                original_price = float(value.get("price") if isinstance(value, dict) else value)
+                            except (TypeError, ValueError):
+                                continue
+                            available_levels.append({
+                                "name": f"planner_original_{name}",
+                                "label": f"Original {pretty_label(name)}",
+                                "price": original_price,
+                                "color": "#64748b",
+                                "source": "PLANNER_ORIGINAL",
+                            })
                     level_names = [level.get("name") for level in available_levels if level.get("name")]
                     visible_level_names = st.multiselect(
                         "Visible semantic levels",
@@ -1961,10 +2021,12 @@ with live_monitor_tab:
                         ("Setup", pretty_label(monitor_detail.get("setup_type"))),
                         ("Execution", pretty_label(monitor_detail.get("execution_structure"))),
                         ("Status", monitor_detail.get("chart_analysis_status") or "NOT_RUN"),
+                        ("Reconciliation", reconciliation_status),
+                        ("Plan Integrity", integrity_status),
                         ("Confidence", latest_chart_review.get("confidence")),
                         ("Data Check", latest_chart_review.get("data_consistency_status") or "NOT_RUN"),
                     ],
-                    columns=3,
+                    columns=4,
                 )
                 planner_comparison = monitor_detail.get("planner_levels") or {}
                 proposed_comparison = monitor_detail.get("llm_proposed_levels") or {}
@@ -2002,8 +2064,12 @@ with live_monitor_tab:
                         st.warning(f"Level sanity: {sanity_status}. " + ", ".join(pretty_label(item) for item in anomalies))
                     else:
                         st.success("Level sanity checks found no material pricing anomaly.")
-                if monitor_detail.get("chart_analysis_status") in {"DISAGREEMENT", "STALE"}:
+                if monitor_detail.get("chart_analysis_status") in {"DISAGREEMENT", "MANUAL_REVIEW_REQUIRED", "STALE"}:
                     st.warning("LEVEL REVIEW REQUIRED: validated chart levels are proposals until you explicitly accept them.")
+                rejected_disagreements = ((monitor_detail.get("reconciliation_details") or {}).get("rejected_level_disagreements") or {})
+                if rejected_disagreements:
+                    st.markdown("#### Rejected Level Disagreements")
+                    st.json(rejected_disagreements, expanded=True)
                 review_controls = st.columns(4)
                 if review_controls[0].button("Run Chart Review", key=f"run_chart_review_{selected_watch_id}", type="primary", use_container_width=True, disabled=bool(monitor_detail.get("plan_stale"))):
                     try:
@@ -2119,7 +2185,27 @@ with live_monitor_tab:
                     st.markdown("**Pricing / Level Lineage**")
                     st.dataframe(pd.DataFrame(level_revisions), use_container_width=True, hide_index=True)
             with monitor_debug_tab:
-                st.json(monitor_detail, expanded=False)
+                st.caption("All four stages use the same setup and market snapshot lineage. Final Active is authoritative.")
+                diagnostics_columns = st.columns(4)
+                plan_versions = monitor_detail.get("plan_versions") or {}
+                with diagnostics_columns[0]:
+                    st.markdown("**Planner Original**")
+                    st.json(plan_versions.get("planner_original_plan") or {}, expanded=False)
+                with diagnostics_columns[1]:
+                    st.markdown("**Chart LLM Output**")
+                    st.json(plan_versions.get("llm_proposed_plan") or {}, expanded=False)
+                with diagnostics_columns[2]:
+                    st.markdown("**Validator Result**")
+                    st.json({
+                        "validated_plan": plan_versions.get("validated_plan") or {},
+                        "final_validation": monitor_detail.get("final_plan_validation") or {},
+                        "reconciliation": monitor_detail.get("reconciliation_details") or {},
+                    }, expanded=False)
+                with diagnostics_columns[3]:
+                    st.markdown("**Final Active Plan**")
+                    st.json(plan_versions.get("final_active_plan") or {}, expanded=False)
+                with st.expander("Complete monitor payload", expanded=False):
+                    st.json(monitor_detail, expanded=False)
 
 
 with journal_tab:

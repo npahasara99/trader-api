@@ -12,7 +12,7 @@ from .chart_levels import LEVEL_NAMES, derive_chart_level_candidates, number, va
 from .config import LiveMonitorConfig
 
 
-CHART_STRUCTURE_PROMPT_VERSION = "chart-structure-review-v1"
+CHART_STRUCTURE_PROMPT_VERSION = "chart-structure-review-v2-final-plan"
 CONFIRMED_TRADE_PROMPT_VERSION = "confirmed-trade-review-v1"
 
 
@@ -82,6 +82,49 @@ CHART_REVIEW_SCHEMA: dict[str, Any] = {
             },
             "required": ["agrees_with_primary_trigger", "planner_trigger_issue", "recommended_action"],
         },
+        "level_classifications": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                name: {
+                    "type": "string",
+                    "enum": [
+                        "SUPPORT", "NEAR_CONFIRMATION", "PRIMARY_ENTRY_TRIGGER",
+                        "STRONG_CONFIRMATION", "MAJOR_TREND_REPAIR",
+                        "STRUCTURAL_INVALIDATION", "EXECUTABLE_STOP",
+                        "TP1", "TP2", "TP3", "STRETCH_TARGET", "NOT_APPLICABLE",
+                    ],
+                }
+                for name in (
+                    "support_zone", "near_confirmation", "primary_entry_trigger",
+                    "strong_confirmation", "major_trend_repair", "structural_invalidation",
+                    "suggested_stop", "tp1", "tp2", "tp3", "stretch_target",
+                )
+            },
+            "required": [
+                "support_zone", "near_confirmation", "primary_entry_trigger",
+                "strong_confirmation", "major_trend_repair", "structural_invalidation",
+                "suggested_stop", "tp1", "tp2", "tp3", "stretch_target",
+            ],
+        },
+        "geometry_assessment": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "tp1_above_entry": {"type": "boolean"},
+                "targets_ordered": {"type": "boolean"},
+                "tp1_ignores_nearer_resistance": {"type": "boolean"},
+                "primary_trigger_too_distant": {"type": "boolean"},
+                "stop_logically_positioned": {"type": "boolean"},
+                "suitable_for_2_10_day_swing": {"type": "boolean"},
+                "reason": {"type": "string"},
+            },
+            "required": [
+                "tp1_above_entry", "targets_ordered", "tp1_ignores_nearer_resistance",
+                "primary_trigger_too_distant", "stop_logically_positioned",
+                "suitable_for_2_10_day_swing", "reason",
+            ],
+        },
         "decision": {"type": "string", "enum": ["APPROVE_LEVELS", "MODIFY_LEVELS", "KEEP_PLANNER", "MANUAL_REVIEW"]},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "positive_factors": {"type": "array", "items": {"type": "string"}},
@@ -93,7 +136,7 @@ CHART_REVIEW_SCHEMA: dict[str, Any] = {
         "planner_disagreements": {"type": "array", "items": {"type": "string"}},
         "reason_summary": {"type": "string"},
     },
-    "required": ["chart_assessment", "levels", "targets", "planner_comparison", "decision", "confidence", "positive_factors", "risk_factors", "rationale_tags", "historical_evidence_used", "historical_evidence_ignored", "suggested_level_changes", "planner_disagreements", "reason_summary"],
+    "required": ["chart_assessment", "levels", "targets", "planner_comparison", "level_classifications", "geometry_assessment", "decision", "confidence", "positive_factors", "risk_factors", "rationale_tags", "historical_evidence_used", "historical_evidence_ignored", "suggested_level_changes", "planner_disagreements", "reason_summary"],
 }
 
 
@@ -174,7 +217,10 @@ def openai_chart_provider(packet: dict[str, Any], *, model: str) -> dict[str, An
         "You review short-duration swing-trade charts. Exact numeric OHLCV values in the supplied JSON are authoritative. "
         "Use images for structural interpretation only. Distinguish support, near confirmation, primary entry, strong confirmation, "
         "major trend repair, structural invalidation, executable stop, TP1/TP2/TP3, and stretch target. "
-        "Do not invent unsupported levels and do not force a trade. Explicitly state which supplied historical evidence was used or ignored."
+        "Do not invent unsupported levels and do not force a trade. Explicitly classify every level role. Decide whether the planner primary "
+        "is the earliest meaningful swing confirmation or actually strong confirmation/major repair. Inspect primary, stop, TP1, TP2, and TP3: "
+        "TP1 must be above entry, targets must be ordered, nearer resistance must not be skipped, and geometry must suit a 2-10 day swing. "
+        "Explicitly state which supplied historical evidence was used or ignored."
         if review_type == "CHART_STRUCTURE_REVIEW"
         else
         "The deterministic monitor found possible price and volume confirmation. Review chart structure, confirmation quality, "
@@ -315,6 +361,28 @@ def review_chart_packet(
                 "agrees_with_primary_trigger": not candidates.get("planner_primary_reclassified_as_major_repair"),
                 "planner_trigger_issue": "Planner primary appears to be major trend repair" if candidates.get("planner_primary_reclassified_as_major_repair") else "No material trigger conflict detected",
                 "recommended_action": "MANUAL_REVIEW" if candidates.get("planner_primary_reclassified_as_major_repair") else "KEEP_PLANNER",
+            },
+            "level_classifications": {
+                "support_zone": "SUPPORT",
+                "near_confirmation": "NEAR_CONFIRMATION",
+                "primary_entry_trigger": "PRIMARY_ENTRY_TRIGGER",
+                "strong_confirmation": "STRONG_CONFIRMATION",
+                "major_trend_repair": "MAJOR_TREND_REPAIR",
+                "structural_invalidation": "STRUCTURAL_INVALIDATION",
+                "suggested_stop": "EXECUTABLE_STOP",
+                "tp1": "TP1", "tp2": "TP2", "tp3": "TP3", "stretch_target": "STRETCH_TARGET",
+            },
+            "geometry_assessment": {
+                "tp1_above_entry": bool(candidates.get("tp1") and candidates.get("primary_entry_trigger") and candidates["tp1"] > candidates["primary_entry_trigger"]),
+                "targets_ordered": bool(
+                    candidates.get("tp1") and candidates.get("tp2") and candidates.get("tp3")
+                    and candidates["primary_entry_trigger"] < candidates["tp1"] < candidates["tp2"] < candidates["tp3"]
+                ),
+                "tp1_ignores_nearer_resistance": False,
+                "primary_trigger_too_distant": bool(candidates.get("planner_primary_reclassified_as_major_repair")),
+                "stop_logically_positioned": bool(candidates.get("suggested_stop") and candidates.get("primary_entry_trigger") and candidates["suggested_stop"] < candidates["primary_entry_trigger"]),
+                "suitable_for_2_10_day_swing": False,
+                "reason": "Deterministic fallback cannot replace multimodal chart judgment.",
             },
             "decision": "MANUAL_REVIEW" if candidates.get("planner_primary_reclassified_as_major_repair") else "KEEP_PLANNER",
             "confidence": 0.0,

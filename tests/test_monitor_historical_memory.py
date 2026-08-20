@@ -415,6 +415,8 @@ def test_paper_rule_records_shadow_result_without_changing_production(memory_ser
     plan = sample_plan()
     plan["suggested_stop"] = 99.5
     plan["take_profit_1"] = 108.0
+    plan["take_profit_2"] = 110.0
+    plan["take_profit_3"] = 112.0
     detail = service.add_monitor("INTC", planner_payload=plan)
     proposal = service.create_proposal({
         "scope_type": "ticker", "scope_value": "INTC",

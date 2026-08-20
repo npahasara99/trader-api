@@ -385,6 +385,7 @@ def reconcile_levels(
     manual_overrides: dict,
 ) -> dict[str, Any]:
     validated = validation.get("accepted_levels") or {}
+    rejected = validation.get("rejected_levels") or {}
     final = dict(planner_levels)
     for name in LEVEL_NAMES:
         if name in final:
@@ -407,9 +408,42 @@ def reconcile_levels(
         and abs(number(planner_levels.get(name)) - number(proposed_levels.get(name))) > max(0.01, number(planner_levels.get(name)) * 0.002)
         for name in LEVEL_NAMES
     )
+    rejected_disagreements = {
+        name: {
+            "planner_level": number(planner_levels.get(name)),
+            "llm_proposed_level": number(proposed_levels.get(name)),
+            "validator_result": "REJECTED",
+            "reasons": reasons,
+        }
+        for name, reasons in rejected.items()
+        if number(proposed_levels.get(name)) is not None
+        and (
+            number(planner_levels.get(name)) is None
+            or abs(number(planner_levels.get(name)) - number(proposed_levels.get(name)))
+            > max(0.01, (number(planner_levels.get(name)) or 1.0) * 0.002)
+        )
+    }
+    critical_rejections = {
+        name: detail
+        for name, detail in rejected_disagreements.items()
+        if name in {"primary_entry_trigger", "invalidation_level", "suggested_stop"}
+    }
+    reconciliation_status = (
+        "MANUAL_REVIEW_REQUIRED"
+        if critical_rejections
+        else "LLM_CORRECTION_PENDING"
+        if disagreement and validated
+        else "LLM_CORRECTION_REJECTED"
+        if rejected_disagreements
+        else "PLANNER_ACCEPTED"
+    )
     return {
         "final_active_levels": final,
         "level_sources": sources,
-        "status": "DISAGREEMENT" if disagreement else "AGREES",
+        "status": "MANUAL_REVIEW_REQUIRED" if critical_rejections else "DISAGREEMENT" if disagreement else "AGREES",
         "has_disagreement": disagreement,
+        "reconciliation_status": reconciliation_status,
+        "activation_blocked": bool(critical_rejections),
+        "rejected_level_disagreements": rejected_disagreements,
+        "critical_rejections": critical_rejections,
     }

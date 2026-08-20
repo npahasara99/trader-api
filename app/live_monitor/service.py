@@ -52,10 +52,11 @@ from .chart_levels import (
     validate_level_semantics,
 )
 from .chart_renderer import cleanup_chart_snapshot_retention, render_chart_snapshots
-from .chart_review import review_chart_packet
+from .chart_review import CHART_STRUCTURE_PROMPT_VERSION, review_chart_packet
 from .config import LiveMonitorConfig, load_live_monitor_config
 from .engine import evaluate_monitor
 from .enums import ACTIVE_MONITOR_STATES, MonitorState
+from .final_plan import finalize_active_plan, validate_final_plan
 from .learning import adjustment_breakdown, aggregate_attempts, hierarchical_weights, similar_case_score
 from .level_sanity import LEVEL_ROLES, can_auto_apply_chart_correction, evaluate_level_sanity
 from .memory import (
@@ -101,6 +102,25 @@ def _as_datetime(value: Any) -> datetime | None:
         except ValueError:
             return None
     return None
+
+
+def _llm_level_reasons(output: dict[str, Any]) -> dict[str, str]:
+    reasons: dict[str, str] = {}
+    level_payload = output.get("levels") or {}
+    target_payload = output.get("targets") or {}
+    for name in LEVEL_NAMES:
+        raw = (
+            level_payload.get("structural_invalidation")
+            if name == "invalidation_level"
+            else level_payload.get(name)
+            if name != "optional_support_level"
+            else level_payload.get("support_zone")
+        )
+        if raw is None:
+            raw = target_payload.get(name)
+        if isinstance(raw, dict) and raw.get("reason"):
+            reasons[name] = str(raw["reason"])
+    return reasons
 
 
 class LiveMonitorService:
@@ -221,14 +241,59 @@ class LiveMonitorService:
                     automatic=True,
                     snapshot_event_type=event_type,
                 )
-            except Exception:
-                return
+            except Exception as exc:
+                self._record_chart_review_failure(watch_id, review_type=review_type, error=exc)
 
         Thread(
             target=run,
             name=f"chart-review-{watch_id[:8]}",
             daemon=True,
         ).start()
+
+    def _record_chart_review_failure(self, watch_id: str, *, review_type: str, error: Exception) -> None:
+        """Persist unexpected chart-review failures instead of hiding them."""
+        with SessionLocal() as db:
+            watch = db.get(LiveWatch, watch_id)
+            setup = db.get(MonitorSetup, watch.current_setup_id) if watch and watch.current_setup_id else None
+            if watch is None or setup is None:
+                return
+            detail = f"{type(error).__name__}: {error}"
+            row = ChartStructureReview(
+                id=_id(), watch_id=watch.id, setup_id=setup.id,
+                market_snapshot_id=setup.market_snapshot_id, ticker=watch.ticker,
+                review_type=str(review_type or "CHART_STRUCTURE_REVIEW").upper(),
+                status="VALIDATION_FAILED", model=self.config.chart_review_model,
+                prompt_version=CHART_STRUCTURE_PROMPT_VERSION,
+                chart_snapshot_ids_json=_dumps([]),
+                deterministic_input_json=_dumps({
+                    "market_snapshot_id": setup.market_snapshot_id,
+                    "setup_id": setup.id,
+                    "monitor_id": watch.id,
+                    "unexpected_error": detail,
+                }),
+                planner_levels_json=setup.planner_levels_json,
+                llm_output_json=_dumps({}), llm_proposed_levels_json=_dumps({}),
+                validated_levels_json=_dumps({}),
+                validation_json=_dumps({"status": "SKIPPED", "reason": "unexpected_chart_review_failure", "error": detail}),
+                decision="MANUAL_REVIEW", confidence=0.0,
+                reason_summary=f"Chart review failed before a valid response could be persisted: {detail}",
+                data_consistency_status="INSUFFICIENT_DATA",
+            )
+            db.add(row)
+            setup.latest_chart_review_id = row.id
+            setup.chart_analysis_status = "VALIDATION_FAILED"
+            setup.updated_at = _utcnow()
+            self._event(
+                db, watch, setup=setup, event_type="CHART_REVIEW_FAILED",
+                message=f"{row.review_type} failed: {detail}",
+                snapshot={
+                    "review_id": row.id, "model": row.model,
+                    "prompt_version": row.prompt_version,
+                    "market_snapshot_id": setup.market_snapshot_id,
+                    "error": detail,
+                },
+            )
+            db.commit()
 
     def _schedule_chart_snapshot(self, watch_id: str, event_type: str) -> None:
         def run() -> None:
@@ -452,10 +517,61 @@ class LiveMonitorService:
                     automatic=True,
                     snapshot_event_type="monitor_added",
                 )
-            except Exception:
-                # The deterministic monitor must remain usable when charts or the LLM are unavailable.
-                pass
+            except Exception as exc:
+                # A valid deterministic plan remains usable, but the failure is explicit.
+                self._record_chart_review_failure(watch_id, review_type="CHART_STRUCTURE_REVIEW", error=exc)
         return self.get_monitor(watch_id)
+
+    def _persist_final_active_plan(
+        self,
+        setup: MonitorSetup,
+        *,
+        levels: dict[str, Any],
+        sources: dict[str, str],
+        current_price: float | None,
+        reconciliation_status: str,
+        structure_bars: list[dict[str, Any]] | None = None,
+        execution_bars: list[dict[str, Any]] | None = None,
+        entry_changed: bool = False,
+        change_source: str | None = None,
+        level_reasons: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Persist the one plan consumed by every live execution component."""
+        final_plan = finalize_active_plan(
+            setup_id=setup.id,
+            levels=levels,
+            sources=sources,
+            current_price=current_price,
+            market_snapshot_id=setup.market_snapshot_id,
+            config=self.config,
+            reconciliation_status=reconciliation_status,
+            structure_bars=structure_bars,
+            execution_bars=execution_bars,
+            entry_changed=entry_changed,
+            change_source=change_source,
+            level_reasons=level_reasons,
+        )
+        setup.active_levels_json = _dumps(final_plan["flat_levels"])
+        setup.level_sources_json = _dumps(final_plan["level_sources"])
+        setup.final_active_plan_id = final_plan["plan_id"]
+        setup.final_active_plan_json = _dumps(final_plan)
+        setup.final_plan_validation_json = _dumps(final_plan["validation"])
+        setup.plan_integrity_status = final_plan["plan_integrity_status"]
+        setup.reconciliation_status = reconciliation_status
+        setup.max_chase_price = final_plan["flat_levels"].get("max_chase_price")
+        return final_plan
+
+    @staticmethod
+    def _set_plan_gate_state(watch: LiveWatch, setup: MonitorSetup) -> None:
+        if setup.plan_integrity_status == "INVALID":
+            watch.state = MonitorState.PLAN_GEOMETRY_INVALID.value
+        elif setup.reconciliation_status == "MANUAL_REVIEW_REQUIRED":
+            watch.state = MonitorState.PLAN_REVIEW_REQUIRED.value
+        elif watch.state in {
+            MonitorState.PLAN_GEOMETRY_INVALID.value,
+            MonitorState.PLAN_REVIEW_REQUIRED.value,
+        }:
+            watch.state = MonitorState.WATCHING.value
 
     def _create_setup(
         self,
@@ -504,11 +620,23 @@ class LiveMonitorService:
         )
         db.add(setup)
         db.flush()
+        snapshot = baseline.get("market_snapshot") or {}
+        snapshot_bars = snapshot.get("bars") or {}
+        final_plan = self._persist_final_active_plan(
+            setup,
+            levels=levels,
+            sources={name: "PLANNER" for name in LEVEL_NAMES if number(levels.get(name)) is not None},
+            current_price=setup.plan_reference_price,
+            reconciliation_status="PLANNER_ACCEPTED",
+            structure_bars=snapshot_bars.get("thirty_minute") or [],
+            execution_bars=snapshot_bars.get("five_minute") or [],
+        )
         watch.current_setup_id = setup.id
+        self._set_plan_gate_state(watch, setup)
         self._record_level_revisions(
             db, watch=watch, setup=setup, review_row=None,
             planner_levels=levels, proposed_levels={}, validated_levels={},
-            final_levels=levels,
+            final_levels=final_plan["flat_levels"],
             sources={name: "PLANNER" for name in LEVEL_NAMES if number(levels.get(name)) is not None},
             sanity={}, validation={}, llm_output={},
         )
@@ -567,10 +695,12 @@ class LiveMonitorService:
                 MonitorState.WATCHING.value: 5,
                 MonitorState.DATA_STALE.value: 6,
                 MonitorState.PLAN_STALE.value: 7,
-                MonitorState.MISSED.value: 8,
-                MonitorState.INVALIDATED.value: 9,
-                MonitorState.PAUSED.value: 10,
-                MonitorState.STOPPED.value: 11,
+                MonitorState.PLAN_REVIEW_REQUIRED.value: 8,
+                MonitorState.PLAN_GEOMETRY_INVALID.value: 9,
+                MonitorState.MISSED.value: 10,
+                MonitorState.INVALIDATED.value: 11,
+                MonitorState.PAUSED.value: 12,
+                MonitorState.STOPPED.value: 13,
             }
             payloads = [self._watch_payload(db, row) for row in rows]
             return sorted(payloads, key=lambda row: (priority.get(row["state"], 99), abs(row.get("distance_to_trigger_pct") or 999), row["ticker"]))
@@ -618,10 +748,10 @@ class LiveMonitorService:
             if value in (None, ""):
                 clean[key] = None
             else:
-                number = float(value)
-                if number <= 0:
+                parsed_number = float(value)
+                if parsed_number <= 0:
                     raise ValueError(f"{key} must be positive")
-                clean[key] = number
+                clean[key] = parsed_number
         with SessionLocal() as db:
             watch = db.get(LiveWatch, watch_id)
             if watch is None or not watch.current_setup_id:
@@ -632,15 +762,28 @@ class LiveMonitorService:
             active = _loads(setup.active_levels_json)
             manual = _loads(setup.manual_overrides_json)
             sources = _loads(setup.level_sources_json)
-            active.update(clean)
+            previous_primary = number(active.get("primary_entry_trigger"))
+            candidate = dict(active)
+            candidate.update(clean)
             manual.update(clean)
             sources.update({name: "MANUAL" for name in clean})
-            setup.active_levels_json = _dumps(active)
             setup.manual_overrides_json = _dumps(manual)
-            setup.level_sources_json = _dumps(sources)
             setup.trigger_source = "MANUAL"
             setup.chart_analysis_status = "MANUAL_OVERRIDE"
-            setup.max_chase_price = active.get("max_chase_price")
+            bundle = self._chart_bundle(db, watch, setup)
+            final_plan = self._persist_final_active_plan(
+                setup,
+                levels=candidate,
+                sources=sources,
+                current_price=number(bundle.get("reference_price")) or number(watch.current_price) or setup.plan_reference_price,
+                reconciliation_status="MANUAL_OVERRIDE",
+                structure_bars=((bundle.get("timeframes") or {}).get("structure") or {}).get("bars") or [],
+                execution_bars=((bundle.get("timeframes") or {}).get("execution") or {}).get("bars") or [],
+                entry_changed=number(candidate.get("primary_entry_trigger")) != previous_primary,
+                change_source="MANUAL",
+            )
+            active = final_plan["flat_levels"]
+            self._set_plan_gate_state(watch, setup)
             setup.updated_at = _utcnow()
             self._record_level_revisions(
                 db, watch=watch, setup=setup, review_row=None,
@@ -648,7 +791,17 @@ class LiveMonitorService:
                 validated_levels={}, final_levels=active, sources=sources,
                 sanity={}, validation={}, llm_output={},
             )
-            self._event(db, watch, setup=setup, event_type="levels_overridden", message="Manual level overlay updated", snapshot={"manual_overrides": manual, "planner_originals": _loads(setup.planner_levels_json)})
+            self._event(
+                db, watch, setup=setup, event_type="levels_overridden",
+                message="Manual level overlay updated and final plan revalidated",
+                snapshot={
+                    "manual_overrides": manual,
+                    "planner_originals": _loads(setup.planner_levels_json),
+                    "final_active_plan_id": final_plan["plan_id"],
+                    "final_plan_validation": final_plan["validation"],
+                    "target_regeneration": final_plan["target_regeneration"],
+                },
+            )
             db.commit()
             return self._watch_payload(db, watch, include_detail=True)
 
@@ -739,8 +892,8 @@ class LiveMonitorService:
                 automatic=False,
                 snapshot_event_type="setup_reanalyzed",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            self._record_chart_review_failure(watch_id, review_type="CHART_STRUCTURE_REVIEW", error=exc)
         return self.get_monitor(watch_id)
 
     def _chart_bundle(self, db: Session, watch: LiveWatch, setup: MonitorSetup, *, boundary: datetime | None = None) -> dict[str, Any]:
@@ -764,6 +917,10 @@ class LiveMonitorService:
             market_snapshot=snapshot or None,
         )
         bundle["planner_market_snapshot_id"] = setup.market_snapshot_id
+        bundle["final_active_plan_id"] = setup.final_active_plan_id
+        bundle["plan_integrity_status"] = setup.plan_integrity_status
+        bundle["reconciliation_status"] = setup.reconciliation_status
+        bundle["levels_source"] = "FINAL_ACTIVE_PLAN"
         bundle["snapshot_ids_match"] = bool(
             setup.market_snapshot_id
             and bundle.get("market_snapshot_id") == setup.market_snapshot_id
@@ -934,7 +1091,7 @@ class LiveMonitorService:
                 review = {
                     "status": blocked_status if current_price is not None else "UNAVAILABLE",
                     "model": None,
-                    "prompt_version": "chart-structure-review-v1",
+                    "prompt_version": CHART_STRUCTURE_PROMPT_VERSION,
                     "output": {},
                     "proposed_levels": {},
                     "validated_levels": {},
@@ -951,8 +1108,30 @@ class LiveMonitorService:
                 candidate_reconciliation = reconcile_levels(
                     planner_levels=planner_levels,
                     proposed_levels=proposed,
-                    validation={"accepted_levels": validated},
+                    validation=review.get("validation") or {"accepted_levels": validated},
                     manual_overrides=_loads(setup.manual_overrides_json),
+                )
+                entry_changed = number(candidate_reconciliation["final_active_levels"].get("primary_entry_trigger")) != number(active_levels.get("primary_entry_trigger"))
+                candidate_final_plan = finalize_active_plan(
+                    setup_id=setup.id,
+                    levels=candidate_reconciliation["final_active_levels"],
+                    sources=candidate_reconciliation["level_sources"],
+                    current_price=current_price,
+                    market_snapshot_id=setup.market_snapshot_id,
+                    config=self.config,
+                    reconciliation_status=candidate_reconciliation["reconciliation_status"],
+                    structure_bars=structure_bars,
+                    execution_bars=execution_bars,
+                    entry_changed=entry_changed,
+                    change_source="VALIDATED_CHART_LLM",
+                    level_reasons=_llm_level_reasons(review.get("output") or {}),
+                )
+                candidate_reconciliation["candidate_final_active_plan"] = candidate_final_plan
+                candidate_reconciliation["final_active_levels"] = candidate_final_plan["flat_levels"]
+                candidate_reconciliation["level_sources"] = candidate_final_plan["level_sources"]
+                candidate_reconciliation["activation_blocked"] = bool(
+                    candidate_reconciliation.get("activation_blocked")
+                    or not candidate_final_plan["validation"]["activation_allowed"]
                 )
             else:
                 candidate_reconciliation = {
@@ -973,7 +1152,7 @@ class LiveMonitorService:
                 review_type=normalized_type,
                 status=analysis_status,
                 model=review.get("model"),
-                prompt_version=str(review.get("prompt_version") or "chart-structure-review-v1"),
+                prompt_version=str(review.get("prompt_version") or CHART_STRUCTURE_PROMPT_VERSION),
                 chart_snapshot_ids_json=_dumps([snapshot.id for snapshot in snapshots]),
                 deterministic_input_json=_dumps({key: value for key, value in packet.items() if key not in {"image_paths"}}),
                 planner_levels_json=_dumps(planner_levels),
@@ -996,15 +1175,32 @@ class LiveMonitorService:
                     config=self.config,
                 )
                 if auto_policy["allowed"]:
+                    if candidate_reconciliation.get("activation_blocked"):
+                        auto_policy = {
+                            **auto_policy,
+                            "allowed": False,
+                            "blockers": [*(auto_policy.get("blockers") or []), "candidate_final_plan_not_activatable"],
+                        }
+                if auto_policy["allowed"]:
                     previous_active = dict(active_levels)
-                    active_levels = candidate_reconciliation["final_active_levels"]
-                    level_sources = candidate_reconciliation["level_sources"]
-                    setup.active_levels_json = _dumps(active_levels)
-                    setup.level_sources_json = _dumps(level_sources)
+                    final_plan = self._persist_final_active_plan(
+                        setup,
+                        levels=candidate_reconciliation["final_active_levels"],
+                        sources=candidate_reconciliation["level_sources"],
+                        current_price=current_price,
+                        reconciliation_status="LLM_CORRECTION_ACCEPTED",
+                        structure_bars=structure_bars,
+                        execution_bars=execution_bars,
+                        entry_changed=False,
+                        change_source="VALIDATED_CHART_LLM",
+                        level_reasons=_llm_level_reasons(review.get("output") or {}),
+                    )
+                    active_levels = final_plan["flat_levels"]
+                    level_sources = final_plan["level_sources"]
                     setup.trigger_source = "VALIDATED_CHART_LLM"
-                    setup.max_chase_price = active_levels.get("max_chase_price")
                     analysis_status = "AUTO_CORRECTED"
                     row.status = analysis_status
+                    self._set_plan_gate_state(watch, setup)
                     db.add(ChartLevelDecision(
                         id=_id(), watch_id=watch.id, setup_id=setup.id,
                         chart_review_id=row.id, ticker=watch.ticker,
@@ -1024,9 +1220,21 @@ class LiveMonitorService:
                             "final_active_levels": active_levels,
                         },
                     )
-                elif sanity.get("review_required") and candidate_reconciliation.get("has_disagreement"):
+                elif candidate_reconciliation.get("has_disagreement"):
                     analysis_status = "MANUAL_REVIEW_REQUIRED"
                     row.status = analysis_status
+                    setup.reconciliation_status = "MANUAL_REVIEW_REQUIRED"
+                    self._set_plan_gate_state(watch, setup)
+                elif analysis_status not in {"UNAVAILABLE", "PLAN_STALE", "MARKET_DATA_MISMATCH", "CHART_DATA_MISMATCH"}:
+                    setup.reconciliation_status = "PLANNER_ACCEPTED"
+            if not automatic and normalized_type in {"CHART_STRUCTURE_REVIEW", "CHART_LEVEL_REVIEW"}:
+                if candidate_reconciliation.get("has_disagreement"):
+                    analysis_status = "MANUAL_REVIEW_REQUIRED"
+                    row.status = analysis_status
+                    setup.reconciliation_status = "MANUAL_REVIEW_REQUIRED"
+                    self._set_plan_gate_state(watch, setup)
+                elif analysis_status not in {"UNAVAILABLE", "PLAN_STALE", "MARKET_DATA_MISMATCH", "CHART_DATA_MISMATCH"}:
+                    setup.reconciliation_status = "PLANNER_ACCEPTED"
             self._record_level_revisions(
                 db, watch=watch, setup=setup, review_row=row,
                 planner_levels=planner_levels, proposed_levels=proposed,
@@ -1154,17 +1362,26 @@ class LiveMonitorService:
             manual = _loads(setup.manual_overrides_json)
             proposed = _loads(setup.llm_proposed_levels_json)
             validated = _loads(setup.validated_chart_levels_json)
+            latest_review = db.get(ChartStructureReview, setup.latest_chart_review_id) if setup.latest_chart_review_id else None
+            review_validation = _loads(latest_review.validation_json) if latest_review else {}
             if normalized == "ACCEPT_VALIDATED":
                 result = reconcile_levels(
                     planner_levels=planner,
                     proposed_levels=proposed,
-                    validation={"accepted_levels": validated},
+                    validation=review_validation or {"accepted_levels": validated},
                     manual_overrides=manual,
                 )
+                if result.get("critical_rejections"):
+                    setup.reconciliation_status = "MANUAL_REVIEW_REQUIRED"
+                    setup.chart_analysis_status = "MANUAL_REVIEW_REQUIRED"
+                    self._set_plan_gate_state(watch, setup)
+                    db.commit()
+                    raise ValueError("LLM correction cannot be accepted because a critical proposed level was rejected; manual review is required")
                 selected = result["final_active_levels"]
                 sources = result["level_sources"]
                 setup.trigger_source = "VALIDATED_CHART_LLM"
                 setup.chart_analysis_status = "MODIFIED" if result["has_disagreement"] else "AGREES"
+                reconciliation_status = "LLM_CORRECTION_ACCEPTED" if result["has_disagreement"] else "PLANNER_ACCEPTED"
             elif normalized == "KEEP_PLANNER":
                 selected = dict(planner)
                 selected.update(manual)
@@ -1172,6 +1389,7 @@ class LiveMonitorService:
                 sources.update({name: "MANUAL" for name in LEVEL_NAMES if number(manual.get(name)) is not None})
                 setup.trigger_source = "MANUAL" if manual else "PLANNER"
                 setup.chart_analysis_status = "AGREES"
+                reconciliation_status = "MANUAL_OVERRIDE" if manual else "PLANNER_ACCEPTED"
             else:
                 clean: dict[str, float | None] = {}
                 for name, value in (manual_levels or {}).items():
@@ -1194,9 +1412,25 @@ class LiveMonitorService:
                 setup.manual_overrides_json = _dumps(manual)
                 setup.trigger_source = "MANUAL"
                 setup.chart_analysis_status = "MANUAL_OVERRIDE"
-            setup.active_levels_json = _dumps(selected)
-            setup.level_sources_json = _dumps(sources)
-            setup.max_chase_price = selected.get("max_chase_price")
+                reconciliation_status = "MANUAL_OVERRIDE"
+            previous_primary = number(previous.get("primary_entry_trigger"))
+            selected_primary = number(selected.get("primary_entry_trigger"))
+            bundle = self._chart_bundle(db, watch, setup)
+            final_plan = self._persist_final_active_plan(
+                setup,
+                levels=selected,
+                sources=sources,
+                current_price=number(bundle.get("reference_price")) or number(watch.current_price) or setup.plan_reference_price,
+                reconciliation_status=reconciliation_status,
+                structure_bars=((bundle.get("timeframes") or {}).get("structure") or {}).get("bars") or [],
+                execution_bars=((bundle.get("timeframes") or {}).get("execution") or {}).get("bars") or [],
+                entry_changed=selected_primary != previous_primary,
+                change_source="MANUAL" if normalized == "EDIT_MANUALLY" else "VALIDATED_CHART_LLM" if normalized == "ACCEPT_VALIDATED" else setup.trigger_source,
+                level_reasons=_llm_level_reasons(_loads(latest_review.llm_output_json) if latest_review else {}),
+            )
+            selected = final_plan["flat_levels"]
+            sources = final_plan["level_sources"]
+            self._set_plan_gate_state(watch, setup)
             setup.updated_at = _utcnow()
             row = ChartLevelDecision(
                 id=_id(),
@@ -1211,9 +1445,7 @@ class LiveMonitorService:
                 decided_by=decided_by,
             )
             db.add(row)
-            latest_review = db.get(ChartStructureReview, setup.latest_chart_review_id) if setup.latest_chart_review_id else None
             review_input = _loads(latest_review.deterministic_input_json) if latest_review else {}
-            review_validation = _loads(latest_review.validation_json) if latest_review else {}
             self._record_level_revisions(
                 db, watch=watch, setup=setup, review_row=latest_review,
                 planner_levels=planner, proposed_levels=proposed,
@@ -1228,7 +1460,13 @@ class LiveMonitorService:
                 setup=setup,
                 event_type="chart_level_decision",
                 message=f"Chart level decision recorded: {normalized}",
-                snapshot={"decision_id": row.id, "decision": normalized, "selected_levels": selected, "sources": sources},
+                snapshot={
+                    "decision_id": row.id, "decision": normalized,
+                    "selected_levels": selected, "sources": sources,
+                    "final_active_plan_id": final_plan["plan_id"],
+                    "final_plan_validation": final_plan["validation"],
+                    "target_regeneration": final_plan["target_regeneration"],
+                },
             )
             db.commit()
             return self._watch_payload(db, watch, include_detail=True)
@@ -1256,6 +1494,28 @@ class LiveMonitorService:
                 bars_1m = self._fetch_bars(watch.ticker, "one_minute", 1, force_refresh=False)
             if bars_5m is None:
                 bars_5m = self._fetch_bars(watch.ticker, "five_minute", 5, force_refresh=False)
+            latest_runtime_price = number((bars_1m[-1] if bars_1m else {}).get("close")) or number((bars_5m[-1] if bars_5m else {}).get("close")) or number(watch.current_price)
+            persisted_final_plan = _loads(setup.final_active_plan_json)
+            if not persisted_final_plan:
+                persisted_final_plan = self._persist_final_active_plan(
+                    setup,
+                    levels=levels,
+                    sources=_loads(setup.level_sources_json),
+                    current_price=latest_runtime_price or setup.plan_reference_price,
+                    reconciliation_status=setup.reconciliation_status or "PLANNER_ACCEPTED",
+                    structure_bars=bars_5m,
+                    execution_bars=bars_1m,
+                )
+                levels = persisted_final_plan["flat_levels"]
+            final_plan_validation = validate_final_plan(
+                levels=levels,
+                current_price=latest_runtime_price,
+                market_snapshot_id=setup.market_snapshot_id,
+                level_metadata=persisted_final_plan.get("levels") or {},
+                config=self.config,
+            )
+            setup.final_plan_validation_json = _dumps(final_plan_validation)
+            setup.plan_integrity_status = final_plan_validation["status"]
             attempt_count = db.query(ConfirmationAttempt).filter(ConfirmationAttempt.setup_id == setup.id).count()
             evaluation = evaluate_monitor(
                 previous_state=watch.state,
@@ -1318,6 +1578,11 @@ class LiveMonitorService:
             evaluation["level_semantic_validation"] = semantic_validation
             evaluation["level_sanity"] = level_sanity
             evaluation["runtime_data_consistency"] = runtime_consistency
+            evaluation["final_active_plan_id"] = setup.final_active_plan_id
+            evaluation["final_active_plan_market_snapshot_id"] = setup.market_snapshot_id
+            evaluation["plan_integrity_status"] = setup.plan_integrity_status
+            evaluation["final_plan_validation"] = final_plan_validation
+            evaluation["reconciliation_status"] = setup.reconciliation_status
             if stale_plan["stale"]:
                 if evaluation["state"] not in {MonitorState.INVALIDATED.value, MonitorState.DATA_STALE.value}:
                     evaluation["pre_stale_state"] = evaluation["state"]
@@ -1355,6 +1620,26 @@ class LiveMonitorService:
                 setup.plan_stale_reasons_json = _dumps([])
                 if setup.chart_analysis_status == "STALE":
                     setup.chart_analysis_status = "MODIFIED" if setup.trigger_source in {"MANUAL", "VALIDATED_CHART_LLM"} else "AGREES"
+            protected_states = {
+                MonitorState.INVALIDATED.value,
+                MonitorState.DATA_STALE.value,
+                MonitorState.PLAN_STALE.value,
+            }
+            if evaluation["state"] not in protected_states and setup.plan_integrity_status == "INVALID":
+                evaluation["pre_integrity_state"] = evaluation["state"]
+                evaluation["state"] = MonitorState.PLAN_GEOMETRY_INVALID.value
+                evaluation.setdefault("hard_blockers", []).append("plan_geometry_invalid")
+                evaluation["manual_order_plan"] = None
+                evaluation["planned_rr_at_primary_trigger"] = None
+                evaluation["current_executable_rr"] = None
+                evaluation["current_rr_tp1"] = None
+            elif evaluation["state"] not in protected_states and setup.reconciliation_status == "MANUAL_REVIEW_REQUIRED":
+                evaluation["pre_reconciliation_state"] = evaluation["state"]
+                evaluation["state"] = MonitorState.PLAN_REVIEW_REQUIRED.value
+                evaluation.setdefault("hard_blockers", []).append("level_disagreement_manual_review_required")
+                evaluation["manual_order_plan"] = None
+                evaluation["current_executable_rr"] = None
+                evaluation["current_rr_tp1"] = None
             evaluation["evaluated_at"] = current_time
             historical_creation = _loads(setup.planner_baseline_json).get("historical_context_at_creation") or {}
             evaluation["rule_version"] = setup.rule_version
@@ -2108,6 +2393,10 @@ class LiveMonitorService:
             "data_age_seconds": evaluation.get("data_age_seconds"),
             "max_chase_price": display_levels.get("max_chase_price"),
             "chart_analysis_status": setup.chart_analysis_status if setup else "NOT_RUN",
+            "reconciliation_status": setup.reconciliation_status if setup else None,
+            "plan_integrity_status": setup.plan_integrity_status if setup else None,
+            "final_active_plan_id": setup.final_active_plan_id if setup else None,
+            "final_plan_validation": _loads(setup.final_plan_validation_json) if setup else {},
             "plan_stale_reason": setup.plan_stale_reason if setup else None,
             "planner_chart_snapshot_ids_match": bool(
                 setup
@@ -2117,6 +2406,8 @@ class LiveMonitorService:
             ),
         }
         if include_detail and setup:
+            final_active_plan = _loads(setup.final_active_plan_json)
+            latest_chart_review_row = db.get(ChartStructureReview, setup.latest_chart_review_id) if setup.latest_chart_review_id else None
             adjustment_rows = learned_adjustment_payloads(db, setup.id)
             profile_payload = self._profile_for(db, setup)
             score_breakdown = adjustment_breakdown(
@@ -2129,7 +2420,7 @@ class LiveMonitorService:
             latest_revision_by_name: dict[str, LevelRevision] = {}
             for revision in revision_rows:
                 latest_revision_by_name.setdefault(revision.level_name, revision)
-            active_level_metadata = {
+            active_level_metadata = final_active_plan.get("levels") or {
                 name: {
                     "price": display_levels.get(name),
                     "level_type": LEVEL_ROLES.get(name, name.upper()),
@@ -2145,6 +2436,43 @@ class LiveMonitorService:
                 "planner_baseline": _loads(setup.planner_baseline_json),
                 "planner_levels": {} if plan_stale else _loads(setup.planner_levels_json),
                 "active_levels": display_levels,
+                "final_active_plan": final_active_plan,
+                "final_active_plan_id": setup.final_active_plan_id,
+                "final_plan_validation": _loads(setup.final_plan_validation_json),
+                "plan_integrity_status": setup.plan_integrity_status,
+                "reconciliation_status": setup.reconciliation_status,
+                "reconciliation_details": _loads(setup.proposed_setup_json),
+                "plan_versions": {
+                    "planner_original_plan": {
+                        "setup_id": setup.id,
+                        "market_snapshot_id": setup.market_snapshot_id,
+                        "created_at": setup.plan_created_at,
+                        "source": "PLANNER",
+                        "levels": _loads(setup.planner_levels_json),
+                    },
+                    "llm_proposed_plan": {
+                        "setup_id": setup.id,
+                        "market_snapshot_id": setup.market_snapshot_id,
+                        "created_at": latest_chart_review_row.created_at if latest_chart_review_row else None,
+                        "source": "CHART_LLM",
+                        "levels": _loads(setup.llm_proposed_levels_json),
+                    },
+                    "validated_plan": {
+                        "setup_id": setup.id,
+                        "market_snapshot_id": setup.market_snapshot_id,
+                        "created_at": latest_chart_review_row.created_at if latest_chart_review_row else None,
+                        "source": "DETERMINISTIC_VALIDATOR",
+                        "levels": _loads(setup.validated_chart_levels_json),
+                    },
+                    "final_active_plan": final_active_plan,
+                    "manual_override_plan": {
+                        "setup_id": setup.id,
+                        "market_snapshot_id": setup.market_snapshot_id,
+                        "created_at": setup.updated_at,
+                        "source": "MANUAL",
+                        "levels": _loads(setup.manual_overrides_json),
+                    },
+                },
                 "historical_stale_levels": levels if plan_stale else {},
                 "market_snapshot": {key: value for key, value in snapshot.items() if key != "bars"},
                 "manual_overrides": _loads(setup.manual_overrides_json),
