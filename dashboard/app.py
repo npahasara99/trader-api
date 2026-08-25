@@ -23,6 +23,7 @@ from dashboard.api_client import (
     TraderAPIError,
     add_live_monitor,
     api_config_status,
+    backfill_sp500_daily_bars,
     bot_action,
     decide_learning_proposal,
     decide_live_monitor_chart_levels,
@@ -34,6 +35,7 @@ from dashboard.api_client import (
     fetch_live_monitor_charts,
     fetch_live_monitors,
     fetch_live_monitor_status,
+    fetch_sp500_daily_bars_status,
     fetch_monitor_journal,
     fetch_monitor_learning,
     fetch_bot_config,
@@ -142,6 +144,10 @@ RUNNER_DEFAULTS = {
     "sp500_llm_model": "gpt-5",
     "sp500_llm_style": "sp500_daily_ranker_v1",
     "sp500_compact_response": True,
+    "sp500_backfill_start_index": 0,
+    "sp500_backfill_batch_size": 10,
+    "sp500_backfill_years": 2,
+    "sp500_backfill_last_result": None,
     "basket_tickers": "",
     "basket_mode": "manual",
     "basket_llm_provider": "chatgpt-actions",
@@ -392,6 +398,7 @@ def _render_sp500_workflow_result(result: dict) -> None:
     current_cache_count = int(cache_coverage.get("constituents_current") or 0)
     sufficient_cache_count = int(cache_coverage.get("constituents_with_sufficient_history") or 0)
     universe_size = int(result.get("universe_size") or 0)
+    cache_blocked = universe_size > 0 and current_cache_count == 0
     if cache_coverage:
         st.caption(
             f"Daily-bar cache: {current_cache_count}/{universe_size} current constituents; "
@@ -399,13 +406,17 @@ def _render_sp500_workflow_result(result: dict) -> None:
             f"Cache as of {cache_coverage.get('cache_as_of') or 'unknown'}."
         )
     market_data_validation = diagnostics.get("market_data_validation") or {}
-    if market_data_validation.get("valid") is False:
+    if market_data_validation.get("valid") is False and not cache_blocked:
         st.warning(str(market_data_validation.get("warning") or "S&P 500 market-data coverage is incomplete."))
-    if not (result.get("best_setups") or []) and result.get("selection_message"):
+    if not cache_blocked and not (result.get("best_setups") or []) and result.get("selection_message"):
         st.warning(str(result.get("selection_message")))
     quality_state = str(result.get("best_setup_quality_state") or "")
-    if quality_state in {"weak_scan", "no_quality_setups"}:
+    if not cache_blocked and quality_state in {"weak_scan", "no_quality_setups"}:
         st.warning("NO A-GRADE SETUPS CURRENTLY FOUND. The table below contains the highest-ranked watch candidates.")
+
+    if cache_blocked:
+        _render_sp500_cache_recovery(universe_size=universe_size, cache_as_of=cache_coverage.get("cache_as_of"))
+        return
 
     if result.get("supabase_persisted"):
         st.toast("S&P 500 scan persisted to the reporting database.", icon=":material/check_circle:")
@@ -508,6 +519,113 @@ def _render_sp500_workflow_result(result: dict) -> None:
     # separate sibling section below the summarized diagnostics.
     with st.expander("Raw Scanner Diagnostics", expanded=False):
         st.json(diagnostics)
+
+
+def _render_sp500_cache_recovery(*, universe_size: int, cache_as_of: object = None) -> None:
+    """Offer a resumable recovery path when the cache-only prescan has no current bars."""
+
+    with st.container(border=True):
+        st.markdown("### Daily-Bar Cache Required")
+        st.warning(
+            "The SP500 universe loaded, but none of its saved daily bars are current enough for the prescan. "
+            "Refresh the cache in bounded batches, then rerun the daily scan."
+        )
+        st.caption(
+            f"Universe: {universe_size} tickers | Last usable cache date: {cache_as_of or 'unknown'} | "
+            "Existing bars are retained and updated; planner and ranking logic are not changed."
+        )
+
+        control_cols = st.columns(3)
+        control_cols[0].number_input(
+            "Batch Size",
+            min_value=1,
+            max_value=50,
+            step=1,
+            key="sp500_backfill_batch_size",
+            help="Use 10-20 on Railway to keep each API request bounded.",
+        )
+        control_cols[1].metric(
+            "Next Start Index",
+            min(int(st.session_state.get("sp500_backfill_start_index") or 0), max(universe_size - 1, 0)),
+        )
+        control_cols[2].number_input(
+            "History Years",
+            min_value=1,
+            max_value=5,
+            step=1,
+            key="sp500_backfill_years",
+            help="Two years supports the scanner's 12-month and 200-day context without a 10-year payload.",
+        )
+
+        action_cols = st.columns([2, 1, 1])
+        run_backfill = action_cols[0].button(
+            "Refresh Next Daily-Bar Batch",
+            type="primary",
+            use_container_width=True,
+            key="sp500_backfill_next_batch",
+        )
+        check_status = action_cols[1].button(
+            "Check Stored Bars",
+            use_container_width=True,
+            key="sp500_backfill_check_status",
+        )
+        reset_cursor = action_cols[2].button(
+            "Reset Cursor",
+            use_container_width=True,
+            key="sp500_backfill_reset_cursor",
+        )
+
+        if reset_cursor:
+            st.session_state["sp500_backfill_start_index"] = 0
+            st.session_state["sp500_backfill_last_result"] = None
+            st.rerun()
+
+        if run_backfill:
+            try:
+                with st.spinner("Refreshing the next SP500 daily-bar batch..."):
+                    backfill_result = backfill_sp500_daily_bars(
+                        start_index=int(st.session_state.get("sp500_backfill_start_index") or 0),
+                        batch_size=int(st.session_state.get("sp500_backfill_batch_size") or 10),
+                        years=int(st.session_state.get("sp500_backfill_years") or 2),
+                    )
+                st.session_state["sp500_backfill_last_result"] = backfill_result
+                next_index = backfill_result.get("next_start_index")
+                if next_index is not None:
+                    st.session_state["sp500_backfill_start_index"] = int(next_index)
+                st.success(
+                    f"Processed {int(backfill_result.get('processed_count') or 0)} tickers: "
+                    f"{int(backfill_result.get('updated') or 0)} updated, "
+                    f"{int(backfill_result.get('skipped_cached') or 0)} already current, "
+                    f"{int(backfill_result.get('failed') or 0)} failed."
+                )
+            except TraderAPIError as exc:
+                st.error(str(exc))
+
+        if check_status:
+            try:
+                with st.spinner("Checking persisted SP500 daily bars..."):
+                    status = fetch_sp500_daily_bars_status()
+                st.info(
+                    f"Stored bars exist for {int(status.get('symbols_with_data') or 0)} of "
+                    f"{int(status.get('requested_symbols') or universe_size)} SP500 tickers. "
+                    "Rerun the scan to apply its freshness and minimum-history checks."
+                )
+            except TraderAPIError as exc:
+                st.error(str(exc))
+
+        last_result = st.session_state.get("sp500_backfill_last_result") or {}
+        if last_result:
+            remaining = int(last_result.get("remaining") or 0)
+            processed_to = int(last_result.get("end_index") or 0)
+            requested_total = int(last_result.get("requested_total") or universe_size)
+            st.progress(min(processed_to / max(requested_total, 1), 1.0))
+            if remaining:
+                st.caption(
+                    f"Backfill cursor is at {processed_to}/{requested_total}; {remaining} tickers remain. "
+                    "Continue with the next batch, then rerun the S&P 500 Daily Scan."
+                )
+            else:
+                st.success("All SP500 batches were processed. Rerun the S&P 500 Daily Scan.")
 
 
 def _render_runner_plan_result(rows: list[dict], *, planned_at: str | None = None, market_regime: str | None = None) -> None:

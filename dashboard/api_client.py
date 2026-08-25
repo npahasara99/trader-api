@@ -221,6 +221,46 @@ def run_sp500_daily_opportunities(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def backfill_sp500_daily_bars(
+    *,
+    start_index: int = 0,
+    batch_size: int = 10,
+    years: int = 2,
+) -> dict[str, Any]:
+    """Refresh one bounded SP500 daily-bar batch through the trader API."""
+
+    return post_json(
+        "/data/daily-bars/backfill",
+        {
+            "symbols": None,
+            "use_sp100": False,
+            "use_sp500": True,
+            "top_n": 600,
+            "years": max(1, min(int(years), 15)),
+            "refresh": False,
+            "commit_every": 5,
+            "start_index": max(0, int(start_index)),
+            "batch_size": max(1, min(int(batch_size), 100)),
+            "include_results": False,
+        },
+        timeout=get_api_timeout_seconds(300),
+    )
+
+
+def fetch_sp500_daily_bars_status() -> dict[str, Any]:
+    """Return persisted daily-bar coverage for the current SP500 universe."""
+
+    return get_json(
+        "/data/daily-bars/status",
+        {
+            "use_sp100": False,
+            "use_sp500": True,
+            "top_n": 600,
+        },
+        timeout=get_api_timeout_seconds(120),
+    )
+
+
 def run_single_stock_workflow(payload: dict[str, Any]) -> dict[str, Any]:
     return post_json(
         "/workflow/swing-plan-log",
