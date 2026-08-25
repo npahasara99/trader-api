@@ -19,7 +19,7 @@ from .opportunity_ranking import build_portfolio_snapshot, rank_daily_opportunit
 from .candidate_discovery import (
     build_multilane_candidate_order,
     classify_best_setup_quality,
-    classify_search_exhaustiveness,
+    classify_search_exhaustiveness_with_coverage,
     run_adaptive_batches,
     sector_counts,
     setup_family_counts,
@@ -38,7 +38,7 @@ from sqlalchemy import text, func
 from sqlalchemy.exc import IntegrityError
 
 from .db import Base, SessionLocal, engine, get_db
-from .models import ManagedPosition, SwingDecision, DailyBar, TradingViewSignalEvent
+from .models import DailyBarCacheStatus, ManagedPosition, SwingDecision, DailyBar, TradingViewSignalEvent
 from .bot.enums import PositionStatus
 from .settings import settings
 from .logic import (
@@ -59,6 +59,9 @@ from .market_data import (
     build_bulk_cached_daily_loaders,
     fetch_finnhub_daily_bars_with_meta,
     get_bars as get_timeframe_bars,
+    last_completed_market_date,
+    repair_daily_bar_cache,
+    resolve_expected_market_date,
 )
 from .bot.api import router as bot_router
 from .live_monitor.api import router as live_monitor_router
@@ -931,6 +934,11 @@ class DailyBarsStatusRow(BaseModel):
     count: int = 0
     min_date: Optional[date] = None
     max_date: Optional[date] = None
+    provider_symbol: Optional[str] = None
+    provider: Optional[str] = None
+    freshness_status: Optional[str] = None
+    history_sufficient: bool = False
+    last_error_code: Optional[str] = None
 
 
 class DailyBarsStatusResponse(BaseModel):
@@ -938,6 +946,14 @@ class DailyBarsStatusResponse(BaseModel):
     requested_symbols: int
     symbols_with_data: int
     total_rows: int
+    expected_market_date: Optional[date] = None
+    symbols_current: int = 0
+    symbols_stale: int = 0
+    symbols_missing: int = 0
+    symbols_with_sufficient_history: int = 0
+    market_data_coverage_pct: float = 0.0
+    provider_counts: dict = Field(default_factory=dict)
+    last_backfill: Optional[datetime] = None
     rows: List[DailyBarsStatusRow]
 
 
@@ -1543,19 +1559,52 @@ def _daily_bars_status_rows(db: Session, symbols: List[str]) -> List[DailyBarsSt
     )
 
     by_symbol = {str(r.symbol): r for r in agg}
+    status_rows = (
+        db.query(DailyBarCacheStatus)
+        .filter(DailyBarCacheStatus.canonical_symbol.in_(symbols))
+        .all()
+    )
+    status_by_symbol = {row.canonical_symbol: row for row in status_rows}
+    expected_date = resolve_expected_market_date(db)
     out: List[DailyBarsStatusRow] = []
     for sym in symbols:
         row = by_symbol.get(sym)
+        status = status_by_symbol.get(sym)
         if row is None:
-            out.append(DailyBarsStatusRow(symbol=sym, count=0, min_date=None, max_date=None))
+            out.append(
+                DailyBarsStatusRow(
+                    symbol=sym,
+                    count=0,
+                    min_date=None,
+                    max_date=None,
+                    provider_symbol=getattr(status, "provider_symbol", None),
+                    provider=getattr(status, "provider", None),
+                    freshness_status="CACHE_MISSING",
+                    history_sufficient=False,
+                    last_error_code=getattr(status, "last_error_code", None),
+                )
+            )
             continue
 
+        count = int(row.count or 0)
+        freshness = (
+            "CACHE_STALE"
+            if row.max_date and row.max_date < expected_date
+            else "INSUFFICIENT_HISTORY"
+            if count < DEFAULT_PLANNING_CONFIG.sp500_market_data_min_history_bars
+            else "CURRENT"
+        )
         out.append(
             DailyBarsStatusRow(
                 symbol=sym,
-                count=int(row.count or 0),
+                count=count,
                 min_date=row.min_date,
                 max_date=row.max_date,
+                provider_symbol=getattr(status, "provider_symbol", None),
+                provider=getattr(status, "provider", None),
+                freshness_status=freshness,
+                history_sufficient=count >= DEFAULT_PLANNING_CONFIG.sp500_market_data_min_history_bars,
+                last_error_code=getattr(status, "last_error_code", None),
             )
         )
     return out
@@ -2466,12 +2515,78 @@ def workflow_sp500_daily_opportunities(
         *DEFAULT_PLANNING_CONFIG.benchmark_symbols,
         *sorted(sector_benchmarks),
     ]
+    benchmark_symbols = sorted({
+        *DEFAULT_PLANNING_CONFIG.benchmark_symbols,
+        *sector_benchmarks,
+    })
+    benchmark_repair: dict = {}
+    market_data_repair: dict = {}
+    if DEFAULT_PLANNING_CONFIG.sp500_market_data_auto_repair:
+        try:
+            # Repair benchmarks first so their latest completed session resolves
+            # exchange holidays for the broader constituent refresh.
+            benchmark_repair = repair_daily_bar_cache(
+                db,
+                benchmark_symbols,
+                history_days=DEFAULT_PLANNING_CONFIG.sp500_market_data_history_days,
+                min_history_bars=DEFAULT_PLANNING_CONFIG.sp500_market_data_min_history_bars,
+                max_workers=DEFAULT_PLANNING_CONFIG.sp500_market_data_max_workers,
+                commit_every=DEFAULT_PLANNING_CONFIG.sp500_market_data_commit_every,
+                incremental_overlap_days=DEFAULT_PLANNING_CONFIG.sp500_market_data_incremental_overlap_days,
+            )
+            expected_market_date = resolve_expected_market_date(
+                db,
+                benchmark_symbols=tuple(DEFAULT_PLANNING_CONFIG.benchmark_symbols),
+                at=planned_at,
+            )
+            market_data_repair = repair_daily_bar_cache(
+                db,
+                base_universe,
+                history_days=DEFAULT_PLANNING_CONFIG.sp500_market_data_history_days,
+                min_history_bars=DEFAULT_PLANNING_CONFIG.sp500_market_data_min_history_bars,
+                expected_date=expected_market_date,
+                max_workers=DEFAULT_PLANNING_CONFIG.sp500_market_data_max_workers,
+                commit_every=DEFAULT_PLANNING_CONFIG.sp500_market_data_commit_every,
+                incremental_overlap_days=DEFAULT_PLANNING_CONFIG.sp500_market_data_incremental_overlap_days,
+            )
+            print(
+                "SP500 daily-bar repair complete: "
+                f"universe={len(base_universe)} attempted={market_data_repair.get('fetch_attempted', 0)} "
+                f"success={market_data_repair.get('fetch_success', 0)} "
+                f"failed={market_data_repair.get('fetch_failed', 0)} "
+                f"current={market_data_repair.get('current', 0)} "
+                f"seconds={market_data_repair.get('duration_seconds', 0)}"
+            )
+        except Exception as exc:
+            db.rollback()
+            expected_market_date = last_completed_market_date(planned_at)
+            market_data_repair = {
+                "fetch_attempted": 0,
+                "fetch_success": 0,
+                "fetch_failed": len(base_universe),
+                "failure_reasons": [{
+                    "ticker": None,
+                    "reason": "FETCH_FAILED",
+                    "details": f"repair_service:{type(exc).__name__}: {exc}",
+                }],
+            }
+            print(f"SP500 daily-bar repair warning: {type(exc).__name__}: {exc}")
+    else:
+        expected_market_date = resolve_expected_market_date(
+            db,
+            benchmark_symbols=tuple(DEFAULT_PLANNING_CONFIG.benchmark_symbols),
+            at=planned_at,
+        )
     prescan_closes_loader, prescan_bars_loader, prescan_cache_coverage = build_bulk_cached_daily_loaders(
         db,
         prescan_support_symbols,
-        lookback_days=DEFAULT_BAR_LOOKBACK_DAYS,
+        lookback_days=max(
+            DEFAULT_BAR_LOOKBACK_DAYS,
+            DEFAULT_PLANNING_CONFIG.sp500_market_data_history_days,
+        ),
         max_age_days=DEFAULT_PLANNING_CONFIG.sp500_prescan_cache_max_age_days,
-        min_history_bars=DEFAULT_PLANNING_CONFIG.pre_scan_min_history_bars,
+        min_history_bars=DEFAULT_PLANNING_CONFIG.sp500_market_data_min_history_bars,
+        expected_market_date=expected_market_date,
     )
     prescan_cache_coverage["constituent_symbols"] = len(base_universe)
     prescan_cache_coverage["constituents_current"] = sum(
@@ -2480,14 +2595,36 @@ def workflow_sp500_daily_opportunities(
     prescan_cache_coverage["constituents_with_sufficient_history"] = sum(
         1
         for ticker in base_universe
-        if len(prescan_bars_loader(ticker)) >= DEFAULT_PLANNING_CONFIG.pre_scan_min_history_bars
+        if len(prescan_bars_loader(ticker)) >= DEFAULT_PLANNING_CONFIG.sp500_market_data_min_history_bars
     )
+    prescan_cache_coverage["market_data_coverage_pct"] = round(
+        prescan_cache_coverage["constituents_current"] / max(len(base_universe), 1),
+        4,
+    )
+    prescan_cache_coverage["history_coverage_pct"] = round(
+        prescan_cache_coverage["constituents_with_sufficient_history"] / max(len(base_universe), 1),
+        4,
+    )
+    prescan_cache_coverage["effective_search_coverage_pct"] = min(
+        prescan_cache_coverage["market_data_coverage_pct"],
+        prescan_cache_coverage["history_coverage_pct"],
+    )
+    prescan_cache_coverage["repair"] = {
+        key: value
+        for key, value in market_data_repair.items()
+        if key not in {"results"}
+    }
+    prescan_cache_coverage["benchmark_repair"] = {
+        key: value
+        for key, value in benchmark_repair.items()
+        if key not in {"results"}
+    }
     prescan_cache_coverage["missing_symbols"] = list(prescan_cache_coverage.get("missing_symbols") or [])[:25]
     prescan_cache_coverage["stale_symbols"] = list(prescan_cache_coverage.get("stale_symbols") or [])[:25]
     broad_scope = not bool((req.sector or "").strip() or (req.industry or "").strip())
-    market_data_minimum = min(
-        DEFAULT_PLANNING_CONFIG.sp500_universe_minimum_broad_size,
-        max(len(base_universe), 1),
+    market_data_minimum = max(
+        1,
+        int(len(base_universe) * DEFAULT_PLANNING_CONFIG.sp500_market_data_min_coverage_pct + 0.9999),
     )
     market_data_validation = {
         "status": "valid",
@@ -2495,17 +2632,23 @@ def workflow_sp500_daily_opportunities(
         "expected_minimum": market_data_minimum if broad_scope else None,
         "warning": None,
     }
-    if broad_scope and prescan_cache_coverage["constituents_current"] < market_data_minimum:
+    if (
+        prescan_cache_coverage["constituents_current"] < market_data_minimum
+        or prescan_cache_coverage["constituents_with_sufficient_history"] < market_data_minimum
+    ):
         market_data_validation = {
-            "status": "MARKET_DATA_COVERAGE_INSUFFICIENT",
+            "status": "SCAN_DATA_INCOMPLETE",
             "valid": False,
-            "expected_minimum": market_data_minimum,
+            "expected_minimum": market_data_minimum if broad_scope else None,
+            "coverage_pct": prescan_cache_coverage["market_data_coverage_pct"],
             "warning": (
-                "Broad SP500 universe loaded, but only "
-                f"{prescan_cache_coverage['constituents_current']} constituents have current cached daily bars. "
-                "Sector results may be incomplete until the SP500 daily-bar cache is backfilled."
+                "SCAN INCOMPLETE - market data is available for only "
+                f"{prescan_cache_coverage['constituents_current']} of {len(base_universe)} requested constituents. "
+                f"Only {prescan_cache_coverage['constituents_with_sufficient_history']} have sufficient technical history. "
+                "Scanner conclusions are not representative."
             ),
         }
+    market_data_is_complete = bool(market_data_validation.get("valid"))
     ranked_prescan = _rank_pre_scan_universe(
         base_universe,
         daily_closes_loader=prescan_closes_loader,
@@ -2544,7 +2687,8 @@ def workflow_sp500_daily_opportunities(
         for item in shortlist
     }
 
-    # Only the small deep-analysis set may invoke provider-backed refreshes.
+    # Deep analysis may request richer/timeframe data after broad daily bars
+    # have already been repaired and loaded from the persistent cache.
     daily_closes_loader = _build_daily_closes_loader(db)
     daily_bars_loader = _build_daily_bars_loader(db)
     deep_analysis_started = time.monotonic()
@@ -2761,18 +2905,19 @@ def workflow_sp500_daily_opportunities(
         "llm_style": req.llm_style,
     }
     rows_logged = 0
-    try:
-        rows_logged = _queue_rows_for_logging(
-            db,
-            planned_at=planned_at,
-            mode=req.mode,
-            rows=[item.row for item in ranked_rows],
-            meta=meta,
-        )
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"SP500 workflow logging failed: {exc}")
+    if market_data_is_complete:
+        try:
+            rows_logged = _queue_rows_for_logging(
+                db,
+                planned_at=planned_at,
+                mode=req.mode,
+                rows=[item.row for item in ranked_rows],
+                meta=meta,
+            )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"SP500 workflow logging failed: {exc}")
 
     failed_rows = ranking["failures"]
     failure_reasons = [
@@ -2800,11 +2945,13 @@ def workflow_sp500_daily_opportunities(
     a_grade_count = sum(
         1 for item in ranking["all_candidates"] if item["grade"] in {"A-", "A", "A+"}
     )
-    search_exhaustiveness = classify_search_exhaustiveness(
+    search_exhaustiveness = classify_search_exhaustiveness_with_coverage(
         analyzed=len(rows),
         viable=len(prescan_ranked),
         initial_limit=deep_limit,
         maximum_limit=max_deep_limit,
+        data_coverage_pct=float(prescan_cache_coverage.get("effective_search_coverage_pct") or 0.0),
+        minimum_data_coverage_pct=DEFAULT_PLANNING_CONFIG.sp500_market_data_min_coverage_pct,
     )
     best_setup_quality_state = classify_best_setup_quality(ranking["all_candidates"])
     market_data_tickers = [ticker for ticker in base_universe if prescan_bars_loader(ticker)]
@@ -2819,6 +2966,30 @@ def workflow_sp500_daily_opportunities(
         "deep_analysis_sector_counts": sector_counts(rows, metadata_by_ticker),
         "valid_setup_sector_counts": sector_counts(valid_setup_tickers, metadata_by_ticker),
         "best_setup_sector_counts": sector_counts(best_setup_tickers, metadata_by_ticker),
+    }
+    history_sufficient_tickers = [
+        ticker
+        for ticker in base_universe
+        if len(prescan_bars_loader(ticker)) >= DEFAULT_PLANNING_CONFIG.sp500_market_data_min_history_bars
+    ]
+    failed_market_data_tickers = {
+        str(item.get("ticker") or "")
+        for item in (market_data_repair.get("failure_reasons") or [])
+        if item.get("ticker")
+    }
+    universe_sector_counts = sector_counts(base_universe, metadata_by_ticker)
+    current_sector_counts = sector_counts(market_data_tickers, metadata_by_ticker)
+    history_sector_counts = sector_counts(history_sufficient_tickers, metadata_by_ticker)
+    failed_sector_counts = sector_counts(failed_market_data_tickers, metadata_by_ticker)
+    market_data_sector_coverage = {
+        sector: {
+            "universe": total,
+            "current": current_sector_counts.get(sector, 0),
+            "history_sufficient": history_sector_counts.get(sector, 0),
+            "failed": failed_sector_counts.get(sector, 0),
+            "coverage_pct": round(current_sector_counts.get(sector, 0) / max(total, 1), 4),
+        }
+        for sector, total in universe_sector_counts.items()
     }
     setup_family_stage_counts = {
         "prescan_primary_family_counts": setup_family_counts(prescan_passed),
@@ -2854,6 +3025,8 @@ def workflow_sp500_daily_opportunities(
     candidate_funnel = {
         "universe_loaded": len(base_universe),
         "market_data_success": len(market_data_tickers),
+        "technical_history_sufficient": len(history_sufficient_tickers),
+        "prescan_evaluated": len(history_sufficient_tickers),
         "basic_suitability_passed": len(prescan_passed),
         "prescan_passed": len(prescan_ranked),
         "initial_shortlisted": len(shortlist),
@@ -2861,12 +3034,20 @@ def workflow_sp500_daily_opportunities(
         "valid_setups": len(ranking["all_candidates"]),
         "a_grade_setups": a_grade_count,
         "actionable_setups": actionable_count,
+        "market_data_failed": int(market_data_repair.get("fetch_failed") or 0),
         "failed_symbols": failed_symbol_count,
     }
-    if not shortlist:
+    data_incomplete = search_exhaustiveness == "data_incomplete"
+    if data_incomplete:
         selection_message = (
-            "NO CURRENT S&P 500 DAILY-BAR COVERAGE WAS AVAILABLE FOR DEEP ANALYSIS. "
-            "Populate the cache with /data/daily-bars/backfill using use_sp500=true, then rerun."
+            "SCAN INCOMPLETE - MARKET DATA AVAILABLE FOR ONLY "
+            f"{len(market_data_tickers)} OF {len(base_universe)} CONSTITUENTS. "
+            f"SUFFICIENT TECHNICAL HISTORY EXISTS FOR {len(history_sufficient_tickers)}. "
+            "Trade-quality conclusions are suppressed until data coverage recovers."
+        )
+    elif not shortlist:
+        selection_message = (
+            "No constituents passed the current technical prescreen after broad market-data validation."
         )
     elif best_trades_today:
         selection_message = (
@@ -2900,8 +3081,12 @@ def workflow_sp500_daily_opportunities(
         "cached_constituents_with_sufficient_history": prescan_cache_coverage[
             "constituents_with_sufficient_history"
         ],
+        "market_data_coverage_pct": prescan_cache_coverage["market_data_coverage_pct"],
+        "history_sufficient": len(history_sufficient_tickers),
+        "prescan_evaluated": len(history_sufficient_tickers),
         "target_actionable_trades_per_day": DEFAULT_PLANNING_CONFIG.target_actionable_trades_per_day,
         "min_required_trades_per_day": DEFAULT_PLANNING_CONFIG.min_required_trades_per_day,
+        "results_representative": not data_incomplete,
     }
     portfolio_summary = {
         "max_positions": portfolio.max_positions,
@@ -2937,6 +3122,7 @@ def workflow_sp500_daily_opportunities(
         "market_data_validation": market_data_validation,
         "candidate_funnel": candidate_funnel,
         "sector_stage_counts": sector_stage_counts,
+        "market_data_sector_coverage": market_data_sector_coverage,
         "setup_family_stage_counts": setup_family_stage_counts,
         "strategy_dominance_warnings": strategy_dominance_warnings,
         "adaptive_expansion": {
@@ -2958,12 +3144,17 @@ def workflow_sp500_daily_opportunities(
         "portfolio_read_error": portfolio_error,
         "previous_setup_read_error": previous_setup_error,
         "daily_bar_cache_coverage": prescan_cache_coverage,
+        "market_data_repair": {
+            key: value
+            for key, value in market_data_repair.items()
+            if key not in {"results"}
+        },
         "performance": {
             "scan_duration_seconds": round(time.monotonic() - workflow_started, 3),
-            "market_data_requests": None,
-            "market_data_request_count_available": False,
-            "cache_hits": len(market_data_tickers),
-            "symbols_failed": failed_symbol_count,
+            "market_data_requests": int(market_data_repair.get("fetch_attempted") or 0),
+            "market_data_request_count_available": True,
+            "cache_hits": int(market_data_repair.get("cache_hits") or 0),
+            "symbols_failed": int(market_data_repair.get("fetch_failed") or 0) + failed_symbol_count,
         },
         "stage_seconds": {
             "prescan": prescan_seconds,
@@ -2988,23 +3179,23 @@ def workflow_sp500_daily_opportunities(
         pre_scan_shortlist_count=len(shortlist),
         candidates_with_price=candidates_with_price,
         eligible_count=len(ranking["all_candidates"]),
-        selected_count=len(best_setups),
+        selected_count=0 if data_incomplete else len(best_setups),
         rows_logged=rows_logged,
         selection_message=selection_message,
         scan_summary=scan_summary,
         portfolio_summary=portfolio_summary,
         scoring_configuration=scoring_configuration,
-        best_setups=best_setups,
-        best_trades_today=best_trades_today,
-        next_to_trigger=next_to_trigger,
-        best_by_setup_family=best_by_setup_family,
+        best_setups=[] if data_incomplete else best_setups,
+        best_trades_today=[] if data_incomplete else best_trades_today,
+        next_to_trigger=[] if data_incomplete else next_to_trigger,
+        best_by_setup_family={} if data_incomplete else best_by_setup_family,
         diagnostics=diagnostics,
     )
     supabase_status = persist_scan_workflow_to_supabase(
         workflow_type="sp500_daily_opportunities",
         workflow_request=req,
         workflow_response=response,
-        selected_rows=ranked_rows,
+        selected_rows=[] if data_incomplete else ranked_rows,
     )
     response.supabase_persisted = bool((supabase_status or {}).get("persisted"))
     response.supabase_scan_run_id = (supabase_status or {}).get("scan_run_id")
@@ -3510,12 +3701,23 @@ def daily_bars_status(
     rows = _daily_bars_status_rows(db, universe)
     symbols_with_data = sum(1 for r in rows if int(r.count) > 0)
     total_rows = sum(int(r.count) for r in rows)
+    status_counts = Counter(str(row.freshness_status or "CACHE_MISSING") for row in rows)
+    provider_counts = Counter(str(row.provider) for row in rows if row.provider)
+    last_backfill = db.query(func.max(DailyBarCacheStatus.last_attempt_at)).scalar()
 
     return DailyBarsStatusResponse(
         as_of=datetime.now(timezone.utc),
         requested_symbols=len(universe),
         symbols_with_data=symbols_with_data,
         total_rows=total_rows,
+        expected_market_date=resolve_expected_market_date(db),
+        symbols_current=int(status_counts.get("CURRENT", 0)),
+        symbols_stale=int(status_counts.get("CACHE_STALE", 0)),
+        symbols_missing=int(status_counts.get("CACHE_MISSING", 0)),
+        symbols_with_sufficient_history=sum(bool(row.history_sufficient) for row in rows),
+        market_data_coverage_pct=round(int(status_counts.get("CURRENT", 0)) / max(len(universe), 1), 4),
+        provider_counts=dict(provider_counts),
+        last_backfill=last_backfill,
         rows=rows,
     )
 

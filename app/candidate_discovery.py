@@ -235,6 +235,27 @@ def classify_search_exhaustiveness(
     return "partial"
 
 
+def classify_search_exhaustiveness_with_coverage(
+    *,
+    analyzed: int,
+    viable: int,
+    initial_limit: int,
+    maximum_limit: int,
+    data_coverage_pct: float,
+    minimum_data_coverage_pct: float,
+) -> str:
+    """Do not call a narrow-data scan exhaustive, regardless of analyzed ratio."""
+
+    if float(data_coverage_pct) < float(minimum_data_coverage_pct):
+        return "data_incomplete"
+    return classify_search_exhaustiveness(
+        analyzed=analyzed,
+        viable=viable,
+        initial_limit=initial_limit,
+        maximum_limit=maximum_limit,
+    )
+
+
 def classify_best_setup_quality(candidates: list[dict]) -> str:
     if not candidates:
         return "no_quality_setups"

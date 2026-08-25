@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -84,13 +85,26 @@ def _normalize_constituents(rows: list[dict]) -> tuple[dict, ...]:
     normalized: list[dict] = []
     seen: set[str] = set()
     for row in rows:
-        ticker = _normalize_ticker(str(row.get("ticker") or ""))
+        source_ticker = str(row.get("ticker") or "").strip().upper()
+        ticker = _normalize_ticker(source_ticker)
         if not ticker or ticker in seen:
             continue
         seen.add(ticker)
         normalized.append(
             {
                 "ticker": ticker,
+                "canonical_symbol": ticker,
+                "provider_symbols": {
+                    "yahoo": ticker,
+                    "finnhub": (
+                        ticker.rsplit("-", 1)[0] + "." + ticker.rsplit("-", 1)[1]
+                        if re.fullmatch(r"[A-Z]+-[A-Z]", ticker) else source_ticker
+                    ),
+                    "stooq": (
+                        ticker.rsplit("-", 1)[0] + "." + ticker.rsplit("-", 1)[1]
+                        if re.fullmatch(r"[A-Z]+-[A-Z]", ticker) else source_ticker
+                    ),
+                },
                 "company_name": str(row.get("company_name") or "").strip() or None,
                 "sector": str(row.get("sector") or "").strip() or None,
                 "industry": str(row.get("industry") or "").strip() or None,

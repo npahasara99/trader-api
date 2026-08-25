@@ -374,7 +374,12 @@ def _render_sp500_workflow_result(result: dict) -> None:
     with metric_cols[1]:
         render_kpi_card("Universe", int(result.get("universe_size") or 0), small=True)
     with metric_cols[2]:
-        render_kpi_card("Market Data", int(summary.get("market_data_success") or 0), small=True)
+        coverage_pct = float(summary.get("market_data_coverage_pct") or 0.0)
+        render_kpi_card(
+            "Market Data",
+            f"{int(summary.get('market_data_success') or 0)} ({coverage_pct:.1%})",
+            small=True,
+        )
     with metric_cols[3]:
         render_kpi_card("Suitable", int(summary.get("suitability_passed") or 0), small=True)
     result_cols = st.columns(4)
@@ -398,7 +403,7 @@ def _render_sp500_workflow_result(result: dict) -> None:
     current_cache_count = int(cache_coverage.get("constituents_current") or 0)
     sufficient_cache_count = int(cache_coverage.get("constituents_with_sufficient_history") or 0)
     universe_size = int(result.get("universe_size") or 0)
-    cache_blocked = universe_size > 0 and current_cache_count == 0
+    data_incomplete = str(result.get("search_exhaustiveness") or "").lower() == "data_incomplete"
     if cache_coverage:
         st.caption(
             f"Daily-bar cache: {current_cache_count}/{universe_size} current constituents; "
@@ -406,16 +411,21 @@ def _render_sp500_workflow_result(result: dict) -> None:
             f"Cache as of {cache_coverage.get('cache_as_of') or 'unknown'}."
         )
     market_data_validation = diagnostics.get("market_data_validation") or {}
-    if market_data_validation.get("valid") is False and not cache_blocked:
-        st.warning(str(market_data_validation.get("warning") or "S&P 500 market-data coverage is incomplete."))
-    if not cache_blocked and not (result.get("best_setups") or []) and result.get("selection_message"):
+    if market_data_validation.get("valid") is False:
+        st.error(str(market_data_validation.get("warning") or "S&P 500 market-data coverage is incomplete."))
+    if not data_incomplete and not (result.get("best_setups") or []) and result.get("selection_message"):
         st.warning(str(result.get("selection_message")))
     quality_state = str(result.get("best_setup_quality_state") or "")
-    if not cache_blocked and quality_state in {"weak_scan", "no_quality_setups"}:
+    if not data_incomplete and quality_state in {"weak_scan", "no_quality_setups"}:
         st.warning("NO A-GRADE SETUPS CURRENTLY FOUND. The table below contains the highest-ranked watch candidates.")
 
-    if cache_blocked:
-        _render_sp500_cache_recovery(universe_size=universe_size, cache_as_of=cache_coverage.get("cache_as_of"))
+    if data_incomplete:
+        _render_sp500_cache_recovery(
+            universe_size=universe_size,
+            cache_as_of=cache_coverage.get("cache_as_of"),
+            cache_coverage=cache_coverage,
+            sector_coverage=diagnostics.get("market_data_sector_coverage") or {},
+        )
         return
 
     if result.get("supabase_persisted"):
@@ -551,19 +561,65 @@ def _render_sp500_workflow_result(result: dict) -> None:
         st.json(diagnostics)
 
 
-def _render_sp500_cache_recovery(*, universe_size: int, cache_as_of: object = None) -> None:
-    """Offer a resumable recovery path when the cache-only prescan has no current bars."""
+def _render_sp500_cache_recovery(
+    *,
+    universe_size: int,
+    cache_as_of: object = None,
+    cache_coverage: dict | None = None,
+    sector_coverage: dict | None = None,
+) -> None:
+    """Explain incomplete coverage and offer a resumable admin repair path."""
 
+    coverage = cache_coverage or {}
+    repair = coverage.get("repair") or {}
+    current = int(coverage.get("constituents_current") or 0)
+    missing = int(repair.get("missing") or len(coverage.get("missing_symbols") or []))
+    stale = int(repair.get("stale") or len(coverage.get("stale_symbols") or []))
+    failed = int(repair.get("fetch_failed") or 0)
+    coverage_pct = float(coverage.get("market_data_coverage_pct") or 0.0)
     with st.container(border=True):
-        st.markdown("### Daily-Bar Cache Required")
+        st.markdown("### S&P 500 Data Cache")
         st.warning(
-            "The SP500 universe loaded, but none of its saved daily bars are current enough for the prescan. "
-            "Refresh the cache in bounded batches, then rerun the daily scan."
+            "This scan is data-incomplete, so trade-quality conclusions are suppressed. "
+            "The normal workflow already attempted automatic incremental repair; use the controls below only for recovery."
         )
+        cache_cols = st.columns(6)
+        cache_cols[0].metric("Universe", universe_size)
+        cache_cols[1].metric("Current", current)
+        cache_cols[2].metric("Stale", stale)
+        cache_cols[3].metric("Missing", missing)
+        cache_cols[4].metric("Failed", failed)
+        cache_cols[5].metric("Coverage", f"{coverage_pct:.1%}")
         st.caption(
-            f"Universe: {universe_size} tickers | Last usable cache date: {cache_as_of or 'unknown'} | "
-            "Existing bars are retained and updated; planner and ranking logic are not changed."
+            f"Universe: {universe_size} tickers | Cache as of: {cache_as_of or 'unknown'} | "
+            f"Oldest current: {coverage.get('oldest_current_cache') or 'unknown'} | "
+            f"Expected session: {coverage.get('expected_market_date') or 'unknown'} | "
+            f"Last repair: {repair.get('last_backfill') or 'unknown'} | "
+            f"Provider successes: {repair.get('provider_counts') or 'none'} | "
+            "Existing bars are retained and updated; planner and ranking logic are unchanged."
         )
+
+        if sector_coverage:
+            with st.expander("Market-data coverage by sector", expanded=False):
+                sector_rows = [
+                    {
+                        "Sector": sector,
+                        "Universe": values.get("universe"),
+                        "Current": values.get("current"),
+                        "History Sufficient": values.get("history_sufficient"),
+                        "Failed": values.get("failed"),
+                        "Coverage": f"{float(values.get('coverage_pct') or 0.0):.1%}",
+                    }
+                    for sector, values in sector_coverage.items()
+                ]
+                st.dataframe(pd.DataFrame(sector_rows), use_container_width=True, hide_index=True)
+
+        failure_rows = repair.get("failure_reasons") or []
+        if failure_rows:
+            with st.expander("Provider failures", expanded=False):
+                st.dataframe(pd.DataFrame(failure_rows), use_container_width=True, hide_index=True)
+
+        st.markdown("#### Manual Recovery")
 
         control_cols = st.columns(3)
         control_cols[0].number_input(
@@ -589,7 +645,7 @@ def _render_sp500_cache_recovery(*, universe_size: int, cache_as_of: object = No
 
         action_cols = st.columns([2, 1, 1])
         run_backfill = action_cols[0].button(
-            "Refresh Next Daily-Bar Batch",
+            "Backfill S&P 500 Market Data",
             type="primary",
             use_container_width=True,
             key="sp500_backfill_next_batch",
@@ -636,9 +692,10 @@ def _render_sp500_cache_recovery(*, universe_size: int, cache_as_of: object = No
                 with st.spinner("Checking persisted SP500 daily bars..."):
                     status = fetch_sp500_daily_bars_status()
                 st.info(
-                    f"Stored bars exist for {int(status.get('symbols_with_data') or 0)} of "
+                    f"Current, sufficient bars exist for {int(status.get('symbols_current') or 0)} of "
                     f"{int(status.get('requested_symbols') or universe_size)} SP500 tickers. "
-                    "Rerun the scan to apply its freshness and minimum-history checks."
+                    f"Raw stored data exists for {int(status.get('symbols_with_data') or 0)}; "
+                    f"coverage is {float(status.get('market_data_coverage_pct') or 0.0):.1%}."
                 )
             except TraderAPIError as exc:
                 st.error(str(exc))

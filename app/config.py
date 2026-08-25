@@ -69,6 +69,14 @@ class PlanningConfig:
     sp500_prescan_limit: int = 150
     sp500_deep_analysis_limit: int = 30
     sp500_prescan_cache_max_age_days: int = 7
+    sp500_market_data_auto_repair: bool = True
+    sp500_market_data_history_days: int = 460
+    sp500_market_data_min_history_bars: int = 200
+    sp500_market_data_min_coverage_pct: float = 0.90
+    sp500_market_data_max_workers: int = 4
+    sp500_market_data_commit_every: int = 20
+    sp500_market_data_incremental_overlap_days: int = 5
+    sp500_market_data_yahoo_interval_seconds: float = 0.20
     sp500_universe_minimum_broad_size: int = 450
     sp500_min_deep_candidates_per_sector: int = 2
     sp500_deep_analysis_batch_size: int = 15

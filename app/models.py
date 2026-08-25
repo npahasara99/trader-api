@@ -72,6 +72,26 @@ class DailyBar(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class DailyBarCacheStatus(Base):
+    """Latest ingestion state for one canonical daily-bar symbol."""
+
+    __tablename__ = "daily_bar_cache_status"
+
+    canonical_symbol: Mapped[str] = mapped_column(String(20), primary_key=True)
+    provider_symbol: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    last_bar_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    data_source: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    freshness_status: Mapped[str] = mapped_column(String(40), default="CACHE_MISSING", index=True)
+    history_sufficient: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    last_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    last_error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class BotConfiguration(Base):
     __tablename__ = "bot_configurations"
 
