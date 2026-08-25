@@ -17,11 +17,12 @@ from .suitability import build_swing_trade_suitability
 from .supabase_reporting import persist_scan_workflow_to_supabase, persist_sp100_workflow_to_supabase
 from .opportunity_ranking import build_portfolio_snapshot, rank_daily_opportunities
 from .candidate_discovery import (
-    build_sector_aware_candidate_order,
+    build_multilane_candidate_order,
     classify_best_setup_quality,
     classify_search_exhaustiveness,
     run_adaptive_batches,
     sector_counts,
+    setup_family_counts,
     validate_sp500_universe,
 )
 from .market_session import classify_market_session
@@ -76,6 +77,7 @@ def _ensure_runtime_columns() -> None:
         "earnings_context_json": "TEXT",
     }
     monitor_cols = {
+        "setup_family": "VARCHAR(80)",
         "llm_proposed_levels_json": "TEXT",
         "validated_chart_levels_json": "TEXT",
         "level_sources_json": "TEXT",
@@ -97,6 +99,7 @@ def _ensure_runtime_columns() -> None:
         "previous_setup_id": "VARCHAR(80)",
         "replacement_reason": "TEXT",
     }
+    monitor_summary_cols = {"setup_family": "VARCHAR(80)"}
     watch_cols = {
         "market_snapshot_id": "VARCHAR(80)",
         "last_backend_evaluation_at": "TIMESTAMP",
@@ -127,6 +130,13 @@ def _ensure_runtime_columns() -> None:
                 for col, col_type in monitor_cols.items():
                     if col not in monitor_existing:
                         conn.execute(text(f"ALTER TABLE monitor_setups ADD COLUMN {col} {col_type}"))
+                summary_existing = {
+                    row[1]
+                    for row in conn.execute(text("PRAGMA table_info(monitor_daily_summaries)")).fetchall()
+                }
+                for col, col_type in monitor_summary_cols.items():
+                    if col not in summary_existing:
+                        conn.execute(text(f"ALTER TABLE monitor_daily_summaries ADD COLUMN {col} {col_type}"))
                 watch_existing = {
                     row[1]
                     for row in conn.execute(text("PRAGMA table_info(live_watches)")).fetchall()
@@ -161,6 +171,8 @@ def _ensure_runtime_columns() -> None:
                 conn.execute(text(f"ALTER TABLE swing_decisions ADD COLUMN IF NOT EXISTS {col} {col_type}"))
             for col, col_type in monitor_cols.items():
                 conn.execute(text(f"ALTER TABLE monitor_setups ADD COLUMN IF NOT EXISTS {col} {col_type}"))
+            for col, col_type in monitor_summary_cols.items():
+                conn.execute(text(f"ALTER TABLE monitor_daily_summaries ADD COLUMN IF NOT EXISTS {col} {col_type}"))
             for col, col_type in watch_cols.items():
                 conn.execute(text(f"ALTER TABLE live_watches ADD COLUMN IF NOT EXISTS {col} {col_type}"))
             for col, col_type in snapshot_cols.items():
@@ -396,6 +408,12 @@ class PlanRowOut(BaseModel):
     consecutive_green_sessions: Optional[int] = None
     broader_structure: Optional[str] = None
     setup_type: Optional[str] = None
+    setup_family: Optional[str] = None
+    setup_family_score: Optional[float] = None
+    setup_family_scores: Optional[dict] = None
+    setup_family_components: Optional[dict] = None
+    setup_family_weights: Optional[dict] = None
+    setup_family_policy: Optional[dict] = None
     execution_structure: Optional[str] = None
     scenario_setup_type: Optional[str] = None
     setup_id: Optional[str] = None
@@ -491,6 +509,8 @@ class PlanRowOut(BaseModel):
     price_confirmed: Optional[bool] = None
     volume_confirmed: Optional[bool] = None
     confirmation_score: Optional[float] = None
+    confirmation_style: Optional[str] = None
+    confirmation_requirements: List[str] = Field(default_factory=list)
     stop_loss: Optional[float] = None
     suggested_stop: Optional[float] = None
     invalidation_level: Optional[float] = None
@@ -503,6 +523,8 @@ class PlanRowOut(BaseModel):
     stop_width_pct: Optional[float] = None
     stop_width_atr: Optional[float] = None
     stop_too_tight_flag: Optional[bool] = None
+    stop_style: Optional[str] = None
+    trade_geometry_status: Optional[str] = None
     take_profit_1: Optional[float] = None
     take_profit_2: Optional[float] = None
     take_profit_3: Optional[float] = None
@@ -528,6 +550,14 @@ class PlanRowOut(BaseModel):
     level_geometry_flag: Optional[str] = None
     stop_generation_reason: Optional[str] = None
     tp1_generation_reason: Optional[str] = None
+    target_style: Optional[str] = None
+    runner_plan: Optional[dict] = None
+    runner_eligible: Optional[bool] = None
+    tp1_partial_profit_min_pct: Optional[float] = None
+    tp1_partial_profit_max_pct: Optional[float] = None
+    runner_activation_level: Optional[float] = None
+    runner_trailing_methods: List[str] = Field(default_factory=list)
+    runner_state: Optional[str] = None
     max_hold_days: Optional[int] = None
     expected_hold_days: Optional[int] = None
     trend_quality_score: Optional[float] = None
@@ -546,6 +576,10 @@ class PlanRowOut(BaseModel):
     catalyst_score: Optional[float] = None
     macro_score: Optional[float] = None
     scenario_score: Optional[float] = None
+    trend_strength_score: Optional[float] = None
+    pullback_volume_quality: Optional[float] = None
+    continuation_structure_score: Optional[float] = None
+    target_quality_score: Optional[float] = None
     composite_score: Optional[float] = None
     component_scores: Optional[dict] = None
     setup_downgrade_reasons: List[str] = Field(default_factory=list)
@@ -594,6 +628,11 @@ class PlanRowOut(BaseModel):
     is_primary_watchlist_candidate: Optional[bool] = None
     is_secondary_watchlist_candidate: Optional[bool] = None
     pre_scan_score: Optional[float] = None
+    legacy_pre_scan_score: Optional[float] = None
+    setup_lane_qualified: Optional[bool] = None
+    setup_lane_scores: Optional[dict] = None
+    setup_lane_components: Optional[dict] = None
+    alternative_setup_families: List[dict] = Field(default_factory=list)
     pre_scan_reason_tags: List[str] = Field(default_factory=list)
     sector_relative_strength: Optional[float] = None
     scanner_rank_score: Optional[float] = None
@@ -732,8 +771,17 @@ class DailyOpportunityOut(BaseModel):
     industry: str
     correlation_group: str
     setup_type: Optional[str] = None
+    setup_family: Optional[str] = None
+    setup_family_score: Optional[float] = None
     broader_structure: Optional[str] = None
     execution_structure: Optional[str] = None
+    entry_style: Optional[str] = None
+    confirmation_style: Optional[str] = None
+    stop_style: Optional[str] = None
+    target_style: Optional[str] = None
+    trend_strength_score: Optional[float] = None
+    pullback_quality_score: Optional[float] = None
+    continuation_structure_score: Optional[float] = None
     grade: str
     action: str
     planner_action: Optional[str] = None
@@ -760,6 +808,14 @@ class DailyOpportunityOut(BaseModel):
     stop_loss: Optional[float] = None
     take_profit_1: Optional[float] = None
     take_profit_2: Optional[float] = None
+    take_profit_3: Optional[float] = None
+    stretch_target: Optional[float] = None
+    runner_eligible: bool = False
+    runner_plan: Optional[dict] = None
+    tp1_partial_profit_min_pct: Optional[float] = None
+    tp1_partial_profit_max_pct: Optional[float] = None
+    runner_trailing_methods: List[str] = Field(default_factory=list)
+    runner_state: Optional[str] = None
     risk_reward: Optional[dict] = None
     current_reward_risk: Optional[float] = None
     distance_to_preferred_entry_pct: Optional[float] = None
@@ -800,6 +856,7 @@ class Sp500DailyOpportunitiesResponse(BaseModel):
     best_setups: List[DailyOpportunityOut] = Field(default_factory=list)
     best_trades_today: List[DailyOpportunityOut] = Field(default_factory=list)
     next_to_trigger: List[DailyOpportunityOut] = Field(default_factory=list)
+    best_by_setup_family: dict[str, DailyOpportunityOut] = Field(default_factory=dict)
     diagnostics: dict = Field(default_factory=dict)
     supabase_persisted: bool = False
     supabase_scan_run_id: Optional[str] = None
@@ -984,6 +1041,12 @@ def _to_plan_row_out(r) -> PlanRowOut:
         consecutive_green_sessions=getattr(r, "consecutive_green_sessions", None),
         broader_structure=getattr(r, "broader_structure", None),
         setup_type=getattr(r, "setup_type", None),
+        setup_family=getattr(r, "setup_family", None),
+        setup_family_score=getattr(r, "setup_family_score", None),
+        setup_family_scores=getattr(r, "setup_family_scores", None),
+        setup_family_components=getattr(r, "setup_family_components", None),
+        setup_family_weights=getattr(r, "setup_family_weights", None),
+        setup_family_policy=getattr(r, "setup_family_policy", None),
         execution_structure=getattr(r, "execution_structure", None),
         scenario_setup_type=getattr(r, "scenario_setup_type", None),
         setup_id=getattr(r, "setup_id", None),
@@ -1079,6 +1142,8 @@ def _to_plan_row_out(r) -> PlanRowOut:
         price_confirmed=getattr(r, "price_confirmed", None),
         volume_confirmed=getattr(r, "volume_confirmed", None),
         confirmation_score=getattr(r, "confirmation_score", None),
+        confirmation_style=getattr(r, "confirmation_style", None),
+        confirmation_requirements=list(getattr(r, "confirmation_requirements", []) or []),
         stop_loss=getattr(r, "stop_loss", None),
         suggested_stop=getattr(r, "suggested_stop", None),
         invalidation_level=getattr(r, "invalidation_level", None),
@@ -1091,6 +1156,8 @@ def _to_plan_row_out(r) -> PlanRowOut:
         stop_width_pct=getattr(r, "stop_width_pct", None),
         stop_width_atr=getattr(r, "stop_width_atr", None),
         stop_too_tight_flag=getattr(r, "stop_too_tight_flag", None),
+        stop_style=getattr(r, "stop_style", None),
+        trade_geometry_status=getattr(r, "trade_geometry_status", None),
         take_profit_1=getattr(r, "take_profit_1", None),
         take_profit_2=getattr(r, "take_profit_2", None),
         take_profit_3=getattr(r, "take_profit_3", None),
@@ -1116,6 +1183,14 @@ def _to_plan_row_out(r) -> PlanRowOut:
         level_geometry_flag=getattr(r, "level_geometry_flag", None),
         stop_generation_reason=getattr(r, "stop_generation_reason", None),
         tp1_generation_reason=getattr(r, "tp1_generation_reason", None),
+        target_style=getattr(r, "target_style", None),
+        runner_plan=getattr(r, "runner_plan", None),
+        runner_eligible=getattr(r, "runner_eligible", None),
+        tp1_partial_profit_min_pct=getattr(r, "tp1_partial_profit_min_pct", None),
+        tp1_partial_profit_max_pct=getattr(r, "tp1_partial_profit_max_pct", None),
+        runner_activation_level=getattr(r, "runner_activation_level", None),
+        runner_trailing_methods=list(getattr(r, "runner_trailing_methods", []) or []),
+        runner_state=getattr(r, "runner_state", None),
         max_hold_days=getattr(r, "max_hold_days", None),
         expected_hold_days=getattr(r, "expected_hold_days", None),
         trend_quality_score=getattr(r, "trend_quality_score", None),
@@ -1134,6 +1209,10 @@ def _to_plan_row_out(r) -> PlanRowOut:
         catalyst_score=getattr(r, "catalyst_score", None),
         macro_score=getattr(r, "macro_score", None),
         scenario_score=getattr(r, "scenario_score", None),
+        trend_strength_score=getattr(r, "trend_strength_score", None),
+        pullback_volume_quality=getattr(r, "pullback_volume_quality", None),
+        continuation_structure_score=getattr(r, "continuation_structure_score", None),
+        target_quality_score=getattr(r, "target_quality_score", None),
         composite_score=getattr(r, "composite_score", None),
         component_scores=getattr(r, "component_scores", None),
         setup_downgrade_reasons=list(getattr(r, "setup_downgrade_reasons", []) or []),
@@ -1182,6 +1261,11 @@ def _to_plan_row_out(r) -> PlanRowOut:
         is_primary_watchlist_candidate=getattr(r, "is_primary_watchlist_candidate", None),
         is_secondary_watchlist_candidate=getattr(r, "is_secondary_watchlist_candidate", None),
         pre_scan_score=getattr(r, "pre_scan_score", None),
+        legacy_pre_scan_score=getattr(r, "legacy_pre_scan_score", None),
+        setup_lane_qualified=getattr(r, "setup_lane_qualified", None),
+        setup_lane_scores=getattr(r, "setup_lane_scores", None),
+        setup_lane_components=getattr(r, "setup_lane_components", None),
+        alternative_setup_families=list(getattr(r, "alternative_setup_families", []) or []),
         pre_scan_reason_tags=list(getattr(r, "pre_scan_reason_tags", []) or []),
         sector_relative_strength=getattr(r, "sector_relative_strength", None),
         scanner_rank_score=getattr(r, "scanner_rank_score", None),
@@ -2277,8 +2361,17 @@ def _daily_opportunity_out(candidate: dict, *, compact: bool) -> DailyOpportunit
         industry=candidate["industry"],
         correlation_group=candidate["correlation_group"],
         setup_type=candidate.get("setup_type"),
+        setup_family=candidate.get("setup_family"),
+        setup_family_score=candidate.get("setup_family_score"),
         broader_structure=candidate.get("broader_structure"),
         execution_structure=candidate.get("execution_structure"),
+        entry_style=candidate.get("entry_style"),
+        confirmation_style=candidate.get("confirmation_style"),
+        stop_style=candidate.get("stop_style"),
+        target_style=candidate.get("target_style"),
+        trend_strength_score=candidate.get("trend_strength_score"),
+        pullback_quality_score=candidate.get("pullback_quality_score"),
+        continuation_structure_score=candidate.get("continuation_structure_score"),
         grade=candidate["grade"],
         action=candidate["action"],
         planner_action=candidate.get("planner_action"),
@@ -2305,6 +2398,14 @@ def _daily_opportunity_out(candidate: dict, *, compact: bool) -> DailyOpportunit
         stop_loss=candidate.get("stop_loss"),
         take_profit_1=candidate.get("take_profit_1"),
         take_profit_2=candidate.get("take_profit_2"),
+        take_profit_3=candidate.get("take_profit_3"),
+        stretch_target=candidate.get("stretch_target"),
+        runner_eligible=bool(candidate.get("runner_eligible")),
+        runner_plan=candidate.get("runner_plan"),
+        tp1_partial_profit_min_pct=candidate.get("tp1_partial_profit_min_pct"),
+        tp1_partial_profit_max_pct=candidate.get("tp1_partial_profit_max_pct"),
+        runner_trailing_methods=list(candidate.get("runner_trailing_methods") or []),
+        runner_state=candidate.get("runner_state"),
         risk_reward=candidate.get("risk_reward"),
         current_reward_risk=candidate.get("current_reward_risk"),
         distance_to_preferred_entry_pct=candidate.get("distance_to_preferred_entry_pct"),
@@ -2427,11 +2528,13 @@ def workflow_sp500_daily_opportunities(
         if item.get("scan_rejection_reason") and not item.get("prescan_error")
     ]
     prescan_passed = [item for item in ranked_prescan if not item.get("scan_rejection_reason")]
-    sector_aware_order = build_sector_aware_candidate_order(
+    sector_aware_order = build_multilane_candidate_order(
         prescan_passed,
         metadata_by_ticker=metadata_by_ticker,
         initial_limit=deep_limit,
         min_per_sector=min_per_sector,
+        minimum_by_family=DEFAULT_PLANNING_CONFIG.setup_lane_min_candidates,
+        minimum_family_score=DEFAULT_PLANNING_CONFIG.setup_lane_min_score,
     )
     prescan_ranked = sector_aware_order[:prescan_limit]
     shortlist = prescan_ranked[:deep_limit]
@@ -2637,6 +2740,10 @@ def workflow_sp500_daily_opportunities(
     best_setups = [_daily_opportunity_out(item, compact=req.compact_response) for item in ranking["best_setups"]]
     best_trades_today = [_daily_opportunity_out(item, compact=req.compact_response) for item in ranking["best_trades_today"]]
     next_to_trigger = [_daily_opportunity_out(item, compact=req.compact_response) for item in ranking["next_to_trigger"]]
+    best_by_setup_family = {
+        family: _daily_opportunity_out(item, compact=req.compact_response)
+        for family, item in ranking["best_by_setup_family"].items()
+    }
 
     ranked_rows = [
         RankedPlanOut(
@@ -2713,6 +2820,36 @@ def workflow_sp500_daily_opportunities(
         "valid_setup_sector_counts": sector_counts(valid_setup_tickers, metadata_by_ticker),
         "best_setup_sector_counts": sector_counts(best_setup_tickers, metadata_by_ticker),
     }
+    setup_family_stage_counts = {
+        "prescan_primary_family_counts": setup_family_counts(prescan_passed),
+        "prescan_lane_qualified_counts": {
+            family: sum(
+                1
+                for item in prescan_passed
+                if float((item.get("setup_lane_scores") or {}).get(family) or 0.0)
+                >= DEFAULT_PLANNING_CONFIG.setup_lane_min_score
+            )
+            for family in DEFAULT_PLANNING_CONFIG.setup_lane_min_candidates
+        },
+        "initial_shortlist_counts": setup_family_counts(shortlist),
+        "deep_analysis_counts": setup_family_counts(rows),
+        "valid_setup_counts": setup_family_counts(ranking["all_candidates"]),
+        "best_setup_counts": setup_family_counts(ranking["best_setups"]),
+        "actionable_counts": setup_family_counts(
+            item for item in ranking["all_candidates"] if item["actionability_state"] == "actionable"
+        ),
+    }
+    strategy_dominance_warnings: list[str] = []
+    for stage, counts in setup_family_stage_counts.items():
+        total = sum(counts.values())
+        if total <= 0:
+            continue
+        family, family_count = max(counts.items(), key=lambda item: item[1])
+        share = family_count / total
+        if share >= DEFAULT_PLANNING_CONFIG.setup_lane_dominance_threshold:
+            strategy_dominance_warnings.append(
+                f"{stage}: {family} represents {share:.0%} of classified candidates"
+            )
     failed_symbol_count = len({item.get("ticker") for item in failure_reasons if item.get("ticker")})
     candidate_funnel = {
         "universe_loaded": len(base_universe),
@@ -2787,6 +2924,9 @@ def workflow_sp500_daily_opportunities(
         "raw_setup_weights": DEFAULT_PLANNING_CONFIG.raw_setup_weights,
         "actionability_weights": DEFAULT_PLANNING_CONFIG.daily_actionability_weights,
         "trade_today_weights": DEFAULT_PLANNING_CONFIG.trade_today_weights,
+        "setup_family_score_weights": DEFAULT_PLANNING_CONFIG.setup_family_score_weights,
+        "setup_lane_min_candidates": DEFAULT_PLANNING_CONFIG.setup_lane_min_candidates,
+        "setup_lane_min_score": DEFAULT_PLANNING_CONFIG.setup_lane_min_score,
         "portfolio_limits": {
             "max_per_sector": DEFAULT_PLANNING_CONFIG.max_open_positions_per_sector,
             "max_per_correlation_group": DEFAULT_PLANNING_CONFIG.max_open_positions_per_correlation_group,
@@ -2797,6 +2937,8 @@ def workflow_sp500_daily_opportunities(
         "market_data_validation": market_data_validation,
         "candidate_funnel": candidate_funnel,
         "sector_stage_counts": sector_stage_counts,
+        "setup_family_stage_counts": setup_family_stage_counts,
+        "strategy_dominance_warnings": strategy_dominance_warnings,
         "adaptive_expansion": {
             "enabled": bool(req.adaptive_expansion),
             "target_actionable": target_actionable,
@@ -2855,6 +2997,7 @@ def workflow_sp500_daily_opportunities(
         best_setups=best_setups,
         best_trades_today=best_trades_today,
         next_to_trigger=next_to_trigger,
+        best_by_setup_family=best_by_setup_family,
         diagnostics=diagnostics,
     )
     supabase_status = persist_scan_workflow_to_supabase(

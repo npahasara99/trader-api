@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 
 from .config import PlanningConfig
+from .setup_archetypes import BASE_BREAKOUT, BREAKOUT_RETEST, MOMENTUM_CONTINUATION, family_policy, normalize_setup_family
 
 
 def _zone_bounds(zone: dict | None) -> tuple[float | None, float | None]:
@@ -31,6 +32,10 @@ def build_confirmation_plan(
     volume_context: dict,
     requires_confirmation: bool,
     config: PlanningConfig,
+    setup_family: str | None = None,
+    breakout_level: float | None = None,
+    consolidation_range: dict | None = None,
+    retest_zone: dict | None = None,
 ) -> dict:
     """Build a numeric trigger and evaluate price location separately from confirmation."""
 
@@ -48,6 +53,8 @@ def build_confirmation_plan(
     ema20 = moving_averages.get("ema20")
     resistance_low, resistance_high = _zone_bounds(resistance_zone_1)
     buffer = atr_value * config.confirmation_trigger_buffer_atr
+    family = normalize_setup_family(setup_family)
+    policy = family_policy(family)
 
     near_candidates: list[tuple[float, str]] = []
     if prior_high is not None:
@@ -61,6 +68,14 @@ def build_confirmation_plan(
     primary_candidates = list(near_candidates)
     if resistance_low is not None:
         primary_candidates.append((resistance_low + buffer, "clear nearest ranked resistance"))
+    consolidation_low, consolidation_high = _zone_bounds(consolidation_range)
+    retest_low, retest_high = _zone_bounds(retest_zone)
+    if family in {MOMENTUM_CONTINUATION, BASE_BREAKOUT} and consolidation_high is not None:
+        primary_candidates.append((consolidation_high + buffer, "clear short consolidation resistance"))
+    if family == BREAKOUT_RETEST and retest_high is not None:
+        primary_candidates.append((retest_high + buffer, "hold and reclaim the breakout retest zone"))
+    if breakout_level is not None and family in {MOMENTUM_CONTINUATION, BREAKOUT_RETEST, BASE_BREAKOUT}:
+        primary_candidates.append((float(breakout_level) + buffer, "clear the active breakout level"))
     primary_candidates = [item for item in primary_candidates if item[0] > zone_low]
     if structure_state == "breakout" and resistance_high is not None:
         trigger_price, trigger_reason = resistance_high + buffer, "clear ranked resistance"
@@ -143,9 +158,15 @@ def build_confirmation_plan(
         confirmation_state = "invalidated"
         confirmation_score = 0.0
 
-    if damaged and price_confirmed:
+    if damaged and price_confirmed and not volume_confirmed:
         confirmation_state = "awaiting_confirmation"
         confirmation_score = min(confirmation_score, 4.5)
+
+    confirmation_requirements = [policy["confirmation_style"]]
+    if policy["requires_strong_volume"]:
+        confirmation_requirements.append("volume_expansion_required")
+    if family == BREAKOUT_RETEST:
+        confirmation_requirements.append("former_resistance_must_hold_as_support")
 
     return {
         "preferred_entry_low": round(zone_low, 6),
@@ -168,4 +189,7 @@ def build_confirmation_plan(
         "price_confirmed": bool(price_confirmed),
         "volume_confirmed": bool(volume_confirmed),
         "confirmation_score": round(confirmation_score, 3),
+        "confirmation_style": policy["confirmation_style"],
+        "confirmation_requirements": confirmation_requirements,
+        "setup_family": policy["setup_family"],
     }

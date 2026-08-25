@@ -16,6 +16,15 @@ from .scenario_engine import generate_execution_scenarios
 from .scanner import build_universe_suitability, classify_volatility
 from .scoring import score_price_location, score_setup
 from .setup_lifecycle import build_setup_lifecycle
+from .setup_archetypes import (
+    BASE_BREAKOUT,
+    BREAKOUT_RETEST,
+    DEEP_PULLBACK,
+    MOMENTUM_CONTINUATION,
+    REVERSAL_ATTEMPT,
+    classify_setup_family,
+    family_policy,
+)
 from .structure import summarize_structure
 from .zones import build_support_resistance_zones, fibonacci_levels
 
@@ -97,6 +106,7 @@ def generate_structured_plan(
     ticker_meta: dict | None = None,
     sector_relative_strength: float | None = None,
     previous_setup: dict | None = None,
+    pre_scan_profile: dict | None = None,
     llm_provider: str | None = None,
     llm_model: str | None = None,
     llm_style: str | None = None,
@@ -199,8 +209,30 @@ def generate_structured_plan(
         config=config,
     )
 
+    setup_family = classify_setup_family(
+        structure_state=structure.structure_state,
+        trend_state=structure.trend_state,
+        setup_type=chart_context.get("setup_type_layer") or context.get("setup_type"),
+        prescan_family=(pre_scan_profile or {}).get("setup_family"),
+        breakout_level=structure.breakout_level,
+        retest_zone=structure.prior_breakout_retest_zone,
+        consolidation_range=structure.consolidation_range,
+    )
+    setup_policy = family_policy(setup_family)
+    chart_context["setup_family"] = setup_family
+
     recent_swing_low = structure.swing_lows[-1].price if structure.swing_lows else None
     recent_swing_high = structure.swing_highs[-1].price if structure.swing_highs else None
+    if setup_family == BREAKOUT_RETEST:
+        family_invalidation_zone = structure.prior_breakout_retest_zone
+    elif setup_family == MOMENTUM_CONTINUATION:
+        family_invalidation_zone = structure.consolidation_range or zones["support_zone_1"]
+    elif setup_family == BASE_BREAKOUT:
+        family_invalidation_zone = structure.consolidation_range
+    elif setup_family in {DEEP_PULLBACK, REVERSAL_ATTEMPT}:
+        family_invalidation_zone = zones["support_zone_2"] or zones["support_zone_1"]
+    else:
+        family_invalidation_zone = zones["support_zone_1"]
     stop = build_stop_loss(
         preferred_entry=preferred["preferred_entry"],
         support_zone_1=zones["support_zone_1"],
@@ -211,6 +243,8 @@ def generate_structured_plan(
         trend_state=structure.structure_state,
         sl_tolerance=context["sl_tolerance"],
         setup_scenario=context["setup_scenario"],
+        setup_family=setup_family,
+        invalidation_zone=family_invalidation_zone,
         config=config,
     )
     confirmation = build_confirmation_plan(
@@ -226,6 +260,10 @@ def generate_structured_plan(
         volume_context=volume_context,
         requires_confirmation=preferred["entry_requires_confirmation"],
         config=config,
+        setup_family=setup_family,
+        breakout_level=structure.breakout_level,
+        consolidation_range=structure.consolidation_range,
+        retest_zone=structure.prior_breakout_retest_zone,
     )
     effective_entry_requires_confirmation = bool(
         confirmation["confirmation_required"] and confirmation["confirmation_state"] != "confirmed"
@@ -264,6 +302,7 @@ def generate_structured_plan(
         price_location_context=context["price_location_context"],
         config=config,
         ranked_resistance_levels=zones["resistance_levels"],
+        setup_family=setup_family,
     )
     final_hold = estimate_hold_window(
         preferred_entry=preferred["preferred_entry"],
@@ -289,6 +328,7 @@ def generate_structured_plan(
             price_location_context=context["price_location_context"],
             config=config,
             ranked_resistance_levels=zones["resistance_levels"],
+            setup_family=setup_family,
         )
     else:
         hold = final_hold
@@ -355,6 +395,7 @@ def generate_structured_plan(
         "price_location_context": context["price_location_context"],
         "broader_structure": chart_context.get("broader_structure"),
         "setup_type": chart_context.get("setup_type_layer") or context["setup_type"],
+        "setup_family": setup_family,
         "execution_structure": chart_context.get("execution_structure"),
         "setup_scenario": context["setup_scenario"],
         "continuation_vs_reversion_bias": context["continuation_vs_reversion_bias"],
@@ -402,6 +443,8 @@ def generate_structured_plan(
         price_location_score=price_location["price_location_score"],
         target_realism_score=targets["target_realism_score"],
         confirmation_score=confirmation["confirmation_score"],
+        setup_family=setup_family,
+        pre_scan_profile=pre_scan_profile,
     )
 
     composite_payload = {
@@ -444,6 +487,8 @@ def generate_structured_plan(
         price_location_score=price_location["price_location_score"],
         target_realism_score=targets["target_realism_score"],
         confirmation_score=confirmation["confirmation_score"],
+        setup_family=setup_family,
+        pre_scan_profile=pre_scan_profile,
     )
 
     # The reasoning layer may select only among eligible deterministic
@@ -602,8 +647,35 @@ def generate_structured_plan(
                 "support_confluence_score",
                 "target_realism_score",
                 "confirmation_score",
+                "trend_strength_score",
+                "pullback_volume_quality",
+                "continuation_structure_score",
+                "target_quality_score",
+                "setup_family_score",
             )
         },
+        "setup_family": setup_family,
+        "setup_family_score": scores["setup_family_score"],
+        "setup_family_scores": scores["setup_family_scores"],
+        "setup_family_components": scores["setup_family_components"],
+        "setup_family_weights": scores["setup_family_weights"],
+        "setup_family_policy": setup_policy,
+        "trend_strength_score": scores["trend_strength_score"],
+        "pullback_volume_quality": scores["pullback_volume_quality"],
+        "continuation_structure_score": scores["continuation_structure_score"],
+        "target_quality_score": scores["target_quality_score"],
+        "confirmation_style": confirmation["confirmation_style"],
+        "confirmation_requirements": confirmation["confirmation_requirements"],
+        "stop_style": stop["stop_style"],
+        "target_style": targets["target_style"],
+        "trade_geometry_status": stop["trade_geometry_status"],
+        "runner_plan": targets["runner_plan"],
+        "runner_eligible": targets["runner_eligible"],
+        "tp1_partial_profit_min_pct": targets["tp1_partial_profit_min_pct"],
+        "tp1_partial_profit_max_pct": targets["tp1_partial_profit_max_pct"],
+        "runner_activation_level": targets["runner_activation_level"],
+        "runner_trailing_methods": targets["runner_trailing_methods"],
+        "runner_state": targets["runner_state"],
         "setup_downgrade_reasons": setup_downgrade_reasons,
         **context,
         "broader_structure": chart_context.get("broader_structure"),

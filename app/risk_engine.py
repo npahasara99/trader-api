@@ -4,6 +4,15 @@ from datetime import datetime, timedelta, timezone
 import math
 
 from .config import PlanningConfig
+from .setup_archetypes import (
+    BASE_BREAKOUT,
+    BREAKOUT_RETEST,
+    DEEP_PULLBACK,
+    REVERSAL_ATTEMPT,
+    build_runner_plan,
+    family_policy,
+    normalize_setup_family,
+)
 
 
 def _clip(value: float, low: float, high: float) -> float:
@@ -138,38 +147,48 @@ def build_stop_loss(
     trend_state: str | None,
     sl_tolerance: str | None = None,
     setup_scenario: str | None = None,
+    setup_family: str | None = None,
+    invalidation_zone: dict | None = None,
     config: PlanningConfig,
 ) -> dict:
     atr = max(float(atr or 0.0), max(current_price * 0.01, 0.01))
     buffer = atr * config.stop_buffer_atr_mult
     max_valid_stop = preferred_entry - max(atr * 0.35, current_price * 0.0035)
-    max_width_pct, max_width_atr = _stop_caps(trend_state=trend_state, config=config)
+    family = normalize_setup_family(setup_family)
+    policy = family_policy(family)
+    max_width_pct, max_width_atr = _stop_caps(trend_state=family or trend_state, config=config)
     stop_mult = _scenario_stop_mult(sl_tolerance=sl_tolerance, config=config)
     max_width_pct *= stop_mult
     max_width_atr *= stop_mult
 
     candidates: list[dict] = []
 
+    family_zone = _zone_lower(invalidation_zone)
+    if family_zone is not None:
+        level = family_zone - buffer * (0.75 if family in {BREAKOUT_RETEST, BASE_BREAKOUT} else 1.0)
+        if level < max_valid_stop:
+            candidates.append({"price": level, "basis": f"{policy['stop_style']} and ATR buffer", "priority": 3})
+
     support_1 = _zone_lower(support_zone_1)
     if support_1 is not None:
         level = support_1 - buffer - current_price * config.stop_below_zone_buffer_pct
         if level < max_valid_stop:
-            candidates.append({"price": level, "basis": "below support_zone_1 and ATR buffer"})
+            candidates.append({"price": level, "basis": "below support_zone_1 and ATR buffer", "priority": 2})
 
     support_2 = _zone_lower(support_zone_2)
     if support_2 is not None:
         level = support_2 - buffer * 0.8
         if level < max_valid_stop:
-            candidates.append({"price": level, "basis": "below support_zone_2 and ATR buffer"})
+            candidates.append({"price": level, "basis": "below support_zone_2 and ATR buffer", "priority": 1})
 
     if recent_swing_low is not None:
         level = float(recent_swing_low) - buffer
         if level < max_valid_stop:
-            candidates.append({"price": level, "basis": "below recent swing low and ATR buffer"})
+            candidates.append({"price": level, "basis": "below recent swing low and ATR buffer", "priority": 2})
 
     fallback_stop = preferred_entry - atr * 1.6
     if not candidates:
-        candidates.append({"price": fallback_stop, "basis": "fallback ATR invalidation"})
+        candidates.append({"price": fallback_stop, "basis": "fallback ATR invalidation", "priority": 0})
 
     for candidate in candidates:
         width = max(preferred_entry - float(candidate["price"]), 0.0)
@@ -181,33 +200,48 @@ def build_stop_loss(
         )
 
     valid_candidates = [candidate for candidate in candidates if candidate["within_cap"]]
-    selected = max(valid_candidates or candidates, key=lambda item: item["price"])
+    candidate_pool = candidates if family in {DEEP_PULLBACK, REVERSAL_ATTEMPT} else (valid_candidates or candidates)
+    if family in {DEEP_PULLBACK, REVERSAL_ATTEMPT}:
+        # Recovery setups fail at the deeper thesis level; if that level is too
+        # wide, report untradeable geometry rather than inventing a tight stop.
+        selected = min(candidate_pool, key=lambda item: (item["price"], -item.get("priority", 0)))
+    else:
+        selected = max(candidate_pool, key=lambda item: (item.get("priority", 0), item["price"]))
 
     invalidation_level = float(selected["price"])
     invalidation_reason = str(selected["basis"])
     stop_loss = invalidation_level
+    suggested_stop: float | None = invalidation_level
     stop_generation_reason = str(selected["basis"])
     swing_realism_flag = "realistic"
     risk_width_flag = "ok"
 
     if not selected["within_cap"]:
-        allowed_width = min(preferred_entry * max_width_pct, atr * max_width_atr)
-        capped_stop = preferred_entry - max(allowed_width, atr * 0.95)
-        capped_stop = min(capped_stop, max_valid_stop)
-        if capped_stop > stop_loss:
-            stop_loss = capped_stop
-            swing_realism_flag = "compressed"
-            risk_width_flag = "capped_for_swing"
-            scenario_suffix = f"; scenario={setup_scenario}" if setup_scenario else ""
-            stop_generation_reason = f"{selected['basis']}; compressed to swing-risk envelope{scenario_suffix}"
-        else:
+        if family in {DEEP_PULLBACK, REVERSAL_ATTEMPT}:
+            suggested_stop = None
             swing_realism_flag = "flagged"
             risk_width_flag = "too_wide_for_swing"
-            scenario_suffix = f"; scenario={setup_scenario}" if setup_scenario else ""
-            stop_generation_reason = f"{selected['basis']}; broad structure exceeds normal swing width{scenario_suffix}"
+            stop_generation_reason = f"{selected['basis']}; no technically valid executable stop inside the swing-risk envelope"
+        else:
+            allowed_width = min(preferred_entry * max_width_pct, atr * max_width_atr)
+            capped_stop = preferred_entry - max(allowed_width, atr * 0.95)
+            capped_stop = min(capped_stop, max_valid_stop)
+            if capped_stop > stop_loss:
+                stop_loss = capped_stop
+                suggested_stop = capped_stop
+                swing_realism_flag = "compressed"
+                risk_width_flag = "capped_for_swing"
+                scenario_suffix = f"; scenario={setup_scenario}" if setup_scenario else ""
+                stop_generation_reason = f"{selected['basis']}; compressed to swing-risk envelope{scenario_suffix}"
+            else:
+                swing_realism_flag = "flagged"
+                risk_width_flag = "too_wide_for_swing"
+                scenario_suffix = f"; scenario={setup_scenario}" if setup_scenario else ""
+                stop_generation_reason = f"{selected['basis']}; broad structure exceeds normal swing width{scenario_suffix}"
 
     if stop_loss >= preferred_entry:
         stop_loss = fallback_stop
+        suggested_stop = fallback_stop
         swing_realism_flag = "compressed"
         risk_width_flag = "fallback_atr_stop"
         stop_generation_reason = "fallback ATR invalidation after invalid structural stop"
@@ -218,6 +252,9 @@ def build_stop_loss(
     stop_too_tight = stop_width < atr * 0.9
     invalidation_width = max(preferred_entry - invalidation_level, 0.0)
     executable_stop_technically_valid = bool(selected["within_cap"] and abs(stop_loss - invalidation_level) <= 1e-9)
+    trade_geometry_status = (
+        "valid" if executable_stop_technically_valid else "valid_setup_but_untradeable_geometry"
+    )
 
     return {
         "stop_loss": float(round(stop_loss, 6)),
@@ -231,10 +268,12 @@ def build_stop_loss(
         "stop_generation_reason": stop_generation_reason,
         "invalidation_level": float(round(invalidation_level, 6)),
         "invalidation_reason": invalidation_reason,
-        "suggested_stop": float(round(stop_loss, 6)),
+        "suggested_stop": None if suggested_stop is None else float(round(suggested_stop, 6)),
         "invalidation_width_pct": _format_pct(invalidation_width, preferred_entry),
         "invalidation_width_atr": float(round(invalidation_width / max(atr, 1e-9), 3)),
         "executable_stop_technically_valid": executable_stop_technically_valid,
+        "trade_geometry_status": trade_geometry_status,
+        "stop_style": policy["stop_style"],
     }
 
 
@@ -253,13 +292,16 @@ def build_take_profits(
     price_location_context: str | None = None,
     config: PlanningConfig,
     ranked_resistance_levels: list[dict] | None = None,
+    setup_family: str | None = None,
 ) -> dict:
     atr = max(float(atr or 0.0), max(preferred_entry * 0.01, 0.01))
     risk_per_share = max(preferred_entry - stop_loss, atr * 0.6)
     hold_days = max(1, int(hold_days_hint or config.max_hold_days_min))
     reachability_factor = _trend_reachability_factor(trend_state)
     reachable_move = atr * math.sqrt(hold_days) * config.hold_window_reachability_factor * reachability_factor
-    max_tp1_pct, max_tp1_atr = _tp1_caps(trend_state=trend_state, config=config)
+    family = normalize_setup_family(setup_family)
+    policy = family_policy(family)
+    max_tp1_pct, max_tp1_atr = _tp1_caps(trend_state=family or trend_state, config=config)
     tp_mult = _scenario_tp_mult(tp_aggressiveness=tp_aggressiveness, config=config)
     max_tp1_pct *= tp_mult
     max_tp1_atr *= tp_mult
@@ -369,6 +411,12 @@ def build_take_profits(
         stretch_reason,
     ]
 
+    runner = build_runner_plan(
+        setup_family=family,
+        tp1=tp1,
+        extension_target=stretch_target,
+        config=config,
+    )
     return {
         "take_profit_1": float(round(tp1, 6)),
         "take_profit_2": float(round(tp2, 6)),
@@ -394,6 +442,9 @@ def build_take_profits(
         "tp3_reason": tp3_reason,
         "stretch_target_reason": stretch_reason,
         "target_realism_score": float(round(reachability_score, 3)),
+        "target_style": policy["target_style"],
+        "runner_plan": runner,
+        **runner,
     }
 
 

@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from .config import LiveMonitorConfig
 from .enums import MonitorState
+from ..setup_archetypes import evaluate_runner_state
 
 
 def _number(value: Any) -> float | None:
@@ -266,6 +267,15 @@ def evaluate_monitor(
         if current is not None and state in executable_states
         else None
     )
+    runner = evaluate_runner_state(
+        setup_family=levels.get("_setup_family"),
+        tp1=tp1,
+        close=_number(latest_5m.get("close")) or current or 0.0,
+        high=_number(latest_5m.get("high")),
+        low=_number(latest_5m.get("low")),
+        open_price=_number(latest_5m.get("open")),
+        relative_volume=rvol_5m,
+    )
     return {
         "state": state.value,
         "final_active_plan_id": levels.get("_active_plan_id"),
@@ -306,6 +316,7 @@ def evaluate_monitor(
         "rejection_reason": rejection_reason,
         "attempt_number": prior_attempt_count + 1 if state in {MonitorState.ARMED, MonitorState.CONFIRMING} and previous not in {MonitorState.ARMED, MonitorState.CONFIRMING} else prior_attempt_count,
         "manual_order_plan": manual_plan,
+        **runner,
         "hard_blockers": [
             reason
             for condition, reason in (

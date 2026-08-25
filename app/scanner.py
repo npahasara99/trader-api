@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import math
+
 from .config import PlanningConfig
 from .indicators import add_indicator_columns, bars_to_frame, latest_value
+from .setup_archetypes import score_setup_families
 
 
 SECTOR_BENCHMARKS = {
@@ -58,6 +61,11 @@ def _safe_float(value: object, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _finite_float(value: object, default: float | None = None) -> float | None:
+    parsed = _safe_float(value, float("nan"))
+    return parsed if math.isfinite(parsed) else default
 
 
 def classify_volatility(atr_pct_ratio: float | None, config: PlanningConfig) -> dict:
@@ -192,6 +200,9 @@ def build_pre_scan_profile(
 
     close = _safe_float(current_price)
     ema20 = latest_value(frame, "ema20")
+    ema50 = latest_value(frame, "ema50")
+    ema100 = latest_value(frame, "ema100")
+    ema200 = latest_value(frame, "ema200")
     sma50 = latest_value(frame, "sma50")
     sma200 = latest_value(frame, "sma200")
     atr_pct = latest_value(frame, "atr_pct")
@@ -277,6 +288,101 @@ def build_pre_scan_profile(
         pullback_score -= 0.4
     pullback_score = _clip(pullback_score)
 
+    atr_value = _finite_float(latest_value(frame, "atr"), max(close * 0.02, 0.01)) or max(close * 0.02, 0.01)
+    recent = frame.tail(min(10, len(frame))).copy()
+    down_days = recent[recent["close"] < recent["close"].shift(1)]
+    up_days = recent[recent["close"] > recent["close"].shift(1)]
+    baseline_volume = max(_safe_float(frame["volume"].tail(20).mean(), 1.0), 1.0)
+    down_volume_ratio = _safe_float(down_days["volume"].mean(), 0.0) / baseline_volume if not down_days.empty else 0.0
+    up_volume_ratio = _safe_float(up_days["volume"].mean(), 0.0) / baseline_volume if not up_days.empty else 0.0
+    pullback_volume_quality = 5.0
+    if 0.0 < down_volume_ratio <= 0.9:
+        pullback_volume_quality += 2.0
+    elif down_volume_ratio >= 1.25:
+        pullback_volume_quality -= 2.4
+    if up_volume_ratio >= 1.15:
+        pullback_volume_quality += 1.4
+    elif 0.0 < up_volume_ratio < 0.85:
+        pullback_volume_quality -= 0.6
+    pullback_volume_quality = _clip(pullback_volume_quality)
+
+    ema50_prior = _finite_float(frame["ema50"].iloc[-11]) if len(frame) >= 11 and "ema50" in frame else None
+    ema50_rising = bool(ema50 is not None and ema50_prior is not None and float(ema50) > ema50_prior)
+    bullish_stack = bool(
+        ema20 is not None and ema50 is not None and ema100 is not None and ema200 is not None
+        and float(ema20) >= float(ema50) >= float(ema100) >= float(ema200)
+    )
+    continuation_structure = 3.2
+    continuation_structure += 2.0 if bullish_stack else 0.0
+    continuation_structure += 1.3 if ema50_rising else 0.0
+    continuation_structure += 1.0 if ret_20 is not None and ret_20 > 0.02 else 0.0
+    continuation_structure += 1.0 if ret_60 is not None and ret_60 > 0.05 else 0.0
+    continuation_structure += 0.8 if position_52w >= 0.72 else 0.0
+    continuation_structure = _clip(continuation_structure)
+
+    support_confluence = 3.5
+    if dist_to_ema20 is not None and abs(dist_to_ema20) <= 0.035:
+        support_confluence += 2.4
+    if dist_to_sma50 is not None and abs(dist_to_sma50) <= 0.055:
+        support_confluence += 1.8
+    if ema50 is not None and close >= float(ema50):
+        support_confluence += 1.0
+    support_confluence = _clip(support_confluence)
+
+    price_location_score = _clip(
+        7.6 if 0.03 <= pullback_pct <= 0.12
+        else 7.2 if 0.0 <= pullback_pct < 0.03 and position_52w < 0.96
+        else 6.4 if 0.12 < pullback_pct <= 0.22
+        else 4.0
+    )
+    deep_pullback_quality = _clip(
+        8.4 if 0.12 <= pullback_pct <= 0.25
+        else 6.2 if 0.08 <= pullback_pct < 0.12
+        else 3.8 if pullback_pct < 0.08
+        else 4.6
+    )
+
+    recent_high = _finite_float(frame["high"].tail(20).max(), close)
+    recent_low = _finite_float(frame["low"].tail(20).min(), close)
+    recent_range_atr = (float(recent_high) - float(recent_low)) / max(atr_value, 1e-9)
+    base_quality = _clip(
+        8.2 if recent_range_atr <= config.structure_base_max_atr_range and continuation_structure >= 6.0
+        else 6.2 if recent_range_atr <= config.structure_base_max_atr_range * 1.35
+        else 3.5
+    )
+
+    prior_breakout_high = None
+    if len(frame) >= 25:
+        prior_breakout_high = _finite_float(frame["high"].iloc[-25:-5].max())
+    breakout_retest_quality = 3.0
+    if prior_breakout_high is not None:
+        recent_break = _finite_float(frame["close"].tail(5).max(), close) or close
+        held_retest = close >= prior_breakout_high * 0.98
+        if recent_break > prior_breakout_high and held_retest:
+            breakout_retest_quality = 8.4
+        elif close >= prior_breakout_high * 0.985:
+            breakout_retest_quality = 6.2
+
+    five_day_return = _return_over(frame, min(5, max(len(frame) - 1, 1))) or 0.0
+    reversal_quality = 3.0
+    if position_52w <= 0.35:
+        reversal_quality += 2.0
+    if five_day_return > 0.015:
+        reversal_quality += 1.8
+    if up_volume_ratio >= 1.15:
+        reversal_quality += 1.4
+    if close < _safe_float(sma50, close):
+        reversal_quality += 0.5
+    reversal_quality = _clip(reversal_quality)
+
+    confirmation_quality = _clip(
+        5.0
+        + (1.8 if five_day_return > 0.01 else -0.5)
+        + (1.2 if up_volume_ratio >= 1.15 else 0.0)
+        - (1.6 if down_volume_ratio >= 1.25 else 0.0)
+    )
+    target_quality = _clip(7.0 - (2.2 if position_52w >= 0.97 else 0.0) - (1.0 if pullback_pct > 0.25 else 0.0))
+
     volatility = classify_volatility(atr_pct, config)
     volatility_score = float(volatility["volatility_suitability_score"])
     atr_pct_val = volatility["atr_percent"] if volatility["atr_percent"] is not None else -1.0
@@ -307,6 +413,29 @@ def build_pre_scan_profile(
         elif dte <= config.earnings_penalty_mid_days:
             earnings_score = 5.1
 
+    lane_components = {
+        "trend_strength": trend_score,
+        "pullback_quality": pullback_score,
+        "deep_pullback_quality": deep_pullback_quality,
+        "price_location": price_location_score,
+        "relative_strength": relative_strength_score,
+        "pullback_volume": pullback_volume_quality,
+        "support_confluence": support_confluence,
+        "continuation_structure": continuation_structure,
+        "confirmation": confirmation_quality,
+        "target_quality": target_quality,
+        "base_quality": base_quality,
+        "breakout_retest_quality": breakout_retest_quality,
+        "reversal_quality": reversal_quality,
+        "volatility": volatility_score,
+        "liquidity": liquidity_score,
+        "earnings": earnings_score,
+    }
+    lane_profile = score_setup_families(
+        lane_components,
+        weights_by_family=config.setup_family_score_weights,
+    )
+
     weights = config.pre_scan_weights
     total_weight = sum(weights.values())
     pre_scan_score = (
@@ -319,7 +448,10 @@ def build_pre_scan_profile(
         + earnings_score * weights["earnings"]
         + liquidity_score * weights["liquidity"]
     ) / max(total_weight, 1e-9)
-    pre_scan_score = round(_clip(pre_scan_score), 4)
+    legacy_pre_scan_score = round(_clip(pre_scan_score), 4)
+    family_score = max(lane_profile["setup_lane_scores"].values(), default=legacy_pre_scan_score)
+    operational_score = (volatility_score + liquidity_score + earnings_score) / 3.0
+    pre_scan_score = round(_clip(family_score * 0.82 + operational_score * 0.18), 4)
 
     tags: list[str] = []
     if close >= _safe_float(ema20, close + 1.0):
@@ -355,6 +487,21 @@ def build_pre_scan_profile(
         "ticker": ticker,
         "pre_scan_score": float(pre_scan_score),
         "pre_scan_reason_tags": tags[:8],
+        "legacy_pre_scan_score": legacy_pre_scan_score,
+        "setup_family": lane_profile["setup_family"],
+        "setup_family_score": family_score,
+        "setup_lane_qualified": bool(family_score >= config.setup_lane_min_score),
+        "setup_lane_scores": lane_profile["setup_lane_scores"],
+        "setup_lane_components": {key: round(float(value), 4) for key, value in lane_components.items()},
+        "setup_lane_contributions": lane_profile["setup_lane_contributions"],
+        "alternative_setup_families": lane_profile["alternative_setup_families"][:3],
+        "pullback_volume_quality": pullback_volume_quality,
+        "continuation_structure_score": continuation_structure,
+        "base_quality_score": base_quality,
+        "breakout_retest_quality_score": breakout_retest_quality,
+        "reversal_quality_score": reversal_quality,
+        "down_volume_ratio": round(down_volume_ratio, 4),
+        "up_volume_ratio": round(up_volume_ratio, 4),
         "sector_relative_strength": None if sector_relative_strength is None else round(float(sector_relative_strength), 6),
         "scan_shortlisted": False,
         "scan_rejection_reason": ",".join(scan_rejections) if scan_rejections else None,

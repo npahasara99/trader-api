@@ -68,6 +68,7 @@ from .memory import (
     refresh_profile,
     run_daily_learning_cycle,
 )
+from ..setup_archetypes import normalize_setup_family
 from .market_snapshot import build_market_snapshot, market_snapshot_payload, persist_market_snapshot
 
 
@@ -596,6 +597,7 @@ class LiveMonitorService:
             setup_quality_score=plan.get("raw_setup_score") or plan.get("composite_score"),
             broader_structure=plan.get("broader_structure") or plan.get("trend_state"),
             setup_type=plan.get("setup_type"),
+            setup_family=normalize_setup_family(plan.get("setup_family") or plan.get("setup_type"), "reversal_attempt"),
             execution_structure=plan.get("execution_structure") or plan.get("trade_shape"),
             sector=plan.get("sector"),
             industry=plan.get("industry"),
@@ -1060,6 +1062,7 @@ class LiveMonitorService:
                 "atr": atr,
                 "broader_structure": setup.broader_structure,
                 "setup_type": setup.setup_type,
+                "setup_family": setup.setup_family,
                 "execution_structure": setup.execution_structure,
                 "market_regime": setup.market_regime,
                 "planner_levels": planner_levels if not stale["stale"] else {},
@@ -1519,7 +1522,7 @@ class LiveMonitorService:
             attempt_count = db.query(ConfirmationAttempt).filter(ConfirmationAttempt.setup_id == setup.id).count()
             evaluation = evaluate_monitor(
                 previous_state=watch.state,
-                levels=levels,
+                levels={**levels, "_setup_family": setup.setup_family},
                 bars_1m=bars_1m,
                 bars_5m=bars_5m,
                 setup_valid=setup.valid_setup,
@@ -2127,6 +2130,8 @@ class LiveMonitorService:
             return value.upper() == setup.ticker.upper()
         if scope == "setup_type":
             return value == str(setup.setup_type or "")
+        if scope == "setup_family":
+            return value == str(setup.setup_family or "")
         if scope == "sector":
             return value == str(setup.sector or "")
         if scope == "market_regime":
@@ -2210,7 +2215,8 @@ class LiveMonitorService:
         support = number(levels.get("optional_support_level"))
         current = {
             "ticker": setup.ticker, "broader_structure": setup.broader_structure,
-            "setup_type": setup.setup_type, "execution_structure": setup.execution_structure,
+            "setup_type": setup.setup_type, "setup_family": setup.setup_family,
+            "execution_structure": setup.execution_structure,
             "sector": setup.sector, "market_regime": setup.market_regime,
             "confirmation_method": attempt.confirmation_method if attempt else None,
             "attempt_number": attempt.attempt_number if attempt else None,
@@ -2237,6 +2243,7 @@ class LiveMonitorService:
                 "attempt_id": candidate.id, "ticker": candidate.ticker,
                 "broader_structure": candidate_setup.broader_structure,
                 "setup_type": candidate_setup.setup_type,
+                "setup_family": candidate_setup.setup_family,
                 "execution_structure": candidate_setup.execution_structure,
                 "sector": candidate_setup.sector, "market_regime": candidate_setup.market_regime,
                 "chart_analysis_status": candidate_setup.chart_analysis_status,
@@ -2271,6 +2278,7 @@ class LiveMonitorService:
                 "daily_summary_id": summary.id, "ticker": summary.ticker,
                 "broader_structure": summary.broader_structure,
                 "setup_type": summary.setup_type,
+                "setup_family": summary.setup_family,
                 "execution_structure": summary.execution_structure,
                 "sector": summary.sector, "market_regime": summary.market_regime,
                 "confirmation_method": decisions.get("confirmation_method") or "NO_TRIGGER",
@@ -2383,6 +2391,7 @@ class LiveMonitorService:
             "volume_confirmation": evaluation.get("volume_confirmation"),
             "setup_valid": bool(setup and setup.valid_setup and not plan_stale),
             "setup_type": setup.setup_type if setup else None,
+            "setup_family": setup.setup_family if setup else None,
             "broader_structure": setup.broader_structure if setup else None,
             "execution_structure": setup.execution_structure if setup else None,
             "trigger_source": setup.trigger_source if setup else None,
@@ -2627,6 +2636,7 @@ class LiveMonitorService:
             "starting_monitor_price": row.starting_monitor_price,
             "ending_monitor_price": row.ending_monitor_price,
             "broader_structure": row.broader_structure, "setup_type": row.setup_type,
+            "setup_family": row.setup_family,
             "execution_structure": row.execution_structure, "market_regime": row.market_regime,
             "levels": _loads(row.levels_json), "indicators": _loads(row.indicators_json),
             "context": _loads(row.context_json), "decisions": _loads(row.decisions_json),

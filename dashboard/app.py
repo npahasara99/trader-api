@@ -449,7 +449,10 @@ def _render_sp500_workflow_result(result: dict) -> None:
                 "Ticker": item.get("ticker"),
                 "Grade": item.get("grade"),
                 "Raw Setup": item.get("raw_setup_score"),
-                "Setup Type": pretty_label(item.get("setup_type")),
+                "Setup Family": pretty_label(item.get("setup_family") or item.get("setup_type")),
+                "Trend": item.get("trend_strength_score"),
+                "Pullback": item.get("pullback_quality_score"),
+                "Continuation": item.get("continuation_structure_score"),
                 "Actionability": item.get("actionability_score"),
                 "Entry State": pretty_label(item.get("actionability_state")),
                 "Trigger": item.get("confirmation_trigger"),
@@ -477,6 +480,33 @@ def _render_sp500_workflow_result(result: dict) -> None:
                 st.toast("Selected setups added to Live Monitor.", icon=":material/visibility:")
     else:
         st.caption("No setups completed the deep-analysis stage.")
+
+    best_by_family = result.get("best_by_setup_family") or {}
+    st.markdown("### Best by Setup Type")
+    st.caption("The highest globally ranked candidate in each represented setup family. This does not reserve final ranking slots.")
+    if best_by_family:
+        family_rows = []
+        for family, item in best_by_family.items():
+            family_rows.append(
+                {
+                    "Setup Family": pretty_label(family),
+                    "Global Rank": item.get("rank"),
+                    "Ticker": item.get("ticker"),
+                    "Grade": item.get("grade"),
+                    "Raw Setup": item.get("raw_setup_score"),
+                    "Trend": item.get("trend_strength_score"),
+                    "Pullback": item.get("pullback_quality_score"),
+                    "Continuation": item.get("continuation_structure_score"),
+                    "Actionability": item.get("actionability_score"),
+                    "Entry State": pretty_label(item.get("actionability_state")),
+                    "Confirmation": item.get("confirmation_trigger"),
+                    "Runner Eligible": "Yes" if item.get("runner_eligible") else "No",
+                }
+            )
+        family_rows.sort(key=lambda row: int(row.get("Global Rank") or 9999))
+        st.dataframe(pd.DataFrame(family_rows), use_container_width=True, hide_index=True)
+    else:
+        st.caption("No setup families completed deep analysis in this run.")
 
     st.markdown("### Next To Trigger")
     next_items = result.get("next_to_trigger") or []

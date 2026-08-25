@@ -73,6 +73,12 @@ class PlanRow:
     consecutive_green_sessions: int | None = None
     broader_structure: str | None = None
     setup_type: str | None = None
+    setup_family: str | None = None
+    setup_family_score: float | None = None
+    setup_family_scores: dict | None = None
+    setup_family_components: dict | None = None
+    setup_family_weights: dict | None = None
+    setup_family_policy: dict | None = None
     execution_structure: str | None = None
     scenario_setup_type: str | None = None
     setup_id: str | None = None
@@ -168,6 +174,8 @@ class PlanRow:
     price_confirmed: bool | None = None
     volume_confirmed: bool | None = None
     confirmation_score: float | None = None
+    confirmation_style: str | None = None
+    confirmation_requirements: list[str] = field(default_factory=list)
     stop_loss: float | None = None
     suggested_stop: float | None = None
     invalidation_level: float | None = None
@@ -180,6 +188,8 @@ class PlanRow:
     stop_width_pct: float | None = None
     stop_width_atr: float | None = None
     stop_too_tight_flag: bool | None = None
+    stop_style: str | None = None
+    trade_geometry_status: str | None = None
     take_profit_1: float | None = None
     take_profit_2: float | None = None
     take_profit_3: float | None = None
@@ -205,6 +215,14 @@ class PlanRow:
     level_geometry_flag: str | None = None
     stop_generation_reason: str | None = None
     tp1_generation_reason: str | None = None
+    target_style: str | None = None
+    runner_plan: dict | None = None
+    runner_eligible: bool | None = None
+    tp1_partial_profit_min_pct: float | None = None
+    tp1_partial_profit_max_pct: float | None = None
+    runner_activation_level: float | None = None
+    runner_trailing_methods: list[str] = field(default_factory=list)
+    runner_state: str | None = None
     max_hold_days: int | None = None
     expected_hold_days: int | None = None
     trend_quality_score: float | None = None
@@ -223,6 +241,10 @@ class PlanRow:
     catalyst_score: float | None = None
     macro_score: float | None = None
     scenario_score: float | None = None
+    trend_strength_score: float | None = None
+    pullback_volume_quality: float | None = None
+    continuation_structure_score: float | None = None
+    target_quality_score: float | None = None
     composite_score: float | None = None
     component_scores: dict | None = None
     setup_downgrade_reasons: list[str] = field(default_factory=list)
@@ -271,6 +293,11 @@ class PlanRow:
     is_primary_watchlist_candidate: bool | None = None
     is_secondary_watchlist_candidate: bool | None = None
     pre_scan_score: float | None = None
+    legacy_pre_scan_score: float | None = None
+    setup_lane_qualified: bool | None = None
+    setup_lane_scores: dict | None = None
+    setup_lane_components: dict | None = None
+    alternative_setup_families: list[dict] = field(default_factory=list)
     pre_scan_reason_tags: list[str] = field(default_factory=list)
     sector_relative_strength: float | None = None
     scanner_rank_score: float | None = None
@@ -1255,6 +1282,7 @@ def build_swing_plan(
                 ticker_meta=ticker_meta,
                 sector_relative_strength=pre_scan.get("sector_relative_strength"),
                 previous_setup=(previous_setup_by_ticker or {}).get(t),
+                pre_scan_profile=pre_scan,
                 llm_provider=llm_provider,
                 llm_model=llm_model,
                 llm_style=llm_style,
@@ -1372,6 +1400,12 @@ def build_swing_plan(
                 consecutive_green_sessions=structured.get("consecutive_green_sessions"),
                 broader_structure=structured.get("broader_structure"),
                 setup_type=structured.get("setup_type"),
+                setup_family=structured.get("setup_family"),
+                setup_family_score=structured.get("setup_family_score"),
+                setup_family_scores=structured.get("setup_family_scores"),
+                setup_family_components=structured.get("setup_family_components"),
+                setup_family_weights=structured.get("setup_family_weights"),
+                setup_family_policy=structured.get("setup_family_policy"),
                 execution_structure=structured.get("execution_structure"),
                 scenario_setup_type=structured.get("scenario_setup_type"),
                 setup_id=structured.get("setup_id"),
@@ -1467,6 +1501,8 @@ def build_swing_plan(
                 price_confirmed=structured.get("price_confirmed"),
                 volume_confirmed=structured.get("volume_confirmed"),
                 confirmation_score=structured.get("confirmation_score"),
+                confirmation_style=structured.get("confirmation_style"),
+                confirmation_requirements=list(structured.get("confirmation_requirements") or []),
                 stop_loss=structured["stop_loss"],
                 suggested_stop=structured.get("suggested_stop"),
                 invalidation_level=structured.get("invalidation_level"),
@@ -1479,6 +1515,8 @@ def build_swing_plan(
                 stop_width_pct=structured["stop_width_pct"],
                 stop_width_atr=structured["stop_width_atr"],
                 stop_too_tight_flag=structured["stop_too_tight_flag"],
+                stop_style=structured.get("stop_style"),
+                trade_geometry_status=structured.get("trade_geometry_status"),
                 take_profit_1=structured["take_profit_1"],
                 take_profit_2=structured["take_profit_2"],
                 take_profit_3=structured.get("take_profit_3"),
@@ -1504,6 +1542,14 @@ def build_swing_plan(
                 level_geometry_flag=structured["level_geometry_flag"],
                 stop_generation_reason=structured["stop_generation_reason"],
                 tp1_generation_reason=structured["tp1_generation_reason"],
+                target_style=structured.get("target_style"),
+                runner_plan=structured.get("runner_plan"),
+                runner_eligible=structured.get("runner_eligible"),
+                tp1_partial_profit_min_pct=structured.get("tp1_partial_profit_min_pct"),
+                tp1_partial_profit_max_pct=structured.get("tp1_partial_profit_max_pct"),
+                runner_activation_level=structured.get("runner_activation_level"),
+                runner_trailing_methods=list(structured.get("runner_trailing_methods") or []),
+                runner_state=structured.get("runner_state"),
                 max_hold_days=structured["max_hold_days"],
                 expected_hold_days=structured.get("expected_hold_days"),
                 trend_quality_score=structured["trend_quality_score"],
@@ -1522,11 +1568,20 @@ def build_swing_plan(
                 catalyst_score=structured.get("catalyst_score"),
                 macro_score=structured.get("macro_score"),
                 scenario_score=structured.get("scenario_score"),
+                trend_strength_score=structured.get("trend_strength_score"),
+                pullback_volume_quality=structured.get("pullback_volume_quality"),
+                continuation_structure_score=structured.get("continuation_structure_score"),
+                target_quality_score=structured.get("target_quality_score"),
                 composite_score=structured["composite_score"],
                 component_scores=structured.get("component_scores"),
                 setup_downgrade_reasons=list(structured.get("setup_downgrade_reasons") or []),
                 llm_review=structured["llm_review"],
                 pre_scan_score=pre_scan.get("pre_scan_score"),
+                legacy_pre_scan_score=pre_scan.get("legacy_pre_scan_score"),
+                setup_lane_qualified=pre_scan.get("setup_lane_qualified"),
+                setup_lane_scores=pre_scan.get("setup_lane_scores"),
+                setup_lane_components=pre_scan.get("setup_lane_components"),
+                alternative_setup_families=list(pre_scan.get("alternative_setup_families") or []),
                 pre_scan_reason_tags=list(pre_scan.get("pre_scan_reason_tags") or []),
                 sector_relative_strength=pre_scan.get("sector_relative_strength"),
                 scan_shortlisted=pre_scan.get("scan_shortlisted"),

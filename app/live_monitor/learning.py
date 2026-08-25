@@ -193,6 +193,7 @@ def aggregate_observations(
     success_weight = sum(float(row["_weight"]) for row in rows if _success(row))
     numeric_fields = (
         "r_multiple", "mfe_atr", "mae_atr", "rvol_1m", "rvol_5m", "hold_days", "entry_distance_pct",
+        "runner_extension_atr",
     )
     means = {
         field: _weighted_mean([
@@ -227,10 +228,13 @@ def aggregate_observations(
         "avg_rvol_5m": means["rvol_5m"],
         "avg_hold_days": means["hold_days"],
         "average_entry_distance_from_trigger": means["entry_distance_pct"],
+        "average_runner_extension_atr": means["runner_extension_atr"],
         **target_rates,
         "confirmation_method_stats": _group_stats(rows, "confirmation_method", evidence_thresholds),
         "attempt_number_stats": _group_stats(rows, "attempt_number", evidence_thresholds),
         "setup_type_stats": _group_stats(rows, "setup_type", evidence_thresholds),
+        "setup_family_stats": _group_stats(rows, "setup_family", evidence_thresholds),
+        "runner_state_stats": _group_stats(rows, "runner_state", evidence_thresholds),
         "market_regime_stats": _group_stats(rows, "market_regime", evidence_thresholds),
         "level_source_stats": _group_stats(rows, "level_source", evidence_thresholds),
         "session_bucket_stats": _group_stats(rows, "session_bucket", evidence_thresholds),
@@ -269,7 +273,8 @@ def similar_case_score(
     categorical = weights or {
         "ticker": 2.0,
         "broader_structure": 1.25,
-        "setup_type": 2.0,
+        "setup_type": 1.0,
+        "setup_family": 2.5,
         "execution_structure": 1.5,
         "sector": 0.75,
         "market_regime": 1.0,

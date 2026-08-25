@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .config import PlanningConfig
+from .setup_archetypes import score_setup_families
 
 
 def _clip_score(value: float) -> float:
@@ -127,6 +128,8 @@ def score_setup(
     price_location_score: float = 5.0,
     target_realism_score: float = 5.0,
     confirmation_score: float = 5.0,
+    setup_family: str | None = None,
+    pre_scan_profile: dict | None = None,
 ) -> dict:
     rich_state = str(structure_state or "")
     rich_trend_scores = {
@@ -255,6 +258,38 @@ def score_setup(
         "confirmation_score": _clip_score(confirmation_score),
     }
 
+    pre_scan_profile = pre_scan_profile or {}
+    prescan_components = pre_scan_profile.get("setup_lane_components") or {}
+    family_components = {
+        "trend_strength": scores["trend_quality_score"],
+        "pullback_quality": scores["pullback_quality_score"],
+        "deep_pullback_quality": float(prescan_components.get("deep_pullback_quality", scores["pullback_quality_score"])),
+        "price_location": scores["price_location_score"],
+        "relative_strength": scores["relative_strength_score"],
+        "pullback_volume": float(prescan_components.get("pullback_volume", scores["volume_confirmation_score"])),
+        "support_confluence": scores["support_quality_score"],
+        "continuation_structure": float(
+            prescan_components.get(
+                "continuation_structure",
+                (scores["trend_quality_score"] + scores["relative_strength_score"]) / 2.0,
+            )
+        ),
+        "confirmation": scores["confirmation_score"],
+        "target_quality": scores["target_realism_score"],
+        "base_quality": float(prescan_components.get("base_quality", scores["context_score"])),
+        "breakout_retest_quality": float(prescan_components.get("breakout_retest_quality", scores["support_quality_score"])),
+        "reversal_quality": float(prescan_components.get("reversal_quality", scores["confirmation_score"])),
+        "volatility": scores["volatility_quality_score"],
+        "liquidity": scores["liquidity_score"],
+        "earnings": scores["earnings_risk_score"],
+    }
+    family_profile = score_setup_families(
+        family_components,
+        weights_by_family=config.setup_family_score_weights,
+    )
+    selected_family = setup_family or family_profile["setup_family"]
+    setup_family_score = float((family_profile["setup_lane_scores"] or {}).get(selected_family, 0.0))
+
     total_weight = sum(config.score_weights.values())
     composite = 0.0
     for key, weight in config.score_weights.items():
@@ -262,9 +297,19 @@ def score_setup(
         if metric_key not in scores:
             continue
         composite += scores[metric_key] * weight
-    composite_score = (composite / max(total_weight, 1e-9))
+    generic_composite = composite / max(total_weight, 1e-9)
+    blend = max(0.0, min(float(config.setup_family_raw_score_blend), 0.6))
+    composite_score = generic_composite * (1.0 - blend) + setup_family_score * blend
     scores["composite_score"] = round(_clip_score(composite_score), 4)
     scores["trend_score"] = scores["trend_quality_score"]
     scores["volatility_suitability_score"] = scores["volatility_quality_score"]
     scores["support_confluence_score"] = scores["support_quality_score"]
+    scores["trend_strength_score"] = family_components["trend_strength"]
+    scores["pullback_volume_quality"] = family_components["pullback_volume"]
+    scores["continuation_structure_score"] = family_components["continuation_structure"]
+    scores["target_quality_score"] = family_components["target_quality"]
+    scores["setup_family_score"] = round(setup_family_score, 4)
+    scores["setup_family_components"] = {key: round(float(value), 4) for key, value in family_components.items()}
+    scores["setup_family_scores"] = family_profile["setup_lane_scores"]
+    scores["setup_family_weights"] = dict(config.setup_family_score_weights.get(selected_family) or {})
     return scores

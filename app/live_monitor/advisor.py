@@ -31,7 +31,7 @@ def build_advisory_packet(
         "stock_context": {
             key: baseline.get(key)
             for key in (
-                "ticker", "current_price", "broader_structure", "setup_type", "execution_structure",
+                "ticker", "current_price", "broader_structure", "setup_type", "setup_family", "execution_structure",
                 "support_levels", "resistance_levels", "atr", "atr_pct", "rsi", "ema20", "ema50",
                 "ema100", "ema200", "volume_context",
             )

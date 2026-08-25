@@ -188,11 +188,25 @@ def render_daily_trade_card(item: dict) -> None:
                 <div><div class="mini-label">Stop</div><div class="mini-value">{html.escape(format_price(item.get('stop_loss')))}</div></div>
                 <div><div class="mini-label">TP1 / TP2</div><div class="mini-value">{html.escape(format_price(item.get('take_profit_1')))} / {html.escape(format_price(item.get('take_profit_2')))}</div></div>
             </div>
-            <div class="summary-note">{html.escape(pretty_label(item.get('setup_type')))} | {html.escape(str(item.get('sector') or 'Unknown'))}</div>
+            <div class="summary-note">{html.escape(pretty_label(item.get('setup_family') or item.get('setup_type')))} | {html.escape(str(item.get('sector') or 'Unknown'))}</div>
+            <div class="summary-note">Entry: {html.escape(pretty_label(item.get('entry_style')))} | Stop: {html.escape(pretty_label(item.get('stop_style')))} | Target: {html.escape(pretty_label(item.get('target_style')))}</div>
+            <div class="summary-note">{_runner_policy_text(item)}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+def _runner_policy_text(item: dict) -> str:
+    if not item.get("runner_eligible"):
+        return "No continuation runner; use the family-specific structural targets."
+    minimum = item.get("tp1_partial_profit_min_pct")
+    maximum = item.get("tp1_partial_profit_max_pct")
+    try:
+        partial = f"Take {float(minimum) * 100:.0f}-{float(maximum) * 100:.0f}% at TP1"
+    except (TypeError, ValueError):
+        partial = "Take partial profit at TP1"
+    return html.escape(f"{partial}; manage the remainder as a manual trend runner.")
 
 
 def _safe_display(value) -> str:

@@ -12,7 +12,7 @@ from .chart_levels import LEVEL_NAMES, derive_chart_level_candidates, number, va
 from .config import LiveMonitorConfig
 
 
-CHART_STRUCTURE_PROMPT_VERSION = "chart-structure-review-v2-final-plan"
+CHART_STRUCTURE_PROMPT_VERSION = "chart-structure-review-v3-setup-family"
 CONFIRMED_TRADE_PROMPT_VERSION = "confirmed-trade-review-v1"
 
 
@@ -26,11 +26,12 @@ CHART_REVIEW_SCHEMA: dict[str, Any] = {
             "properties": {
                 "broader_structure": {"type": "string"},
                 "setup_type": {"type": "string"},
+                "setup_family": {"type": "string"},
                 "execution_structure": {"type": "string"},
                 "setup_quality": {"type": "string"},
                 "setup_stale": {"type": "boolean"},
             },
-            "required": ["broader_structure", "setup_type", "execution_structure", "setup_quality", "setup_stale"],
+            "required": ["broader_structure", "setup_type", "setup_family", "execution_structure", "setup_quality", "setup_stale"],
         },
         "levels": {
             "type": "object",
@@ -220,7 +221,10 @@ def openai_chart_provider(packet: dict[str, Any], *, model: str) -> dict[str, An
         "Do not invent unsupported levels and do not force a trade. Explicitly classify every level role. Decide whether the planner primary "
         "is the earliest meaningful swing confirmation or actually strong confirmation/major repair. Inspect primary, stop, TP1, TP2, and TP3: "
         "TP1 must be above entry, targets must be ordered, nearer resistance must not be skipped, and geometry must suit a 2-10 day swing. "
-        "Explicitly state which supplied historical evidence was used or ignored."
+        "Explicitly state which supplied historical evidence was used or ignored. Apply the supplied setup_family: healthy pullbacks "
+        "must preserve trend/support and may use prior-high partial profit plus a runner; momentum continuation must hold its short base; "
+        "breakout retests must hold former resistance; base breakouts need a defined constructive base; deep pullbacks and reversal attempts "
+        "need stronger repair confirmation and conservative resistance-based targets. Never invent numeric levels. Execution is manual only."
         if review_type == "CHART_STRUCTURE_REVIEW"
         else
         "The deterministic monitor found possible price and volume confirmation. Review chart structure, confirmation quality, "
@@ -333,6 +337,7 @@ def review_chart_packet(
             "chart_assessment": {
                 "broader_structure": str(packet.get("broader_structure") or "unknown"),
                 "setup_type": str(packet.get("setup_type") or "unknown"),
+                "setup_family": str(packet.get("setup_family") or "unknown"),
                 "execution_structure": str(packet.get("execution_structure") or "unknown"),
                 "setup_quality": "deterministic_only",
                 "setup_stale": bool(packet.get("stale_plan", {}).get("stale")),

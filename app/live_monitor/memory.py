@@ -184,6 +184,7 @@ def _attempt_observation(
         "confirmation_method": attempt.confirmation_method,
         "attempt_number": attempt.attempt_number,
         "setup_type": setup.setup_type,
+        "setup_family": setup.setup_family,
         "broader_structure": setup.broader_structure,
         "execution_structure": setup.execution_structure,
         "sector": setup.sector,
@@ -218,6 +219,7 @@ def _daily_observation(row: MonitorDailySummary) -> dict[str, Any]:
         "confirmation_method": decisions.get("confirmation_method") or "NO_TRIGGER",
         "attempt_number": row.number_of_trigger_attempts or 0,
         "setup_type": row.setup_type,
+        "setup_family": row.setup_family,
         "broader_structure": row.broader_structure,
         "execution_structure": row.execution_structure,
         "sector": row.sector,
@@ -227,6 +229,10 @@ def _daily_observation(row: MonitorDailySummary) -> dict[str, Any]:
         "tp1_reached": outcome.get("tp1_reached"),
         "tp2_reached": outcome.get("tp2_reached"),
         "tp3_reached": outcome.get("tp3_reached"),
+        "runner_state": decisions.get("runner_state"),
+        "breakout_rejected": outcome.get("breakout_rejected"),
+        "breakout_confirmed": outcome.get("breakout_confirmed"),
+        "runner_extension_atr": outcome.get("runner_extension_atr"),
         "data_quality_flags": _loads(row.data_quality_flags_json, []),
     }
 
@@ -238,6 +244,8 @@ def collect_scope_observations(db: Session, scope_type: str, scope_value: str) -
         setup_query = setup_query.filter(MonitorSetup.ticker == scope_value)
     elif normalized == "setup_type":
         setup_query = setup_query.filter(MonitorSetup.setup_type == scope_value)
+    elif normalized == "setup_family":
+        setup_query = setup_query.filter(MonitorSetup.setup_family == scope_value)
     elif normalized == "sector":
         setup_query = setup_query.filter(MonitorSetup.sector == scope_value)
     elif normalized == "market_regime":
@@ -275,6 +283,7 @@ def refresh_profile(
     prior = {
         "ticker": config.ticker_prior_strength,
         "setup_type": config.setup_prior_strength,
+        "setup_family": config.setup_prior_strength,
         "sector": config.sector_prior_strength,
         "market_regime": config.regime_prior_strength,
     }.get(scope_type, config.sector_prior_strength)
@@ -331,10 +340,16 @@ def refresh_profile(
 
 
 def load_historical_context(db: Session, setup: MonitorSetup, config: LiveMonitorConfig) -> dict[str, Any]:
+    setup_scope = (
+        ("setup_family", setup.setup_family)
+        if setup.setup_family
+        else ("setup_type", setup.setup_type)
+    )
     scopes = {
         "global": ("global", "all"),
         "ticker": ("ticker", setup.ticker),
-        "setup": ("setup_type", setup.setup_type),
+        "setup": setup_scope,
+        "legacy_setup_type": ("setup_type", setup.setup_type) if setup.setup_family else ("setup_type", None),
         "sector": ("sector", setup.sector),
         "regime": ("market_regime", setup.market_regime),
     }
@@ -497,6 +512,11 @@ def finalize_daily_summary(
         db.add(recommendation)
         db.flush()
     actual_r = next((row.r_multiple for row in reversed(trades) if row.r_multiple is not None), None)
+    runner_extension_atr = (
+        None
+        if tp1 is None or high_price is None or not atr
+        else round(max(float(high_price) - float(tp1), 0.0) / float(atr), 4)
+    )
     row = MonitorDailySummary(
         id=_id(), trading_date=trading_date, watch_id=watch.id, setup_id=setup.id,
         market_snapshot_id=setup.market_snapshot_id, ticker=setup.ticker,
@@ -504,6 +524,7 @@ def finalize_daily_summary(
         starting_monitor_price=bars[0].close_price if bars else setup.plan_reference_price,
         ending_monitor_price=close_price, broader_structure=setup.broader_structure,
         setup_type=setup.setup_type, execution_structure=setup.execution_structure,
+        setup_family=setup.setup_family,
         market_regime=setup.market_regime, sector=setup.sector,
         levels_json=_dumps({
             "planner": _loads(setup.planner_levels_json),
@@ -529,6 +550,8 @@ def finalize_daily_summary(
             "confirmation_method": attempts[-1].confirmation_method if attempts else None,
             "trigger_source": setup.trigger_source,
             "rule_version": setup.rule_version,
+            "runner_state": latest_evaluation.get("runner_state"),
+            "runner_trailing_methods": baseline.get("runner_trailing_methods") or [],
         }),
         outcome_json=_dumps({
             "trigger_reached": bool(attempts),
@@ -536,6 +559,9 @@ def finalize_daily_summary(
             "tp1_reached": bool(tp1 is not None and high_price is not None and high_price >= tp1),
             "tp2_reached": bool(tp2 is not None and high_price is not None and high_price >= tp2),
             "tp3_reached": bool(tp3 is not None and high_price is not None and high_price >= tp3),
+            "breakout_rejected": bool(latest_evaluation.get("breakout_rejected")),
+            "breakout_confirmed": bool(latest_evaluation.get("breakout_confirmed")),
+            "runner_extension_atr": runner_extension_atr,
             "invalidation_reached": bool(invalidation is not None and low_price is not None and low_price <= invalidation),
             "recommendation_outcome": recommendation.outcome if recommendation else "NO_USER_ACTION",
             "outcome_type": "ACTUAL_TRADE" if trades else "RECOMMENDATION_OUTCOME",
@@ -728,6 +754,8 @@ def run_daily_learning_cycle(db: Session, trading_date: date, config: LiveMonito
         scope_values.add(("ticker", setup.ticker))
         if setup.setup_type:
             scope_values.add(("setup_type", setup.setup_type))
+        if setup.setup_family:
+            scope_values.add(("setup_family", setup.setup_family))
         if setup.sector:
             scope_values.add(("sector", setup.sector))
         if setup.market_regime:

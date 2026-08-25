@@ -74,6 +74,61 @@ class PlanningConfig:
     sp500_deep_analysis_batch_size: int = 15
     sp500_max_deep_analysis_limit: int = 75
     sp500_target_actionable_candidates: int = 2
+    setup_lane_min_score: float = 5.4
+    setup_lane_dominance_threshold: float = 0.80
+    setup_lane_min_candidates: dict[str, int] = field(
+        default_factory=lambda: {
+            "healthy_pullback": 5,
+            "momentum_continuation": 4,
+            "breakout_retest": 4,
+            "base_breakout": 4,
+            "deep_pullback": 3,
+            "reversal_attempt": 2,
+        }
+    )
+    setup_family_score_weights: dict[str, dict[str, float]] = field(
+        default_factory=lambda: {
+            "healthy_pullback": {
+                "trend_strength": 0.18, "pullback_quality": 0.18, "price_location": 0.10,
+                "relative_strength": 0.14, "pullback_volume": 0.12, "support_confluence": 0.12,
+                "continuation_structure": 0.10, "volatility": 0.03, "liquidity": 0.03,
+            },
+            "momentum_continuation": {
+                "trend_strength": 0.20, "relative_strength": 0.18, "continuation_structure": 0.20,
+                "base_quality": 0.10, "pullback_volume": 0.10, "confirmation": 0.08,
+                "price_location": 0.06, "volatility": 0.05, "liquidity": 0.03,
+            },
+            "breakout_retest": {
+                "breakout_retest_quality": 0.24, "support_confluence": 0.16, "trend_strength": 0.14,
+                "relative_strength": 0.12, "pullback_volume": 0.10, "confirmation": 0.10,
+                "price_location": 0.07, "volatility": 0.04, "liquidity": 0.03,
+            },
+            "base_breakout": {
+                "base_quality": 0.24, "trend_strength": 0.15, "continuation_structure": 0.14,
+                "relative_strength": 0.12, "confirmation": 0.12, "pullback_volume": 0.08,
+                "price_location": 0.07, "volatility": 0.05, "liquidity": 0.03,
+            },
+            "deep_pullback": {
+                "deep_pullback_quality": 0.22, "support_confluence": 0.20, "reversal_quality": 0.14,
+                "trend_strength": 0.10, "pullback_volume": 0.12, "confirmation": 0.10,
+                "price_location": 0.06, "volatility": 0.03, "liquidity": 0.03,
+            },
+            "reversal_attempt": {
+                "reversal_quality": 0.26, "support_confluence": 0.18, "confirmation": 0.18,
+                "pullback_volume": 0.12, "price_location": 0.10, "target_quality": 0.07,
+                "volatility": 0.05, "liquidity": 0.04,
+            },
+        }
+    )
+    setup_family_raw_score_blend: float = 0.28
+    continuation_tp1_partial_min_pct: float = 0.25
+    continuation_tp1_partial_max_pct: float = 0.50
+    continuation_runner_trailing_methods: tuple[str, ...] = (
+        "atr_trailing_stop",
+        "rising_ema20",
+        "recent_higher_low",
+        "breakout_retest_support",
+    )
     best_setups_count: int = 10
     best_trades_today_max: int = 2
     next_to_trigger_count: int = 5

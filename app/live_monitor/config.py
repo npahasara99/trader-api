@@ -7,7 +7,7 @@ from app.settings import settings
 
 
 DEFAULT_SIMILARITY_WEIGHTS = {
-    "ticker": 2.0, "broader_structure": 1.25, "setup_type": 2.0,
+    "ticker": 2.0, "broader_structure": 1.25, "setup_type": 1.0, "setup_family": 2.5,
     "execution_structure": 1.5, "sector": 0.75, "market_regime": 1.0,
     "confirmation_method": 1.25, "attempt_number": 0.5,
     "qqq_condition": 0.5, "sector_condition": 0.5,

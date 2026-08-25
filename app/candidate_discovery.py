@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Callable, Iterable, TypeVar
 
+from .setup_archetypes import SETUP_FAMILIES, normalize_setup_family
+
 
 T = TypeVar("T")
 
@@ -47,6 +49,18 @@ def sector_counts(items: Iterable[object], metadata_by_ticker: dict[str, dict]) 
     ordered = {sector: int(counts.pop(sector, 0)) for sector in MAJOR_SP500_SECTORS}
     ordered.update({sector: int(count) for sector, count in sorted(counts.items())})
     return ordered
+
+
+def setup_family_counts(items: Iterable[object]) -> dict[str, int]:
+    """Count canonical setup interpretations at any scanner stage."""
+
+    counts = Counter()
+    for item in items:
+        raw = item.get("setup_family") if isinstance(item, dict) else getattr(item, "setup_family", None)
+        family = normalize_setup_family(raw)
+        if family:
+            counts[family] += 1
+    return {family: int(counts.get(family, 0)) for family in SETUP_FAMILIES}
 
 
 def build_sector_aware_candidate_order(
@@ -95,6 +109,85 @@ def build_sector_aware_candidate_order(
             selected_tickers.add(ticker)
 
     # Expansion preserves the original global pre-scan order.
+    selected.extend(candidate for candidate in ranked_candidates if _ticker(candidate) not in selected_tickers)
+    return selected
+
+
+def build_multilane_candidate_order(
+    ranked_candidates: list[dict],
+    *,
+    metadata_by_ticker: dict[str, dict],
+    initial_limit: int,
+    min_per_sector: int,
+    minimum_by_family: dict[str, int],
+    minimum_family_score: float,
+) -> list[dict]:
+    """Reserve discovery capacity by family, then sector, without final-score bonuses."""
+
+    if not ranked_candidates:
+        return []
+    initial_limit = max(1, min(int(initial_limit), len(ranked_candidates)))
+    by_family: dict[str, list[dict]] = {family: [] for family in SETUP_FAMILIES}
+    for candidate in ranked_candidates:
+        lane_scores = candidate.get("setup_lane_scores") or {}
+        for family in SETUP_FAMILIES:
+            if float(lane_scores.get(family) or 0.0) >= float(minimum_family_score):
+                by_family[family].append(candidate)
+    for family in SETUP_FAMILIES:
+        by_family[family].sort(
+            key=lambda item: (
+                float((item.get("setup_lane_scores") or {}).get(family) or 0.0),
+                float(item.get("pre_scan_score") or 0.0),
+            ),
+            reverse=True,
+        )
+
+    selected: list[dict] = []
+    selected_tickers: set[str] = set()
+    max_reserved_depth = max((int(minimum_by_family.get(family, 0)) for family in SETUP_FAMILIES), default=0)
+    for depth in range(max_reserved_depth):
+        for family in SETUP_FAMILIES:
+            if depth >= int(minimum_by_family.get(family, 0)) or len(selected) >= initial_limit:
+                continue
+            choices = by_family[family]
+            candidate = next((item for item in choices if _ticker(item) not in selected_tickers), None)
+            if candidate is not None:
+                selected.append(candidate)
+                selected_tickers.add(_ticker(candidate))
+
+    sector_order = build_sector_aware_candidate_order(
+        ranked_candidates,
+        metadata_by_ticker=metadata_by_ticker,
+        initial_limit=initial_limit,
+        min_per_sector=min_per_sector,
+    )
+    for candidate in sector_order:
+        if len(selected) >= initial_limit:
+            break
+        ticker = _ticker(candidate)
+        if ticker and ticker not in selected_tickers:
+            selected.append(candidate)
+            selected_tickers.add(ticker)
+
+    # Expansion round-robins the remaining lanes so a failed first batch does
+    # not simply inspect more candidates from the dominant family.
+    family_offsets = {family: 0 for family in SETUP_FAMILIES}
+    while len(selected_tickers) < len(ranked_candidates):
+        added = False
+        for family in SETUP_FAMILIES:
+            choices = by_family[family]
+            offset = family_offsets[family]
+            while offset < len(choices) and _ticker(choices[offset]) in selected_tickers:
+                offset += 1
+            family_offsets[family] = offset + 1
+            if offset < len(choices):
+                candidate = choices[offset]
+                selected.append(candidate)
+                selected_tickers.add(_ticker(candidate))
+                added = True
+        if not added:
+            break
+
     selected.extend(candidate for candidate in ranked_candidates if _ticker(candidate) not in selected_tickers)
     return selected
 
@@ -191,6 +284,8 @@ def run_adaptive_batches(
                 "batch_size": len(batch),
                 "deep_analyzed": cursor,
                 "actionable_count": actionable,
+                "batch_setup_family_counts": setup_family_counts(batch),
+                "cumulative_setup_family_counts": setup_family_counts(rows),
             }
         )
         if actionable >= target_actionable or not adaptive:
@@ -201,9 +296,11 @@ def run_adaptive_batches(
 __all__ = [
     "MAJOR_SP500_SECTORS",
     "build_sector_aware_candidate_order",
+    "build_multilane_candidate_order",
     "classify_best_setup_quality",
     "classify_search_exhaustiveness",
     "run_adaptive_batches",
     "sector_counts",
+    "setup_family_counts",
     "validate_sp500_universe",
 ]

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from .config import DEFAULT_PLANNING_CONFIG, PlanningConfig
+from .setup_archetypes import normalize_setup_family
 
 
 GRADE_ORDER = {"F": 0, "D": 1, "C": 2, "B": 3, "B+": 4, "A-": 5, "A": 6, "A+": 7}
@@ -161,6 +162,10 @@ def build_raw_setup_profile(row: Any, *, config: PlanningConfig = DEFAULT_PLANNI
     }
     weights = config.raw_setup_weights
     weighted = sum(components[key] * weights[key] for key in weights) / max(sum(weights.values()), 1e-9)
+    family_quality = _component(row, "setup_family_score", weighted)
+    blend = max(0.0, min(float(config.setup_family_raw_score_blend), 0.6))
+    weighted = weighted * (1.0 - blend) + family_quality * blend
+    components["setup_family_quality"] = family_quality
     exclusion_reasons: list[str] = []
     if not bool(_value(row, "universe_eligible", True)):
         exclusion_reasons.extend(list(_value(row, "universe_rejection_reasons", []) or []))
@@ -449,7 +454,17 @@ def _candidate_from_row(
         "correlation_group": correlation_group,
         "broader_structure": _value(row, "broader_structure", None),
         "setup_type": _value(row, "setup_type", None) or _value(row, "enhanced_trend_state", None),
+        "setup_family": normalize_setup_family(_value(row, "setup_family", None), "reversal_attempt"),
+        "setup_family_score": _value(row, "setup_family_score", None),
+        "setup_family_components": _value(row, "setup_family_components", None) or {},
         "execution_structure": _value(row, "execution_structure", None),
+        "entry_style": _value(row, "preferred_entry_type", None),
+        "confirmation_style": _value(row, "confirmation_style", None),
+        "stop_style": _value(row, "stop_style", None),
+        "target_style": _value(row, "target_style", None),
+        "trend_strength_score": _value(row, "trend_strength_score", None),
+        "pullback_quality_score": _value(row, "pullback_quality_score", None),
+        "continuation_structure_score": _value(row, "continuation_structure_score", None),
         "current_price": _value(row, "current_price", None),
         "preferred_entry": _value(row, "preferred_entry", None),
         "confirmation_trigger": _value(row, "confirmation_trigger_price", None),
@@ -462,6 +477,14 @@ def _candidate_from_row(
         "stop_loss": _value(row, "stop_loss", None),
         "take_profit_1": _value(row, "take_profit_1", None),
         "take_profit_2": _value(row, "take_profit_2", None),
+        "take_profit_3": _value(row, "take_profit_3", None),
+        "stretch_target": _value(row, "stretch_target", None),
+        "runner_eligible": bool(_value(row, "runner_eligible", False)),
+        "runner_plan": _value(row, "runner_plan", None),
+        "tp1_partial_profit_min_pct": _value(row, "tp1_partial_profit_min_pct", None),
+        "tp1_partial_profit_max_pct": _value(row, "tp1_partial_profit_max_pct", None),
+        "runner_trailing_methods": list(_value(row, "runner_trailing_methods", []) or []),
+        "runner_state": _value(row, "runner_state", None),
         "risk_reward": _value(row, "reward_risk", None),
         "planner_action": _value(row, "final_action", None),
         "action": str(_value(row, "final_action", None) or "WAIT").upper(),
@@ -538,6 +561,11 @@ def rank_daily_opportunities(
 
     candidates.sort(key=lambda item: (item["raw_setup_score"], item["actionability_score"]), reverse=True)
     best_setups = [{**item, "rank": rank} for rank, item in enumerate(candidates[:best_setups_count], start=1)]
+    best_by_setup_family: dict[str, dict] = {}
+    for rank, item in enumerate(candidates, start=1):
+        family = str(item.get("setup_family") or "")
+        if family and family not in best_by_setup_family:
+            best_by_setup_family[family] = {**item, "rank": rank}
 
     next_candidates = [
         item
@@ -606,5 +634,6 @@ def rank_daily_opportunities(
         "best_setups": best_setups,
         "best_trades_today": selected,
         "next_to_trigger": next_to_trigger,
+        "best_by_setup_family": best_by_setup_family,
         "failures": failures,
     }
