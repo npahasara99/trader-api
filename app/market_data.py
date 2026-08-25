@@ -948,6 +948,7 @@ def repair_daily_bar_cache(
     incremental_overlap_days: int = 5,
     refresh: bool = False,
     fetcher: Callable[[str, date, date], tuple[list[dict], str, str | None, str | None]] | None = None,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> dict:
     """Incrementally repair missing/stale daily bars with per-symbol isolation."""
 
@@ -1094,6 +1095,16 @@ def repair_daily_bar_cache(
                         "provider_symbol": provider_symbol,
                     }
             completed += 1
+            if progress_callback is not None:
+                processed = list(results_by_symbol.values())
+                progress_callback(
+                    {
+                        "completed": completed,
+                        "total": len(tasks),
+                        "updated": sum(item.get("status") == "updated" for item in processed),
+                        "failed": sum(item.get("status") in {"no_data", "error"} for item in processed),
+                    }
+                )
             if completed % commit_every == 0:
                 db.commit()
                 processed = list(results_by_symbol.values())

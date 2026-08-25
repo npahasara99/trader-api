@@ -13,6 +13,7 @@ from app.market_data import (
     validate_daily_bars,
 )
 from app.models import DailyBar
+import app.market_data_jobs as market_data_jobs
 
 
 def _session():
@@ -179,3 +180,66 @@ def test_low_data_coverage_cannot_be_exhaustive():
         minimum_data_coverage_pct=0.90,
     )
     assert complete_status == "exhaustive"
+
+
+def test_background_repair_job_reports_progress_and_completion(monkeypatch):
+    class FakeSessionContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return False
+
+    calls = []
+
+    def fake_repair(_db, symbols, **kwargs):
+        calls.append(list(symbols))
+        callback = kwargs.get("progress_callback")
+        if callback:
+            callback({"completed": 2, "total": 2, "updated": 2, "failed": 0})
+        return {
+            "fetch_attempted": len(symbols),
+            "fetch_success": len(symbols),
+            "fetch_failed": 0,
+            "current": len(symbols),
+            "results": [],
+        }
+
+    monkeypatch.setattr(market_data_jobs, "SessionLocal", lambda: FakeSessionContext())
+    monkeypatch.setattr(market_data_jobs, "repair_daily_bar_cache", fake_repair)
+    monkeypatch.setattr(
+        market_data_jobs,
+        "resolve_expected_market_date",
+        lambda *_args, **_kwargs: datetime(2026, 8, 21, tzinfo=timezone.utc).date(),
+    )
+
+    market_data_jobs._run_job("job-test", ["A", "B"], ["SPY"])
+    status = market_data_jobs.get_sp500_cache_job_status()
+
+    assert calls == [["SPY"], ["A", "B"]]
+    assert status["state"] == "completed"
+    assert status["completed_symbols"] == 2
+    assert status["fetch_success"] == 2
+    assert status["fetch_failed"] == 0
+
+
+def test_background_repair_job_surfaces_failure(monkeypatch):
+    class FakeSessionContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return False
+
+    def failed_repair(*_args, **_kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(market_data_jobs, "SessionLocal", lambda: FakeSessionContext())
+    monkeypatch.setattr(market_data_jobs, "repair_daily_bar_cache", failed_repair)
+
+    market_data_jobs._run_job("job-failed", ["A"], ["SPY"])
+    status = market_data_jobs.get_sp500_cache_job_status()
+
+    assert status["state"] == "failed"
+    assert status["phase"] == "failed"
+    assert status["last_error"] == "RuntimeError: provider unavailable"

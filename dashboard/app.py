@@ -573,10 +573,12 @@ def _render_sp500_cache_recovery(
     coverage = cache_coverage or {}
     repair = coverage.get("repair") or {}
     current = int(coverage.get("constituents_current") or 0)
-    missing = int(repair.get("missing") or len(coverage.get("missing_symbols") or []))
-    stale = int(repair.get("stale") or len(coverage.get("stale_symbols") or []))
-    failed = int(repair.get("fetch_failed") or 0)
+    missing = int(repair.get("missing") or coverage.get("missing_count") or len(coverage.get("missing_symbols") or []))
+    stale = int(repair.get("stale") or coverage.get("stale_count") or len(coverage.get("stale_symbols") or []))
+    failed = int(repair.get("fetch_failed") or repair.get("failed") or 0)
     coverage_pct = float(coverage.get("market_data_coverage_pct") or 0.0)
+    backfill_state = str(repair.get("state") or "idle")
+    backfill_running = backfill_state in {"queued", "running"}
     with st.container(border=True):
         st.markdown("### S&P 500 Data Cache")
         st.warning(
@@ -598,6 +600,18 @@ def _render_sp500_cache_recovery(
             f"Provider successes: {repair.get('provider_counts') or 'none'} | "
             "Existing bars are retained and updated; planner and ranking logic are unchanged."
         )
+        if backfill_running:
+            completed = int(repair.get("completed_symbols") or 0)
+            requested = int(repair.get("requested_symbols") or universe_size)
+            st.info(
+                f"Automatic backfill is {backfill_state}: {completed}/{requested} constituents processed. "
+                "This work continues in the API service after the scan response returns."
+            )
+            st.progress(min(completed / max(requested, 1), 1.0))
+        elif backfill_state == "failed":
+            st.error(f"Automatic backfill failed: {repair.get('last_error') or 'unknown error'}")
+        elif backfill_state == "completed":
+            st.success("Automatic backfill completed. Run the S&P 500 scan again to use the repaired cache.")
 
         if sector_coverage:
             with st.expander("Market-data coverage by sector", expanded=False):
@@ -649,6 +663,7 @@ def _render_sp500_cache_recovery(
             type="primary",
             use_container_width=True,
             key="sp500_backfill_next_batch",
+            disabled=backfill_running,
         )
         check_status = action_cols[1].button(
             "Check Stored Bars",
@@ -697,6 +712,12 @@ def _render_sp500_cache_recovery(
                     f"Raw stored data exists for {int(status.get('symbols_with_data') or 0)}; "
                     f"coverage is {float(status.get('market_data_coverage_pct') or 0.0):.1%}."
                 )
+                job = status.get("backfill_job") or {}
+                if job.get("state") in {"queued", "running"}:
+                    st.caption(
+                        f"Automatic backfill: {job.get('state')} - "
+                        f"{int(job.get('completed_symbols') or 0)}/{int(job.get('requested_symbols') or universe_size)} processed."
+                    )
             except TraderAPIError as exc:
                 st.error(str(exc))
 
@@ -876,11 +897,9 @@ def _render_live_monitor_table(monitor_rows: list[dict]) -> None:
     )
 
 
-_MONITOR_REFRESH_SECONDS = max(2, min(5, int(os.getenv("LIVE_MONITOR_FRONTEND_REFRESH_SECONDS", "5"))))
-
-
-@st.fragment(run_every=f"{_MONITOR_REFRESH_SECONDS}s")
 def _render_live_monitor_polling_panel(show_inactive: bool) -> None:
+    """Render one monitor snapshot; the tab's refresh button triggers reruns."""
+
     try:
         status = fetch_live_monitor_status()
         status_cols = st.columns(4)

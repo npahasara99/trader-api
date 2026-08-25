@@ -60,9 +60,9 @@ from .market_data import (
     fetch_finnhub_daily_bars_with_meta,
     get_bars as get_timeframe_bars,
     last_completed_market_date,
-    repair_daily_bar_cache,
     resolve_expected_market_date,
 )
+from .market_data_jobs import get_sp500_cache_job_status, schedule_sp500_cache_repair
 from .bot.api import router as bot_router
 from .live_monitor.api import router as live_monitor_router
 from .live_monitor.service import get_live_monitor_service
@@ -954,6 +954,7 @@ class DailyBarsStatusResponse(BaseModel):
     market_data_coverage_pct: float = 0.0
     provider_counts: dict = Field(default_factory=dict)
     last_backfill: Optional[datetime] = None
+    backfill_job: dict = Field(default_factory=dict)
     rows: List[DailyBarsStatusRow]
 
 
@@ -2519,64 +2520,14 @@ def workflow_sp500_daily_opportunities(
         *DEFAULT_PLANNING_CONFIG.benchmark_symbols,
         *sector_benchmarks,
     })
-    benchmark_repair: dict = {}
-    market_data_repair: dict = {}
-    if DEFAULT_PLANNING_CONFIG.sp500_market_data_auto_repair:
-        try:
-            # Repair benchmarks first so their latest completed session resolves
-            # exchange holidays for the broader constituent refresh.
-            benchmark_repair = repair_daily_bar_cache(
-                db,
-                benchmark_symbols,
-                history_days=DEFAULT_PLANNING_CONFIG.sp500_market_data_history_days,
-                min_history_bars=DEFAULT_PLANNING_CONFIG.sp500_market_data_min_history_bars,
-                max_workers=DEFAULT_PLANNING_CONFIG.sp500_market_data_max_workers,
-                commit_every=DEFAULT_PLANNING_CONFIG.sp500_market_data_commit_every,
-                incremental_overlap_days=DEFAULT_PLANNING_CONFIG.sp500_market_data_incremental_overlap_days,
-            )
-            expected_market_date = resolve_expected_market_date(
-                db,
-                benchmark_symbols=tuple(DEFAULT_PLANNING_CONFIG.benchmark_symbols),
-                at=planned_at,
-            )
-            market_data_repair = repair_daily_bar_cache(
-                db,
-                base_universe,
-                history_days=DEFAULT_PLANNING_CONFIG.sp500_market_data_history_days,
-                min_history_bars=DEFAULT_PLANNING_CONFIG.sp500_market_data_min_history_bars,
-                expected_date=expected_market_date,
-                max_workers=DEFAULT_PLANNING_CONFIG.sp500_market_data_max_workers,
-                commit_every=DEFAULT_PLANNING_CONFIG.sp500_market_data_commit_every,
-                incremental_overlap_days=DEFAULT_PLANNING_CONFIG.sp500_market_data_incremental_overlap_days,
-            )
-            print(
-                "SP500 daily-bar repair complete: "
-                f"universe={len(base_universe)} attempted={market_data_repair.get('fetch_attempted', 0)} "
-                f"success={market_data_repair.get('fetch_success', 0)} "
-                f"failed={market_data_repair.get('fetch_failed', 0)} "
-                f"current={market_data_repair.get('current', 0)} "
-                f"seconds={market_data_repair.get('duration_seconds', 0)}"
-            )
-        except Exception as exc:
-            db.rollback()
-            expected_market_date = last_completed_market_date(planned_at)
-            market_data_repair = {
-                "fetch_attempted": 0,
-                "fetch_success": 0,
-                "fetch_failed": len(base_universe),
-                "failure_reasons": [{
-                    "ticker": None,
-                    "reason": "FETCH_FAILED",
-                    "details": f"repair_service:{type(exc).__name__}: {exc}",
-                }],
-            }
-            print(f"SP500 daily-bar repair warning: {type(exc).__name__}: {exc}")
-    else:
+    try:
         expected_market_date = resolve_expected_market_date(
             db,
             benchmark_symbols=tuple(DEFAULT_PLANNING_CONFIG.benchmark_symbols),
             at=planned_at,
         )
+    except Exception:
+        expected_market_date = last_completed_market_date(planned_at)
     prescan_closes_loader, prescan_bars_loader, prescan_cache_coverage = build_bulk_cached_daily_loaders(
         db,
         prescan_support_symbols,
@@ -2609,16 +2560,25 @@ def workflow_sp500_daily_opportunities(
         prescan_cache_coverage["market_data_coverage_pct"],
         prescan_cache_coverage["history_coverage_pct"],
     )
+    prescan_cache_coverage["missing_count"] = len(prescan_cache_coverage.get("missing_symbols") or [])
+    prescan_cache_coverage["stale_count"] = len(prescan_cache_coverage.get("stale_symbols") or [])
+    support_symbol_count = len(set(prescan_support_symbols))
+    support_cache_incomplete = (
+        int(prescan_cache_coverage.get("symbols_current") or 0) < support_symbol_count
+        or int(prescan_cache_coverage.get("symbols_with_sufficient_history") or 0) < support_symbol_count
+    )
+    if DEFAULT_PLANNING_CONFIG.sp500_market_data_auto_repair and support_cache_incomplete:
+        market_data_repair = schedule_sp500_cache_repair(base_universe, benchmark_symbols)
+    else:
+        market_data_repair = get_sp500_cache_job_status()
+    completed_repair_report = market_data_repair.get("report") or {}
+    market_data_repair = {**completed_repair_report, **market_data_repair}
     prescan_cache_coverage["repair"] = {
         key: value
         for key, value in market_data_repair.items()
-        if key not in {"results"}
+        if key not in {"results", "report"}
     }
-    prescan_cache_coverage["benchmark_repair"] = {
-        key: value
-        for key, value in benchmark_repair.items()
-        if key not in {"results"}
-    }
+    prescan_cache_coverage["backfill_in_progress"] = market_data_repair.get("state") in {"queued", "running"}
     prescan_cache_coverage["missing_symbols"] = list(prescan_cache_coverage.get("missing_symbols") or [])[:25]
     prescan_cache_coverage["stale_symbols"] = list(prescan_cache_coverage.get("stale_symbols") or [])[:25]
     broad_scope = not bool((req.sector or "").strip() or (req.industry or "").strip())
@@ -3039,11 +2999,13 @@ def workflow_sp500_daily_opportunities(
     }
     data_incomplete = search_exhaustiveness == "data_incomplete"
     if data_incomplete:
+        backfill_state = str(market_data_repair.get("state") or "idle")
         selection_message = (
             "SCAN INCOMPLETE - MARKET DATA AVAILABLE FOR ONLY "
             f"{len(market_data_tickers)} OF {len(base_universe)} CONSTITUENTS. "
             f"SUFFICIENT TECHNICAL HISTORY EXISTS FOR {len(history_sufficient_tickers)}. "
-            "Trade-quality conclusions are suppressed until data coverage recovers."
+            f"Automatic backfill is {backfill_state}. "
+            "Trade-quality conclusions are suppressed until data coverage recovers; rerun after backfill completes."
         )
     elif not shortlist:
         selection_message = (
@@ -3147,7 +3109,7 @@ def workflow_sp500_daily_opportunities(
         "market_data_repair": {
             key: value
             for key, value in market_data_repair.items()
-            if key not in {"results"}
+            if key not in {"results", "report"}
         },
         "performance": {
             "scan_duration_seconds": round(time.monotonic() - workflow_started, 3),
@@ -3718,6 +3680,7 @@ def daily_bars_status(
         market_data_coverage_pct=round(int(status_counts.get("CURRENT", 0)) / max(len(universe), 1), 4),
         provider_counts=dict(provider_counts),
         last_backfill=last_backfill,
+        backfill_job=get_sp500_cache_job_status(),
         rows=rows,
     )
 
